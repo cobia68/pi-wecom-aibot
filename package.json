@@ -1,0 +1,57 @@
+{
+  "name": "@cobia/pi-wecom-bot",
+  "version": "0.1.0",
+  "description": "WeCom (Enterprise WeChat) smart robot for pi over a long connection: BotID + Secret, no public callback URL; task status, result notifications, images, files and proactive push.",
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "wecom",
+    "bot"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cobia68/pi-wecom-bot.git"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extension/index.ts"
+    ]
+  },
+  "files": [
+    "src/"
+  ],
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "typecheck": "tsc --noEmit",
+    "check:extension": "node scripts/check-extension.mjs",
+    "check": "npm run typecheck && npm test && npm run check:extension",
+    "prepublishOnly": "npm run check"
+  },
+  "dependencies": {
+    "@resvg/resvg-wasm": "2.6.2",
+    "ws": "^8.22.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^1.3.0",
+    "@earendil-works/pi-coding-agent": "^1.3.0",
+    "@earendil-works/pi-tui": "^1.3.0",
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "marked": "18.0.11",
+    "tsx": "^4.23.15",
+    "typebox": "1.3.27",
+    "typescript": "^7.0.2"
+  }
+}

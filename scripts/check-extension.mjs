@@ -1,0 +1,31 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const root = fileURLToPath(new URL("../", import.meta.url));
+const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+const entries = manifest.pi.extensions.map((entry) => resolve(root, entry));
+const sdk = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+const { loadExtensions } = await import(pathToFileURL(resolve(sdk, "core/extensions/loader.js")).href);
+// Load the declared entries without starting a session, connecting a bot, or calling a model.
+const result = await loadExtensions(entries, root);
+assert.deepEqual(result.errors, []);
+assert.equal(result.extensions.length, 1);
+const [extension] = result.extensions;
+assert.ok(extension.commands.has("wecom"));
+const wecom = extension.commands.get("wecom");
+const completions = await wecom.getArgumentCompletions("--h");
+assert.ok(completions.some((item) => item.value === "--help"));
+let help = "";
+await wecom.handler("setup --help", { ui: { notify: (message) => { help = message; } } });
+assert.ok(help.includes("defaultChatId") && help.includes("wecom-bot.json"));
+assert.ok(extension.tools.has("wecom_send"));
+assert.equal(extension.tools.get("wecom_send").definition.parameters.properties.screen.type, "boolean");
+let screenHelp = "";
+await wecom.handler("screen --help", { ui: { notify: (message) => { screenHelp = message; } } });
+assert.ok(screenHelp.includes("imageHosts") && screenHelp.includes("footer"));
+assert.ok((await wecom.getArgumentCompletions("sc")).some((item) => item.value === "screen"));
+assert.ok(extension.handlers.has("session_shutdown"));
+assert.ok(extension.handlers.has("agent_settled"));
+console.log("pi extension loaded: /wecom, /wecom screen, --help, argument completion, wecom_send(screen), lifecycle handlers");
