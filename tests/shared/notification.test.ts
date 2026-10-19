@@ -3,10 +3,10 @@ import { test } from "node:test";
 import { marked } from "marked";
 import {
   formatNotification, formatProcessingStatus, lastParagraphs, MAX_NOTIFICATION_BYTES,
-  notificationPayload, quotedSessions, renderNotification, replaceNotificationBody,
+  notificationPayload, quotedSessions, renderNotification,
 } from "../../src/shared/notification.ts";
 
-const source = { sessionId: "pi-session-1", provider: "test-provider", modelName: "Model A", directoryName: "pi-wecom-bot" };
+const source = { sessionId: "pi-session-1", provider: "test-provider", modelName: "Model A", directoryName: "pi-wecom-aibot" };
 
 test("metadata renders as three unstyled lines without changing body Markdown", () => {
   const message = formatNotification(source, "**正文强调**", { kind: "test" });
@@ -32,7 +32,7 @@ test("excerpt truncation keeps the tail and session ID within the UTF-8 byte lim
   assert.match(message, /pi-session-1/);
   assert.match(message, /test-provider/);
   assert.match(message, /Model A/);
-  assert.match(message, /pi-wecom-bot/);
+  assert.match(message, /pi-wecom-aibot/);
   assert.match(message, /前文已截断/);
   assert.match(message, /最后结论$/);
   assert.equal(message.includes("\ufffd"), false);
@@ -46,7 +46,7 @@ test("metadata and abort notice both count towards the byte budget", () => {
   assert.throws(() => formatNotification(source, "x".repeat(MAX_NOTIFICATION_BYTES)), /20480/);
   const message = formatNotification(source, "汉🙂".repeat(6000), { kind: "completion", tailParagraphs: 2, aborted: true });
   assert.ok(Buffer.byteLength(message, "utf8") <= MAX_NOTIFICATION_BYTES);
-  assert.match(message, /^🔔 pi-wecom-bot · 会话通知  \n/);
+  assert.match(message, /^🔔 pi-wecom-aibot · 会话通知  \n/);
   assert.match(message, /本轮任务已中止/);
   assert.equal(message.includes("\ufffd"), false);
   assert.throws(() => formatNotification({ ...source, modelName: "x".repeat(MAX_NOTIFICATION_BYTES) }, "result", { tailParagraphs: 1 }), /来源信息过长/);
@@ -55,7 +55,7 @@ test("metadata and abort notice both count towards the byte budget", () => {
 test("welcome text uses the same source fields within its plain text byte limit", () => {
   const message = formatNotification(source, "你好🙂".repeat(1000), { kind: "welcome" });
   assert.ok(Buffer.byteLength(message, "utf8") <= 2048);
-  assert.match(message, /^🔔 pi-wecom-bot · 欢迎\n🏷️ test-provider · Model A\n🆔 session: pi-session-1\n\n/);
+  assert.match(message, /^🔔 pi-wecom-aibot · 欢迎\n🏷️ test-provider · Model A\n🆔 session: pi-session-1\n\n/);
   assert.match(message, /已截断/);
   assert.equal(message.includes("\ufffd"), false);
 });
@@ -90,35 +90,6 @@ test("notifications and status messages sent before the header icons still route
     assert.deepEqual(quotedSessions(legacy), ["s1"]);
     assert.deepEqual(quotedSessions(legacy.split("\n").map((line) => `> ${line}`).join("\n")), ["s1"]);
   }
-});
-
-test("a screen body replaces the text and keeps its tail through UTF-8 truncation", () => {
-  const image = "![pi 终端画面](https://cdn.example/screen.png)";
-  for (const tail of [undefined, 3]) {
-    const payload = notificationPayload("completion", source, `HEAD-${"汉🙂".repeat(10_000)}-TAIL`, { tailParagraphs: tail, aborted: true });
-    const prepared = replaceNotificationBody(payload, `${payload.text}\n\n${image}`);
-    const output = renderNotification(source, prepared.text, prepared);
-    assert.ok(Buffer.byteLength(output) <= MAX_NOTIFICATION_BYTES);
-    assert.equal(output.includes("\ufffd"), false);
-    assert.ok(output.includes(image), "the image is the body, not an appended leftover");
-    assert.match(output, /前文已截断/);
-    assert.match(output, /-TAIL\n\n!\[/);
-    assert.match(output, /本轮任务已中止/);
-    assert.deepEqual(quotedSessions(output), [source.sessionId]);
-    assert.match(marked.parse(output, { async: false }), /<img src="https:\/\/cdn.example\/screen.png" alt="pi 终端画面"/);
-  }
-});
-
-test("a replaced body keeps pi's header, stays within the limit and never appends anything after it", () => {
-  const body = "最后一行结果\n\n![pi 终端画面](https://cdn.example/screen.png)";
-  const payload = notificationPayload("notification", source, "旧正文应被替换");
-  const prepared = replaceNotificationBody(payload, body);
-  const output = renderNotification(source, prepared.text, prepared);
-  assert.match(output, /\n\n最后一行结果\n\n!\[pi 终端画面\]/);
-  assert.doesNotMatch(output, /旧正文/);
-  assert.ok(Buffer.byteLength(output) <= MAX_NOTIFICATION_BYTES);
-  assert.deepEqual(quotedSessions(output), [source.sessionId]);
-  assert.throws(() => replaceNotificationBody(payload, "  \n "), /没有可发送的内容/);
 });
 
 test("pi's notification payload, rendered by the gateway, is exactly the formatted notification", () => {

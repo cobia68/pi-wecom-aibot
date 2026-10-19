@@ -98,9 +98,9 @@ test("real pi processes elect one detached gateway, survive the first pi exit an
 });
 
 test("the packaged gateway boots under node_modules with runtime dependencies only", { timeout: 15_000 }, async (t) => {
-  const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-package-test-"));
+  const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-aibot-package-test-"));
   const root = fileURLToPath(new URL("../../", import.meta.url));
-  const packaged = join(sandbox, "node_modules", "pi-wecom-bot");
+  const packaged = join(sandbox, "node_modules", "pi-wecom-aibot");
   await mkdir(join(packaged, "node_modules"), { recursive: true });
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   await Promise.all(["package.json", ...manifest.files].map((file: string) => cp(join(root, file), join(packaged, file), { recursive: true })));

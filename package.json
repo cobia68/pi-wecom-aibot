@@ -1,5 +1,5 @@
 {
-  "name": "@cobia/pi-wecom-bot",
+  "name": "@cobia/pi-wecom-aibot",
   "version": "0.1.0",
   "description": "WeCom (Enterprise WeChat) smart robot for pi over a long connection: BotID + Secret, no public callback URL; task status, result notifications, images, files and proactive push.",
   "keywords": [
@@ -16,7 +16,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cobia68/pi-wecom-bot.git"
+    "url": "git+https://github.com/cobia68/pi-wecom-aibot.git"
   },
   "pi": {
     "extensions": [

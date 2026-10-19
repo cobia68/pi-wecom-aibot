@@ -19,6 +19,8 @@ export interface CapturedScreen {
 	/** The terminal's default colours as #rrggbb. */
 	foreground: string;
 	background: string;
+	/** Theme colours for the header; missing ones are mixed from foreground and background. */
+	palette?: ScreenPalette;
 }
 
 export interface Cell {
@@ -193,22 +195,56 @@ export interface FontMetrics {
 	lineGap: number;
 }
 
+/** Theme colours as #rrggbb. */
+export interface ScreenPalette {
+	accent?: string;
+	muted?: string;
+	dim?: string;
+	warning?: string;
+}
+
+/** A card header above the terminal grid, set in proportional type instead of terminal cells. */
+export interface ScreenHeader {
+	/** The bold first line. */
+	title: string;
+	/** A short status pill at the right of the title. */
+	badge: string;
+	/** The pill's colour: the theme accent (default) or its warning colour. */
+	tone?: "accent" | "warning";
+	/** A muted line under the title. */
+	subtitle: string;
+	/** The smallest line, set monospace: an identifier people compare or copy. */
+	caption: string;
+}
+
 export interface SvgOptions {
+	/** The terminal grid's font stack, monospace first. */
 	families: string[];
+	/** The header's proportional stack, tried before `families`. */
+	sansFamilies?: readonly string[];
 	metrics: FontMetrics;
 	foreground: string;
 	background: string;
+	palette?: ScreenPalette;
+	header?: ScreenHeader;
 	fontSize?: number;
+	lineHeight?: number;
 }
 
 const FONT_SIZE = 15;
-const PADDING = 12;
+/** Margins around the grid; the header band is full-bleed. */
+const PADDING_X = 24;
+const PADDING_Y = 20;
+/** Rows filled edge to edge with one background (messages, tool output) become blocks with round corners. */
+const BLOCK_RADIUS = 6;
+/** Wide glyphs grow toward their two cells, at most by this factor: monospace Latin is wider than half a CJK em. */
+const WIDE_SCALE = 1.12;
 
 /** Cell metrics from the monospace font, clamped so an odd font cannot break the layout. */
-export function cellMetrics(metrics: FontMetrics, fontSize = FONT_SIZE) {
+export function cellMetrics(metrics: FontMetrics, fontSize = FONT_SIZE, lineHeight?: number) {
 	const width = fontSize * Math.min(0.75, Math.max(0.45, metrics.advance || 0.6));
 	const natural = (metrics.ascent || 0.8) + (metrics.descent || 0.2) + (metrics.lineGap || 0);
-	const height = Math.round(fontSize * Math.min(1.6, Math.max(1.15, natural)));
+	const height = Math.round(fontSize * (lineHeight ?? Math.min(1.6, Math.max(1.15, natural))));
 	const ascent = metrics.ascent || 0.8;
 	const descent = metrics.descent || 0.2;
 	// Centre the font's ascent+descent box in the line.
@@ -216,55 +252,81 @@ export function cellMetrics(metrics: FontMetrics, fontSize = FONT_SIZE) {
 	return { width, height, baseline };
 }
 
+interface Placed { c: Cell; col: number; fg: string; bg?: string }
+
 export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions): string {
 	const fontSize = options.fontSize ?? FONT_SIZE;
-	const cell = cellMetrics(options.metrics, fontSize);
+	const cell = cellMetrics(options.metrics, fontSize, options.lineHeight);
 	const used = Math.max(columns, ...rows.map((cells) => cells.reduce((sum, c) => sum + c.width, 0)));
-	const width = Math.ceil(PADDING * 2 + used * cell.width);
-	const height = Math.ceil(PADDING * 2 + Math.max(1, rows.length) * cell.height);
-	const out: string[] = [
-		`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
-		`<rect width="100%" height="100%" fill="${options.background}"/>`,
-		`<g font-family="${escapeXml(fontFamilyList(options.families))}" font-size="${fontSize}">`,
-	];
-	const x = (col: number) => round(PADDING + col * cell.width);
-	rows.forEach((cells, row) => {
-		const top = PADDING + row * cell.height;
-		const baseline = round(top + cell.baseline);
+	const width = Math.ceil(PADDING_X * 2 + used * cell.width);
+	const header = options.header ? headerSvg(options.header, width, options) : undefined;
+	const gridTop = (header?.height ?? 0) + PADDING_Y;
+	const height = Math.ceil(gridTop + rows.length * cell.height + PADDING_Y);
+	const x = (col: number) => round(PADDING_X + col * cell.width);
+	const y = (row: number) => round(gridTop + row * cell.height);
+	const placed = rows.map((cells) => {
 		let col = 0;
-		const placed = cells.map((c) => {
+		return cells.map((c): Placed => {
 			const at = { c, col, fg: (c.inverse ? c.bg : c.fg) ?? (c.inverse ? options.background : options.foreground), bg: c.inverse ? (c.fg ?? options.foreground) : c.bg };
 			col += c.width;
 			return at;
 		});
-		// Backgrounds, merged per colour.
-		for (let i = 0; i < placed.length;) {
-			const bg = placed[i].bg;
+	});
+	// A row filled edge to edge over one background belongs to a block: a message or tool output.
+	const blockColor = placed.map((cells) => {
+		const first = cells[0];
+		const last = cells.at(-1);
+		return first?.bg && last && last.col + last.c.width === used && last.bg === first.bg && cells.every((p) => p.bg) ? first.bg : undefined;
+	});
+	const out: string[] = [
+		`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+		`<rect width="100%" height="100%" fill="${options.background}"/>`,
+		...(header ? [header.svg] : []),
+	];
+	// Consecutive block rows of one colour become one rounded rectangle.
+	for (let row = 0; row < rows.length;) {
+		const color = blockColor[row];
+		let end = row + 1;
+		while (color && end < rows.length && blockColor[end] === color) end++;
+		if (color) out.push(`<rect x="${x(0)}" y="${y(row)}" width="${round(used * cell.width)}" height="${round((end - row) * cell.height)}" rx="${BLOCK_RADIUS}" fill="${color}"/>`);
+		row = end;
+	}
+	// Other backgrounds, merged per colour within a row.
+	placed.forEach((cells, row) => {
+		for (let i = 0; i < cells.length;) {
+			const bg = cells[i].bg;
 			let j = i + 1;
-			while (j < placed.length && placed[j].bg === bg) j++;
-			if (bg) {
-				const end = placed[j - 1].col + placed[j - 1].c.width;
-				out.push(`<rect x="${x(placed[i].col)}" y="${top}" width="${round((end - placed[i].col) * cell.width)}" height="${cell.height}" fill="${bg}"/>`);
+			while (j < cells.length && cells[j].bg === bg) j++;
+			if (bg && bg !== blockColor[row]) {
+				const end = cells[j - 1].col + cells[j - 1].c.width;
+				out.push(`<rect x="${x(cells[i].col)}" y="${y(row)}" width="${round((end - cells[i].col) * cell.width)}" height="${cell.height}" fill="${bg}"/>`);
 			}
 			i = j;
 		}
+	});
+	// A wide glyph is drawn larger, up to filling its two cells, with its centre (about 0.38 em up) kept in place.
+	const wide = Math.min(WIDE_SCALE, Math.max(1, (2 * cell.width) / fontSize));
+	const wideAttrs = wide > 1 ? ` font-size="${round(fontSize * wide)}"` : "";
+	const wideShift = fontSize * (wide - 1) * 0.38;
+	out.push(`<g font-family="${escapeXml(fontFamilyList(options.families))}" font-size="${fontSize}">`);
+	placed.forEach((cells, row) => {
+		const baseline = round(y(row) + cell.baseline);
 		// Underline and strike-through as thin bars.
-		for (const p of placed) {
+		for (const p of cells) {
 			if (p.c.hidden) continue;
 			if (p.c.underline) out.push(`<rect x="${x(p.col)}" y="${round(baseline + fontSize * 0.12)}" width="${round(p.c.width * cell.width)}" height="1" fill="${p.fg}"/>`);
 			if (p.c.strike) out.push(`<rect x="${x(p.col)}" y="${round(baseline - fontSize * 0.3)}" width="${round(p.c.width * cell.width)}" height="1" fill="${p.fg}"/>`);
 		}
 		// Text: narrow single-unit characters share one element with explicit positions; others stand alone, centred.
-		for (let i = 0; i < placed.length;) {
-			const p = placed[i];
-			const visible = !p.c.hidden && p.c.text.trim() !== "";
-			if (!visible) { i++; continue; }
+		for (let i = 0; i < cells.length;) {
+			const p = cells[i];
+			if (p.c.hidden || p.c.text.trim() === "") { i++; continue; }
 			const attrs = textAttributes(p.fg, p.c);
 			if (p.c.width === 1 && p.c.text.length === 1) {
 				const run = [p];
 				let j = i + 1;
-				while (j < placed.length) {
-					const q = placed[j];
+				while (j < cells.length) {
+					const q = cells[j];
 					if (q.c.width !== 1 || q.c.text.length !== 1 || q.c.hidden || q.c.text === " " || textAttributes(q.fg, q.c) !== attrs) break;
 					run.push(q);
 					j++;
@@ -272,13 +334,125 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 				out.push(`<text x="${run.map((r) => x(r.col)).join(" ")}" y="${baseline}"${attrs}>${escapeXml(run.map((r) => r.c.text).join(""))}</text>`);
 				i = j;
 			} else {
-				out.push(`<text x="${round(PADDING + (p.col + p.c.width / 2) * cell.width)}" y="${baseline}" text-anchor="middle"${attrs}>${escapeXml(p.c.text)}</text>`);
+				const wideGlyph = p.c.width === 2;
+				out.push(`<text x="${round(PADDING_X + (p.col + p.c.width / 2) * cell.width)}" y="${wideGlyph ? round(baseline + wideShift) : baseline}" text-anchor="middle"${wideGlyph ? wideAttrs : ""}${attrs}>${escapeXml(p.c.text)}</text>`);
 				i++;
 			}
 		}
 	});
 	out.push("</g></svg>");
 	return out.join("");
+}
+
+/** Header sizes in SVG units, before the PNG zoom. */
+const HEADER = { top: 16, bottom: 14, tile: 36, gap: 12, title: 17, subtitle: 12.5, caption: 11.5, badge: 11.5, pill: 20 } as const;
+/** A 24×24 stroke icon: a terminal prompt, since the image is the terminal. */
+const TERMINAL_ICON = '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>';
+
+/**
+ * A full-width band tinted from the terminal's own colours, so it suits light and dark themes: an
+ * accent tile, the bold title with a status pill, then a muted subtitle and a monospace caption.
+ */
+function headerSvg(header: ScreenHeader, width: number, options: SvgOptions): { svg: string; height: number } {
+	const colors = headerColors(options);
+	const sans = escapeXml(fontFamilyList([...new Set([...(options.sansFamilies ?? []), ...options.families])]));
+	const mono = escapeXml(fontFamilyList(options.families));
+	const advance = Math.min(0.75, Math.max(0.45, options.metrics.advance || 0.6));
+	const tone = header.tone === "warning" ? colors.warning : colors.accent;
+	// Line boxes: title 24, subtitle 18, caption 18; the tile sits beside the first two.
+	const titleTop = HEADER.top;
+	const subtitleTop = titleTop + 24;
+	const captionTop = subtitleTop + 20;
+	const height = captionTop + 18 + HEADER.bottom;
+	const left = PADDING_X;
+	const right = width - PADDING_X;
+	const textX = left + HEADER.tile + HEADER.gap;
+	const tileTop = titleTop + (24 + 18 - HEADER.tile) / 2;
+	const pillWidth = round(fitWidth(header.badge, sansMeasure(HEADER.badge)) + 16);
+	const pillX = round(right - pillWidth);
+	const pillTop = titleTop + (24 - HEADER.pill) / 2;
+	const titleWidth = Math.max(0, pillX - 12 - textX);
+	// Baselines put the text's visual middle (about 0.36 em above the baseline) in the middle of its box.
+	const baseline = (top: number, box: number, size: number) => round(top + box / 2 + size * 0.36);
+	const svg = [
+		`<rect width="${width}" height="${height}" fill="${colors.surface}"/>`,
+		`<rect y="${height}" width="${width}" height="1" fill="${colors.divider}"/>`,
+		`<rect x="${left}" y="${tileTop}" width="${HEADER.tile}" height="${HEADER.tile}" rx="9" fill="${colors.accent}" fill-opacity="0.16"/>`,
+		`<g transform="translate(${left + 9} ${tileTop + 9}) scale(0.75)" fill="none" stroke="${colors.accent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${TERMINAL_ICON}</g>`,
+		`<rect x="${pillX}" y="${pillTop}" width="${pillWidth}" height="${HEADER.pill}" rx="${HEADER.pill / 2}" fill="${tone}" fill-opacity="0.16"/>`,
+		`<text x="${round(pillX + pillWidth / 2)}" y="${baseline(pillTop, HEADER.pill, HEADER.badge)}" text-anchor="middle" font-family="${sans}" font-size="${HEADER.badge}" fill="${tone}">${escapeXml(header.badge)}</text>`,
+		// Widths are estimated; the clip keeps a wider-than-estimated title off the pill.
+		`<clipPath id="header-title"><rect x="${textX}" y="0" width="${round(titleWidth)}" height="${height}"/></clipPath>`,
+		`<text x="${textX}" y="${baseline(titleTop, 24, HEADER.title)}" font-family="${sans}" font-size="${HEADER.title}" font-weight="600" fill="${colors.title}" clip-path="url(#header-title)">${escapeXml(fitText(header.title, titleWidth, sansMeasure(HEADER.title)))}</text>`,
+		`<text x="${textX}" y="${baseline(subtitleTop, 18, HEADER.subtitle)}" font-family="${sans}" font-size="${HEADER.subtitle}" fill="${colors.muted}">${escapeXml(fitText(header.subtitle, right - textX, sansMeasure(HEADER.subtitle)))}</text>`,
+		`<text x="${textX}" y="${baseline(captionTop, 18, HEADER.caption)}" font-family="${mono}" font-size="${HEADER.caption}" fill="${colors.dim}">${escapeXml(fitText(header.caption, right - textX, (s) => HEADER.caption * advance * Math.max(1, visibleWidth(s))))}</text>`,
+	].join("");
+	return { svg, height: height + 1 };
+}
+
+function headerColors(options: SvgOptions) {
+	const { foreground: fg, background: bg, palette = {} } = options;
+	const dark = isDark(bg);
+	return {
+		surface: mix(fg, bg, dark ? 0.06 : 0.035),
+		divider: mix(fg, bg, dark ? 0.14 : 0.1),
+		title: fg,
+		muted: safeColor(palette.muted) ?? mix(fg, bg, 0.68),
+		dim: safeColor(palette.dim) ?? mix(fg, bg, 0.5),
+		accent: safeColor(palette.accent) ?? fg,
+		warning: safeColor(palette.warning) ?? fg,
+	};
+}
+
+function safeColor(color: string | undefined): string | undefined {
+	return color && rgbOf(color) ? color : undefined;
+}
+
+function rgbOf(color: string): [number, number, number] | undefined {
+	const match = /^#([0-9a-f]{6})$/i.exec(color);
+	if (!match) return undefined;
+	const n = parseInt(match[1], 16);
+	return [n >> 16, (n >> 8) & 255, n & 255];
+}
+
+/** `weight` of a over b. */
+function mix(a: string, b: string, weight: number): string {
+	const x = rgbOf(a);
+	const y = rgbOf(b);
+	if (!x || !y) return a;
+	return hex(...x.map((v, i) => Math.round(v * weight + y[i] * (1 - weight))) as [number, number, number]);
+}
+
+function isDark(color: string): boolean {
+	const c = rgbOf(color);
+	return !c || (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255 < 0.5;
+}
+
+type Measure = (segment: string) => number;
+
+/** An estimate for proportional text: wide glyphs (and the ellipsis, full-width in CJK fonts) one em, others about half. */
+function sansMeasure(size: number): Measure {
+	return (segment) => size * (visibleWidth(segment) >= 2 || segment === "…" ? 1 : /[A-Z0-9mw]/.test(segment) ? 0.68 : 0.55);
+}
+
+function fitWidth(text: string, measure: Measure): number {
+	let width = 0;
+	for (const { segment } of graphemes.segment(text)) width += measure(segment);
+	return width;
+}
+
+/** The text, or as much of it as fits followed by an ellipsis. */
+export function fitText(text: string, max: number, measure: Measure): string {
+	if (fitWidth(text, measure) <= max) return text;
+	const budget = max - measure("…");
+	let kept = "";
+	let width = 0;
+	for (const { segment } of graphemes.segment(text)) {
+		width += measure(segment);
+		if (width > budget) break;
+		kept += segment;
+	}
+	return `${kept.trimEnd()}…`;
 }
 
 function textAttributes(fill: string, c: Cell): string {
@@ -296,7 +470,7 @@ function escapeXml(text: string): string {
 		.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function fontFamilyList(families: string[]): string {
+function fontFamilyList(families: readonly string[]): string {
 	return families.map((family) => family === "monospace" ? family : `'${family.replace(/['\\]/g, "")}'`).join(", ");
 }
 
@@ -319,6 +493,8 @@ export interface FontSet {
 	buffers: Uint8Array[];
 	/** Font-family list: monospace first, then fallbacks for CJK and symbols. */
 	families: string[];
+	/** The CJK font's families, the header's proportional type; empty without a CJK font. */
+	sansFamilies: string[];
 	metrics: FontMetrics;
 	/** At least one loaded font has a Chinese glyph (not merely a matching file name). */
 	hasCjk: boolean;
@@ -356,10 +532,10 @@ function findPingFangAsset(environment: FontEnvironment): string | undefined {
 }
 
 function missingCjkFontMessage(platform: NodeJS.Platform = process.platform): string {
-	if (platform === "win32") return "没有找到可用的微软雅黑（Microsoft YaHei）中文字体；请在 Windows 字体设置中启用或恢复系统微软雅黑后重试 /wecom screen";
-	if (platform === "darwin") return "没有找到可用的苹方（PingFang SC）中文字体；请在 macOS 字体册中启用或恢复系统苹方后重试 /wecom screen";
-	if (platform === "linux") return "Linux 没有找到可用的 CJK 中文字体，请安装系统字体后重试 /wecom screen。Debian/Ubuntu：sudo apt install fonts-noto-cjk fontconfig；Arch：sudo pacman -S noto-fonts-cjk fontconfig。";
-	return "当前系统没有找到可用的 CJK 中文字体；请安装支持中文的系统字体后重试 /wecom screen";
+	if (platform === "win32") return "没有找到可用的微软雅黑（Microsoft YaHei）中文字体；请在 Windows 字体设置中启用或恢复系统微软雅黑后重试";
+	if (platform === "darwin") return "没有找到可用的苹方（PingFang SC）中文字体；请在 macOS 字体册中启用或恢复系统苹方后重试";
+	if (platform === "linux") return "Linux 没有找到可用的 CJK 中文字体，请安装系统字体后重试。Debian/Ubuntu：sudo apt install fonts-noto-cjk fontconfig；Arch：sudo pacman -S noto-fonts-cjk fontconfig。";
+	return "当前系统没有找到可用的 CJK 中文字体；请安装支持中文的系统字体后重试";
 }
 
 /** System fonts only: monospace for terminal alignment, YaHei/PingFang on Windows/macOS, installed CJK on Linux. */
@@ -398,7 +574,9 @@ export function findFonts(environment: FontEnvironment = systemEnvironment): { m
 	const rank = (path: string) => {
 		const name = posix.basename(path).toLowerCase();
 		const family = [/notosanscjk|notosanssc|noto.*cjk/, /sourcehansans/, /wqy-microhei/, /wqy-zenhei/, /droidsansfallback/].findIndex((pattern) => pattern.test(name));
-		return (family === -1 ? 9 : family) * 2 + (/bold|black|heavy/.test(name) ? 1 : 0);
+		// The regular sans face first: other weights (Arch ships DemiLight beside Regular), then serif and monospace variants.
+		const variant = /serif|mono/.test(name) ? 2 : /thin|light|medium|bold|black|heavy/.test(name) ? 1 : 0;
+		return (family === -1 ? 9 : family) * 3 + variant;
 	};
 	const cjk = listed.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))[0] ?? [
 		"/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
@@ -406,6 +584,39 @@ export function findFonts(environment: FontEnvironment = systemEnvironment): { m
 		"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
 	].find(exists);
 	return { mono, cjk };
+}
+
+/** A monochrome emoji font; color emoji fonts (COLR/sbix) are not rendered reliably by resvg. */
+export function findEmojiFont(environment: FontEnvironment = systemEnvironment): string | undefined {
+	const { platform, env, home, exists } = environment;
+	const names = ["NotoEmoji-Regular.ttf", "NotoEmoji.ttf"];
+	const firstIn = (join: (...parts: string[]) => string, dirs: string[]) => {
+		for (const name of names) for (const dir of dirs) {
+			const path = join(dir, name);
+			if (exists(path)) return path;
+		}
+		return undefined;
+	};
+	if (platform === "win32") {
+		const dirs = [win32.join(env.WINDIR || env.SystemRoot || "C:\\Windows", "Fonts")];
+		if (env.LOCALAPPDATA) dirs.push(win32.join(env.LOCALAPPDATA, "Microsoft", "Windows", "Fonts"));
+		return firstIn(win32.join, dirs);
+	}
+	if (platform === "darwin") {
+		return firstIn(posix.join, ["/Library/Fonts", posix.join(home, "Library/Fonts"), "/System/Library/Fonts/Supplemental"]);
+	}
+	const known = [
+		posix.join(home, ".local/share/fonts/noto-emoji/NotoEmoji.ttf"),
+		posix.join(home, ".local/share/fonts/NotoEmoji.ttf"),
+		"/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
+		"/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
+		"/usr/share/fonts/truetype/noto-emoji/NotoEmoji-Regular.ttf",
+		"/usr/share/fonts/noto-emoji/NotoEmoji-Regular.ttf",
+	].find(exists);
+	if (known) return known;
+	const listed = (environment.run("fc-list", [":family=Noto Emoji", "file"]) ?? "")
+		.split("\n").map((line) => line.trim().replace(/:\s*$/, "")).filter((path) => path && exists(path));
+	return listed.find((path) => !/color.*emoji|emoji.*color|seguiemj|apple color emoji/i.test(path));
 }
 
 /** Read the configured fonts first, then the discovered ones. A configured file that cannot be read is an error. */
@@ -417,6 +628,7 @@ export function loadFonts(configured: readonly string[] = [], environment: FontE
 	const pathApi = environment.platform === "win32" ? win32 : posix;
 	let metrics: FontMetrics | undefined;
 	let hasCjk = false;
+	let sansFamilies: string[] = [];
 	const add = (file: string, required: boolean, preferredFamilies: readonly string[] = []) => {
 		const path = pathApi.normalize(file.replace(/^~(?=$|[\\/])/, environment.home));
 		const key = environment.platform === "win32" ? path.toLowerCase() : path;
@@ -451,17 +663,25 @@ export function loadFonts(configured: readonly string[] = [], environment: FontE
 	if (found.cjk) {
 		const preferred = environment.platform === "win32" ? ["Microsoft YaHei", "Microsoft YaHei UI"]
 			: environment.platform === "darwin" ? ["PingFang SC"] : ["Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC"];
+		const before = families.length;
 		add(found.cjk, false, preferred);
-		if (environment.platform === "win32") {
-			const bold = found.cjk.replace(/msyh\.(ttc|ttf)$/i, "msyhbd.$1");
-			if (bold !== found.cjk && environment.exists(bold)) add(bold, false, preferred);
-		}
+		// Bold Chinese needs the bold file beside the regular one; PingFang's collection already has its weights.
+		const bold = environment.platform === "win32" ? found.cjk.replace(/msyh\.(ttc|ttf)$/i, "msyhbd.$1")
+			: found.cjk.replace(/-Regular(\.(?:otf|ttf|ttc))$/i, "-Bold$1");
+		if (bold !== found.cjk && environment.exists(bold)) add(bold, false, preferred);
+		sansFamilies = families.slice(before);
 	}
+	// Emoji last: ordinary text keeps the monospace/CJK metrics while resvg falls back for emoji.
+	const emoji = findEmojiFont(environment);
+	const beforeEmoji = families.length;
+	if (emoji) add(emoji, false, ["Noto Emoji"]);
+	const emojiFamilies = families.slice(beforeEmoji);
 	if (!buffers.length) throw new Error(`找不到可用的系统字体。${missingCjkFontMessage(environment.platform)}`);
 	return {
 		platform: environment.platform,
 		buffers,
-		families: [...new Set([...families, "monospace"])],
+		families: [...new Set([...families.slice(0, beforeEmoji), "monospace", ...emojiFamilies])],
+		sansFamilies: [...new Set(sansFamilies)],
 		metrics: metrics ?? { advance: 0.6, ascent: 0.8, descent: 0.2, lineGap: 0 },
 		hasCjk,
 	};
@@ -611,21 +831,32 @@ function loadResvg(): Promise<ResvgModule> {
 export interface RenderOptions {
 	/** Font files from the configuration, tried before the discovered ones. */
 	fontFiles?: readonly string[];
-	/** Values masked in the image. */
+	/** Values masked in the image, header included. */
 	secrets?: readonly string[];
 	/** Overrides for tests. */
 	fonts?: FontSet;
+	/** A card header above the terminal content. */
+	header?: ScreenHeader;
+	fontSize?: number;
+	lineHeight?: number;
 }
 
 /** Render the captured screen to a PNG. */
 export async function renderScreenPng(screen: CapturedScreen, options: RenderOptions = {}): Promise<Uint8Array> {
-	const rows = trimBlankRows(maskSecrets(screen.lines.map(parseAnsiLine), options.secrets ?? []));
+	const secrets = options.secrets ?? [];
+	const rows = trimBlankRows(maskSecrets(screen.lines.map(parseAnsiLine), secrets));
 	if (!rows.length) throw new Error("当前终端画面是空的");
+	const header = options.header && maskHeader(options.header, secrets);
 	const fonts = options.fonts ?? loadFonts(options.fontFiles);
-	if (!fonts.hasCjk && rows.some((cells) => cells.some((cell) => CJK.test(cell.text)))) {
+	const headerText = header ? [header.title, header.badge, header.subtitle, header.caption].join("") : "";
+	if (!fonts.hasCjk && (CJK.test(headerText) || rows.some((cells) => cells.some((cell) => CJK.test(cell.text))))) {
 		throw new Error(missingCjkFontMessage(fonts.platform));
 	}
-	const svg = cellsToSvg(rows, screen.columns, { families: fonts.families, metrics: fonts.metrics, foreground: screen.foreground, background: screen.background });
+	const svg = cellsToSvg(rows, screen.columns, {
+		families: fonts.families, sansFamilies: fonts.sansFamilies, metrics: fonts.metrics,
+		foreground: screen.foreground, background: screen.background, palette: screen.palette,
+		header, fontSize: options.fontSize, lineHeight: options.lineHeight,
+	});
 	const width = Number(/width="(\d+)"/.exec(svg)?.[1] ?? 1);
 	const { Resvg } = await loadResvg();
 	const renderer = new Resvg(svg, {
@@ -642,6 +873,12 @@ export async function renderScreenPng(screen: CapturedScreen, options: RenderOpt
 	} finally {
 		renderer.free();
 	}
+}
+
+/** Header text is masked like the screen: plain text through the same cell parser. */
+function maskHeader(header: ScreenHeader, secrets: readonly string[]): ScreenHeader {
+	const mask = (text: string) => maskSecrets([parseAnsiLine(text)], secrets)[0].map((cell) => cell.text).join("");
+	return { ...header, title: mask(header.title), badge: mask(header.badge), subtitle: mask(header.subtitle), caption: mask(header.caption) };
 }
 
 /** Blank lines at the top and bottom carry nothing. */

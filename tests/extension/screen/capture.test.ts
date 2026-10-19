@@ -4,12 +4,12 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { ScreenCapture } from "../../../src/extension/screen/capture.ts";
 import { WeComStatus } from "../../../src/extension/status.ts";
-import { fixtureTheme, installScreenFixture } from "../../support/screen-fixture.ts";
+import { fixtureTheme, installTuiFixture } from "../../support/tui-fixture.ts";
 
 function setup() {
   let session = "screen-session";
   const ctx = { ui: {}, sessionManager: { getSessionId: () => session } } as unknown as ExtensionContext;
-  const fixture = installScreenFixture(ctx);
+  const fixture = installTuiFixture(ctx);
   const capture = new ScreenCapture();
   capture.bind(ctx);
   return { ctx, capture, ...fixture, switchSession: () => { session = "another-session"; } };
@@ -40,7 +40,7 @@ test("the colored footer name and its invisible theme observer never enter the s
   const screen = capture.capture(ctx);
   assert.equal(screen.lines.length, 9);
   assert.match(screen.lines.join("\n"), /^line-32\n/);
-  assert.doesNotMatch(screen.lines.join("\n"), /wecom-bot|EDITOR|FOOTER/);
+  assert.doesNotMatch(screen.lines.join("\n"), /wecom-aibot|EDITOR|FOOTER/);
   status.clear();
   assert.equal(capture.capture(ctx).lines.length, 10);
   capture.dispose();

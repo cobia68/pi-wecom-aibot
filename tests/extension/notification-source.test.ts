@@ -10,9 +10,9 @@ const context = (cwd: string) => ({
 });
 
 test("notifications show complete session, provider, model and last directory above the body", () => {
-  const result = formatNotification(captureNotificationSource(context("D:\\code\\pi-wecom-bot\\")), "修改完成。\n\n验证通过。");
+  const result = formatNotification(captureNotificationSource(context("D:\\code\\pi-wecom-aibot\\")), "修改完成。\n\n验证通过。");
   assert.equal(result, [
-    "🔔 pi-wecom-bot · 会话通知  ",
+    "🔔 pi-wecom-aibot · 会话通知  ",
     "🏷️ test-provider · Model A  ",
     "🆔 session: pi-session-1",
     "", "修改完成。", "", "验证通过。",

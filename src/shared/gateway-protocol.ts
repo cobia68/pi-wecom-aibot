@@ -53,7 +53,7 @@ export interface SessionTarget {
 	sessionId: string;
 }
 
-/** The conversation of a message, as /wecom whoami reports it: chatid is the userid in a single chat. */
+/** The conversation of a message, as /wecom-aibot whoami reports it: chatid is the userid in a single chat. */
 export interface ChatIdentity {
 	chatId: string;
 	chatType: 1 | 2;
@@ -64,7 +64,7 @@ export interface GatewayStatus {
 	state: WeComState;
 	detail?: string;
 	sessions: number;
-	/** The WeCom connection gave up (subscription refused, taken over) and waits for /wecom start. */
+	/** The WeCom connection gave up (subscription refused, taken over) and waits for /wecom-aibot connect. */
 	stopped?: boolean;
 }
 
@@ -116,7 +116,7 @@ export interface BridgeClient {
 	taskStatus(taskId: string, state: TaskState): boolean;
 	/** Resolves once WeCom acknowledged the push; only a DeliveryError with not_sent is safe to retry. */
 	notify(chat: ChatRef, notification: GatewayNotification): Promise<void>;
-	/** /wecom whoami: resolve with the next permitted message's conversation instead of routing it. */
+	/** /wecom-aibot whoami: resolve with the next permitted message's conversation instead of routing it. */
 	watchIdentity(timeoutMs: number, signal?: AbortSignal): Promise<ChatIdentity>;
 }
 
@@ -126,13 +126,17 @@ export interface BridgeClient {
  */
 export function gatewayEndpoint(botId: string): string {
 	const key = endpointKey(botId);
-	if (process.platform === "win32") return `\\\\.\\pipe\\pi-wecom-${key}`;
-	const preferred = join(homedir(), ".pi", "wecom-gateway", `${key}.sock`);
+	if (process.platform === "win32") return `\\\\.\\pipe\\pi-wecom-aibot-${key}`;
+	const preferred = join(homedir(), ".pi", "wecom-aibot-gateway", `${key}.sock`);
 	// sun_path holds 104–108 bytes; a long home directory falls back to a short per-uid directory.
-	return Buffer.byteLength(preferred) <= 100 ? preferred : join("/tmp", `pi-wecom-${process.getuid?.() ?? "user"}`, `${key}.sock`);
+	return Buffer.byteLength(preferred) <= 100 ? preferred : join("/tmp", `pi-wecom-aibot-${process.getuid?.() ?? "user"}`, `${key}.sock`);
 }
 
-/** Where a protocol-1 gateway listens; it may still serve older pi windows after an upgrade. */
+/**
+ * Where a protocol-1 gateway listens; it may still serve older pi windows after an upgrade.
+ * The path keeps the pre-rename `pi-wecom-` spelling on purpose: it names a historical endpoint
+ * that old gateways are already listening on, so renaming it would hide them instead of waiting.
+ */
 export function legacyGatewayEndpoint(botId: string): string | undefined {
 	const key = endpointKey(botId);
 	if (process.platform === "win32") return undefined; // Same pipe name: the version check in the handshake applies.
@@ -172,9 +176,14 @@ export function validRegistration(value: unknown): value is GatewayRegistration 
 export function validNotification(value: unknown): value is GatewayNotification {
 	if (!value || typeof value !== "object") return false;
 	const notification = value as GatewayNotification;
+	const image = notification.image;
 	return ["notification", "completion", "reply", "test"].includes(notification.kind) && validSource(notification.source)
 		&& typeof notification.text === "string" && Buffer.byteLength(notification.text) <= 512 * 1024
-		&& [notification.excerpt, notification.aborted].every((flag) => flag === undefined || typeof flag === "boolean");
+		&& [notification.excerpt, notification.aborted].every((flag) => flag === undefined || typeof flag === "boolean")
+		&& (image === undefined || (!!image && typeof image === "object"
+			&& image.mime === "image/png"
+			&& typeof image.filename === "string" && !!image.filename && image.filename.length <= 256 && !/[\u0000-\u001f\u007f]/.test(image.filename)
+			&& typeof image.path === "string" && !!image.path && image.path.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(image.path)));
 }
 
 export function validChat(value: unknown): value is ChatRef {

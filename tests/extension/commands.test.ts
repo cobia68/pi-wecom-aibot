@@ -41,7 +41,7 @@ test("the total help lists its sections in a fixed order and never leaves traili
 });
 
 test("option rows line up, with or without a chained action", () => {
-	for (const input of ["setup --help", "setup whoami --help", "test --help", "screen --help", "whoami --help", "help help"]) {
+	for (const input of ["setup --help", "setup whoami --help", "test --help", "whoami --help", "test -h"]) {
 		const rows = sectionRows(topicHelp(input), "选项");
 		assert.ok(rows.length >= 1, input);
 		const columns = new Set(rows.map(descriptionColumn));
@@ -51,69 +51,49 @@ test("option rows line up, with or without a chained action", () => {
 
 test("every topic help has a usage line, the config path and a pointer to the total help", () => {
 	const names = (completeWecom("") ?? []).map((item) => item.value).filter((value) => !value.startsWith("-"));
-	assert.ok(names.length >= 10);
+	assert.ok(names.length >= 8);
 	for (const name of names) {
-		// `help --help` is the total help; `help help` is the topic help for the help command itself.
-		const help = topicHelp(name === "help" ? "help help" : `${name} --help`);
-		assert.match(help, new RegExp(`^用法：/wecom \\[?${name}`, "m"), name);
+		const help = topicHelp(`${name} --help`);
+		assert.match(help, new RegExp(`^用法：/wecom-aibot \\[?${name}`, "m"), name);
 		assert.match(help, /配置文件/, name);
-		assert.match(help, /\/wecom --help/, name);
+		assert.match(help, /\/wecom-aibot --help/, name);
 	}
 });
 
 test("the total help describes the commands it lists, and a topic help never repeats another command's usage", () => {
 	const commands = sectionRows(wecomHelpText(), "子命令");
-	assert.equal(commands.length, 10);
+	assert.equal(commands.length, 8);
+	// `help` is not an action: only `--help` opens help, so it must not appear among the subcommands.
+	assert.doesNotMatch(wecomHelpText(), /^  help  /m);
 	for (const row of commands) assert.ok(descriptionColumn(row), row);
 	// Usage and options live under the command itself, not in the total help.
-	assert.doesNotMatch(wecomHelpText(), /\/wecom setup \[whoami\]/);
-	assert.doesNotMatch(topicHelp("start --help"), /\/wecom setup \[--bot-id/);
+	assert.doesNotMatch(wecomHelpText(), /\/wecom-aibot setup \[whoami\]/);
+	assert.doesNotMatch(topicHelp("connect --help"), /\/wecom-aibot setup \[--bot-id/);
 });
 
-test("screen and setup help explain platform fonts without bundling or automatic downloads", () => {
-	for (const input of ["screen --help", "setup --help"]) {
-		const help = topicHelp(input);
-		assert.match(help, /Windows.*微软雅黑/);
-		assert.match(help, /macOS.*苹方/);
-		assert.match(help, /Linux.*CJK.*安装/);
-		assert.match(help, /不内置字体.*不自动下载/);
-	}
-});
-
-test("setup help documents only HTTP image uploads and their configurable fields", () => {
-	for (const input of ["setup --help", "setup whoami --help"]) {
-		const help = topicHelp(input);
-		assert.match(help, /imageHosts.*HTTP/);
-		assert.match(help, /type 只能是 http/);
-		for (const field of ["url", "fileField", "fields", "headers", "urlPath"]) assert.ok(help.includes(field), field);
-		assert.doesNotMatch(help, /gitea/i);
-	}
-});
-
-test("screen help documents the exclusive text and image bodies", () => {
-	const help = topicHelp("screen --help");
-	assert.match(help, /screenMode=text/);
-	assert.match(help, /screenMode=image/);
-	assert.match(help, /二选一/);
-	assert.match(help, /最后 20 行/);
-	assert.match(help, /imageHosts/, "image mode names the required host setting");
-});
-
-test("setup help documents screenMode and the opt-in automatic connection", () => {
+test("setup help documents manual per-session connection and no removed screen settings", () => {
 	const help = topicHelp("setup --help");
-	assert.match(help, /screenMode.*text.*image/);
-	assert.match(help, /imageHosts.*image/);
-	assert.match(help, /enabled.*默认关闭/);
+	assert.match(help, /每个 session.*手动.*\/wecom-aibot connect/);
+	assert.match(help, /enabled.*忽略/);
+	assert.doesNotMatch(help, /"enabled"\s*:|screenMode|imageHosts|fontFiles|\/wecom-aibot screen/);
+});
+
+test("connection help never promises persisted consent or recommends the old start action", () => {
+	for (const help of [wecomHelpText(), topicHelp("setup --help"), topicHelp("connect --help"), topicHelp("disconnect --help")]) {
+		assert.match(help, /当前 (?:pi|session)/);
+		assert.match(help, /每个 session.*手动.*\/wecom-aibot connect/);
+		assert.doesNotMatch(help, /enabled 设为|开启自动接入|会打开|\bstart\b/);
+	}
 });
 
 test("a bare action documents no options and offers no --help, while a parameterized command does", () => {
-	for (const name of ["status", "start", "stop", "log", "logout"]) {
+	for (const name of ["status", "connect", "disconnect", "log", "logout"]) {
 		const help = topicHelp(`${name} --help`);
 		assert.doesNotMatch(help, /^选项$/m, name);
 		assert.doesNotMatch(help, /-h, --help/, name);
 		assert.equal(completeWecom(`${name} -`), null, name);
 	}
-	for (const name of ["setup", "whoami", "test", "screen"]) {
+	for (const name of ["setup", "whoami", "test"]) {
 		assert.match(topicHelp(`${name} --help`), /^选项$/m, name);
 		assert.match(topicHelp(`${name} --help`), /-h, --help/, name);
 		assert.ok(completeWecom(`${name} -`)?.some((item) => item.value.endsWith("--help")), name);

@@ -36,7 +36,7 @@ export class GatewaySelectionStore {
 
 export function gatewayStateFile(botId: string): string {
 	const key = createHash("sha256").update(botId).digest("hex").slice(0, 32);
-	return join(homedir(), ".pi", "wecom-gateway", `${key}.json`);
+	return join(homedir(), ".pi", "wecom-aibot-gateway", `${key}.json`);
 }
 
 function validEntry(value: unknown): value is [string, SessionTarget] {

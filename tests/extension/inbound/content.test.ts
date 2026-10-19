@@ -12,6 +12,21 @@ function message(id: string, attachments = [image(id)]): InboundMessage {
 const images = (prepared: Awaited<ReturnType<InboundContentPreparer["prepare"]>>) => prepared.content.filter((part) => part.type === "image");
 const text = (prepared: Awaited<ReturnType<InboundContentPreparer["prepare"]>>) => prepared.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
 
+test("the source chat is returned separately and never injected into the prompt", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => png());
+  const preparer = new InboundContentPreparer();
+  const signal = new AbortController().signal;
+  const plain = await preparer.prepare(tmpdir(), { ...message("plain", []), text: "用户正文" }, signal);
+  assert.equal(text(plain), "用户正文");
+  assert.deepEqual(plain.chat, { chatId: "user", chatType: 1, userid: "user" });
+  assert.doesNotMatch(text(plain), /\[企业微信|chatid=/);
+  plain.release();
+  const imageOnly = await preparer.prepare(tmpdir(), message("image-only"), signal);
+  assert.equal(text(imageOnly), "", "the old placeholder/header is gone");
+  assert.equal(images(imageOnly).length, 1);
+  imageOnly.release();
+});
+
 test("queued images share one byte budget, release frees it, and a second release cannot steal another owner's bytes", async (t) => {
   t.mock.method(globalThis, "fetch", async () => png());
   // An 8-byte fixture encodes to 12 Base64 bytes: this budget admits exactly one retained image.

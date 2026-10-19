@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -8,28 +9,29 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { GatewayClientOptions } from "../../src/extension/gateway-client.ts";
 import type { BridgeClient, GatewayStatus } from "../../src/shared/gateway-protocol.ts";
 import type { WeComState } from "../../src/shared/wecom-protocol.ts";
-import { fixtureTheme } from "../support/screen-fixture.ts";
+import { fixtureTheme } from "../support/tui-fixture.ts";
 
-const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-status-test-"));
+const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-aibot-status-test-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = sandbox;
 const { default: extension } = await import("../../src/extension/index.ts");
-const { saveConfig, clearConfig } = await import("../../src/extension/config.ts");
-const config = { botId: "private-bot-id", secret: "private-secret", enabled: true, welcome: "hello" };
-const key = "wecom-bot";
+const { CONFIG_FILE, saveConfig, clearConfig } = await import("../../src/extension/config.ts");
+const config = { botId: "private-bot-id", secret: "private-secret", welcome: "hello" };
+const key = "wecom-aibot";
 const theme = fixtureTheme("dark");
-const label = (color: "success" | "warning" | "error") => theme.fg(color, "wecom-bot");
+const label = (color: "success" | "warning" | "error") => theme.fg(color, "wecom-aibot");
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
-let instances: { emit(name: string): Promise<void> }[];
+let instances: { emit(name: string, event?: Record<string, unknown>): Promise<void> }[];
 
 /** A controllable IPC seam: status metadata precedes state callbacks, just as in GatewayClient. */
 function connection(options: GatewayClientOptions) {
   let ready = false;
   let state: WeComState = "disconnected";
   let detail: string | undefined;
+  const stopped: (string | undefined)[] = [];
   const client: BridgeClient = {
     start() { state = "connecting"; options.onState?.(state); },
-    stop(reason) { ready = false; state = "disconnected"; detail = reason; options.onState?.(state, detail); },
+    stop(reason) { stopped.push(reason); ready = false; state = "disconnected"; detail = reason; options.onState?.(state, detail); },
     isReady: () => ready,
     updateSource() {}, updateWelcome() {}, resume() {},
     taskStatus: () => ready,
@@ -37,7 +39,7 @@ function connection(options: GatewayClientOptions) {
     async watchIdentity() { throw new Error("identity is not used by status tests"); },
   };
   return {
-    client,
+    client, stopped,
     publish(status: GatewayStatus, canSend = status.state === "subscribed") {
       ready = canSend;
       options.onStatus?.(status);
@@ -85,10 +87,19 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
   const result = {
     ctx, state, clients, statuses, changes, notices,
     command: (input: string) => command(input, ctx),
-    async emit(name: string) { for (const handler of handlers.get(name) ?? []) await handler({ type: name }, ctx); },
+    async emit(name: string, event: Record<string, unknown> = {}) {
+      for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx);
+    },
   };
   instances.push(result);
   return result;
+}
+
+async function connect(h: ReturnType<typeof harness>) {
+  await h.emit("session_start");
+  await h.command("connect");
+  assert.equal(h.clients.length, 1);
+  return h.clients[0];
 }
 
 beforeEach(() => { instances = []; saveConfig(config); });
@@ -100,62 +111,82 @@ after(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-test("loading a configured extension does not show its name until the bridge starts", async () => {
+for (const enabled of [true, false, undefined]) {
+  test(`every new session stays disconnected with legacy enabled=${enabled}; querying never connects`, async () => {
+    writeFileSync(CONFIG_FILE, JSON.stringify({ ...config, enabled }));
+    const saved = readFileSync(CONFIG_FILE, "utf8");
+    const h = harness();
+    assert.equal(h.clients.length, 0);
+    await h.emit("session_start");
+    assert.deepEqual(h.notices, [], "startup must not announce a connection");
+    await h.command("status");
+    await h.command("--help");
+    await h.emit("model_select");
+    await h.emit("agent_start");
+    assert.equal(h.clients.length, 0, "the configuration cannot opt a session into receiving tasks");
+    assert.deepEqual(h.changes, []);
+    assert.match(h.notices[0], /当前 pi：未连接/);
+    assert.doesNotMatch(h.notices[0], /自动连接：开|已启动/);
+    assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved);
+  });
+}
+
+test("manual connect is silent and invisible until both registration and subscription are usable", async () => {
+  const saved = readFileSync(CONFIG_FILE, "utf8");
   const h = harness();
+  const client = await connect(h);
+  assert.deepEqual(h.changes, [], "beginning registration must not show the footer label");
+  assert.deepEqual(h.notices, [], "no static registering notice belongs in the transcript");
+  client.publish({ state: "connected", sessions: 1 });
+  assert.deepEqual(h.changes, [], "an open upstream socket is not ready");
+  client.publish({ state: "subscribed", sessions: 1 }, false);
+  assert.deepEqual(h.changes, [], "an unusable transport must not appear connected");
+  client.publish({ state: "connecting", sessions: 1 });
+  client.publish({ state: "subscribed", sessions: 1 });
+  assert.deepEqual(h.changes, [label("success")]);
+  assert.deepEqual(h.notices, [], "success is represented only in the footer");
+  await h.command("connect");
+  assert.equal(h.clients.length, 1, "repeated connect must retain the same registration");
+  assert.deepEqual(h.changes, [label("success")]);
+  assert.deepEqual(h.notices, [], "already connected must not announce that it is registering");
+  assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved, "connect is session-local, not a configuration edit");
+});
+
+test("the footer stays empty when unconfigured; connect explains that setup is needed", async () => {
+  clearConfig();
+  const h = harness();
+  await h.emit("session_start");
+  await h.command("--help");
+  await h.command("connect");
   assert.equal(h.clients.length, 0);
   assert.deepEqual(h.changes, []);
-  await h.emit("session_start");
-  assert.equal(h.clients.length, 1);
-  assert.equal(h.statuses.get(key), label("warning"));
+  assert.match(h.notices.at(-1)!, /尚未配置.*\/wecom-aibot setup/);
 });
 
-test("the footer stays empty when unconfigured or disabled; querying status never starts it", async () => {
-  clearConfig();
-  const unconfigured = harness();
-  await unconfigured.emit("session_start");
-  await unconfigured.command("--help");
-  assert.equal(unconfigured.clients.length, 0);
-  assert.deepEqual(unconfigured.changes, []);
-  saveConfig({ ...config, enabled: false });
-  const disabled = harness();
-  await disabled.emit("session_start");
-  await disabled.command("status");
-  await disabled.emit("model_select");
-  assert.equal(disabled.clients.length, 0);
-  assert.deepEqual(disabled.changes, []);
-  await disabled.command("start");
-  assert.equal(disabled.statuses.get(key), label("warning"));
-});
-
-test("green means ready, not just an open socket; metadata never changes the name or its color", async () => {
+test("metadata never changes the footer name or leaks connection details", async () => {
   const h = harness();
-  await h.emit("session_start");
-  assert.equal(h.statuses.get(key), label("warning"));
-  const client = h.clients[0];
-  client.publish({ state: "connected", sessions: 1 });
-  assert.equal(h.statuses.get(key), label("warning"), "subscription has not completed");
+  const client = await connect(h);
   client.publish({ state: "subscribed", sessions: 1 });
   assert.equal(h.statuses.get(key), label("success"));
   const count = h.changes.length;
   client.publish({ state: "subscribed", sessions: 99, detail: "private-secret\n\x1b[2Jprivate-chat" });
   await h.emit("model_select");
   assert.equal(h.changes.length, count);
-  for (const text of h.changes) if (text !== undefined) assert.equal(stripVTControlCharacters(text), "wecom-bot");
+  for (const text of h.changes) if (text !== undefined) assert.equal(stripVTControlCharacters(text), "wecom-aibot");
   assert.doesNotMatch(h.changes.join("\n"), /private|session-|\x1b\[2J/);
   client.publish({ state: "subscribed", sessions: 99 }, false);
   assert.equal(h.statuses.get(key), label("warning"), "an unusable transport must not appear green");
 });
 
-test("connection events automatically change green to yellow or red, then back to green after recovery", async () => {
+test("connection events change green to yellow or red, then back to green after recovery", async () => {
   const h = harness();
-  await h.emit("session_start");
-  const client = h.clients[0];
+  const client = await connect(h);
   client.publish({ state: "subscribed", sessions: 1 });
   client.publish({ state: "disconnected", sessions: 1, detail: "outage" });
   assert.equal(h.statuses.get(key), label("warning"));
   client.publish({ state: "disconnected", sessions: 1, detail: "outage", stopped: true });
   assert.equal(h.statuses.get(key), label("error"), "the state callback need not run when only stopped changes");
-  await h.command("start");
+  await h.command("connect");
   assert.equal(h.clients.length, 1, "resuming an upstream must not replace the local bridge");
   client.publish({ state: "connecting", sessions: 1 });
   assert.equal(h.statuses.get(key), label("warning"));
@@ -163,88 +194,144 @@ test("connection events automatically change green to yellow or red, then back t
   assert.equal(h.statuses.get(key), label("success"));
 });
 
-test("a stopped first subscription colors the name red", async () => {
+test("a refused first subscription explains the failure without installing a connection label", async () => {
   const h = harness();
-  await h.emit("session_start");
-  h.clients[0].publish({ state: "disconnected", sessions: 1, stopped: true, detail: "subscribe refused" });
-  assert.equal(h.statuses.get(key), label("error"));
+  const client = await connect(h);
+  client.publish({ state: "disconnected", sessions: 1, stopped: true, detail: "subscribe refused" });
+  assert.deepEqual(h.changes, []);
+  assert.ok(h.notices.some((message) => /subscribe refused.*\/wecom-aibot connect/.test(message)));
+  await h.command("connect");
+  client.publish({ state: "connecting", sessions: 1 });
+  client.publish({ state: "subscribed", sessions: 1 });
+  assert.equal(h.statuses.get(key), label("success"));
+  assert.ok(h.notices.every((message) => !/已通过共享网关|已恢复|正在向共享网关注册/.test(message)));
 });
 
-test("stop clears only this extension's entry, and late callbacks cannot overwrite a restarted bridge", async () => {
+test("an initial connection taking over 30 seconds reports once, without stale progress or a recovery notice", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const h = harness();
-  await h.emit("session_start");
-  const old = h.clients[0];
+  const client = await connect(h);
+  t.mock.timers.tick(29_999);
+  assert.deepEqual(h.notices, []);
+  t.mock.timers.tick(1);
+  assert.equal(h.notices.length, 1);
+  assert.match(h.notices[0], /30 秒.*\/wecom-aibot status.*\/wecom-aibot log/);
+  assert.deepEqual(h.changes, []);
+  client.publish({ state: "connecting", sessions: 0, detail: "retrying" });
+  t.mock.timers.tick(30_000);
+  assert.equal(h.notices.length, 1, "retries must not produce one warning each");
+  client.publish({ state: "subscribed", sessions: 1 });
+  assert.equal(h.statuses.get(key), label("success"));
+  assert.equal(h.notices.length, 1, "first success belongs only in the footer");
+});
+
+test("disconnect clears only this entry; late callbacks cannot overwrite a reconnected bridge", async () => {
+  const saved = readFileSync(CONFIG_FILE, "utf8");
+  const h = harness();
+  const old = await connect(h);
   old.publish({ state: "subscribed", sessions: 1 });
-  await h.command("stop");
+  await h.command("disconnect");
   assert.equal(h.statuses.has(key), false);
   assert.equal(h.statuses.get("another-extension"), "Other status");
+  assert.equal(old.stopped.length, 1);
+  assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved, "disconnect must not change shared configuration");
   const count = h.changes.length;
   await h.command("status");
   await h.emit("model_select");
   old.publish({ state: "subscribed", sessions: 3, detail: "late" });
   old.fail("late registration failure");
   assert.equal(h.changes.length, count);
-  await h.command("start");
-  assert.equal(h.statuses.get(key), label("warning"));
+  await h.command("connect");
+  assert.equal(h.statuses.has(key), false);
   old.publish({ state: "disconnected", sessions: 0, stopped: true });
-  assert.equal(h.statuses.get(key), label("warning"));
+  assert.equal(h.statuses.has(key), false);
   h.clients[1].publish({ state: "subscribed", sessions: 1 });
   assert.equal(h.statuses.get(key), label("success"));
 });
 
-test("session replacement clears the old entry and cannot inherit its connection status", async () => {
+for (const reason of ["new", "resume", "fork", "reload"] as const) {
+  test(`session ${reason} drops the old registration and requires an explicit new connect`, async () => {
+    const h = harness();
+    const old = await connect(h);
+    old.publish({ state: "subscribed", sessions: 1 });
+    await h.emit("session_shutdown", { reason });
+    h.state.sessionId = "replacement-session";
+    await h.emit("session_start", { reason });
+    assert.equal(old.stopped.length, 1);
+    assert.equal(h.clients.length, 1, "a replacement must not create a client automatically");
+    assert.equal(h.statuses.has(key), false);
+    old.publish({ state: "subscribed", sessions: 1, detail: "late" });
+    assert.equal(h.statuses.has(key), false);
+    await h.command("connect");
+    assert.equal(h.clients.length, 2);
+    assert.equal(h.statuses.has(key), false, "connection readiness cannot be inherited");
+    h.clients[1].publish({ state: "subscribed", sessions: 1 });
+    assert.equal(h.statuses.get(key), label("success"));
+  });
+}
+
+test("a changed session ID revokes the old registration even before a lifecycle event arrives", async () => {
   const h = harness();
-  await h.emit("session_start");
-  const old = h.clients[0];
+  const old = await connect(h);
   old.publish({ state: "subscribed", sessions: 1 });
-  h.state.sessionId = "replacement-session";
+  h.state.sessionId = "unexpected-new-session";
   await h.emit("model_select");
-  assert.equal(h.statuses.has(key), false, "a bridge for a different session is not this session's connection");
-  await h.emit("session_start");
-  assert.equal(h.statuses.get(key), label("warning"));
-  old.publish({ state: "subscribed", sessions: 1, detail: "late" });
-  assert.equal(h.statuses.get(key), label("warning"));
-  h.clients[1].publish({ state: "subscribed", sessions: 1 });
-  assert.equal(h.statuses.get(key), label("success"));
+  assert.equal(h.statuses.has(key), false);
+  assert.equal(old.stopped.length, 1, "hiding an old registration is not sufficient; it must be revoked");
+  await h.command("status");
+  assert.match(h.notices.at(-1)!, /当前 pi：未连接/);
 });
 
 for (const end of ["logout", "session_shutdown", "fatal"] as const) {
-  test(`${end} removes the status instead of leaving an apparently online bot`, async () => {
+  test(`${end} removes the status and an ended session cannot silently reconnect`, async () => {
     const h = harness();
-    await h.emit("session_start");
-    const client = h.clients[0];
+    const client = await connect(h);
     client.publish({ state: "subscribed", sessions: 1 });
     assert.equal(h.statuses.get(key), label("success"));
     if (end === "logout") await h.command("logout");
     else if (end === "fatal") client.fail("registration rejected");
-    else await h.emit("session_shutdown");
+    else await h.emit("session_shutdown", { reason: "quit" });
+    assert.equal(client.stopped.length, 1);
     assert.equal(h.statuses.has(key), false);
     const count = h.changes.length;
     client.publish({ state: "subscribed", sessions: 1, detail: "late" });
     assert.equal(h.changes.length, count);
     if (end === "fatal") assert.ok(h.notices.some((message) => message.includes("registration rejected")));
+    await h.emit("session_start");
+    assert.equal(h.clients.length, 1);
+    assert.equal(h.statuses.has(key), false);
   });
 }
 
 for (const mode of ["rpc", "json", "print"] as const) {
-  test(`${mode} mode still connects without producing terminal status updates`, async () => {
+  test(`${mode} mode requires manual connect and never produces terminal status updates`, async () => {
     const h = harness(mode);
-    await h.emit("session_start");
-    h.clients[0].publish({ state: "subscribed", sessions: 1 });
-    assert.equal(h.clients[0].client.isReady(), true);
-    await h.command("stop");
+    const client = await connect(h);
+    client.publish({ state: "subscribed", sessions: 1 });
+    assert.equal(client.client.isReady(), true);
+    await h.command("disconnect");
     assert.deepEqual(h.changes, []);
   });
 }
 
-test("one pi stopping cannot remove another pi's status", async () => {
+test("connecting, disconnecting or exiting one pi cannot opt another pi in or out", async () => {
+  const saved = readFileSync(CONFIG_FILE, "utf8");
   const a = harness();
   const b = harness();
   await a.emit("session_start");
   await b.emit("session_start");
-  a.clients[0].publish({ state: "subscribed", sessions: 2 });
+  await a.command("connect");
+  a.clients[0].publish({ state: "subscribed", sessions: 1 });
+  assert.equal(b.clients.length, 0, "another pi must remain disconnected until its own command");
+  await b.command("connect");
   b.clients[0].publish({ state: "subscribed", sessions: 2 });
-  await a.command("stop");
+  await a.command("disconnect");
   assert.equal(a.statuses.has(key), false);
   assert.equal(b.statuses.get(key), label("success"));
+  await a.emit("session_shutdown");
+  const c = harness();
+  await c.emit("session_start");
+  assert.equal(c.clients.length, 0);
+  assert.equal(b.statuses.get(key), label("success"));
+  assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved);
 });

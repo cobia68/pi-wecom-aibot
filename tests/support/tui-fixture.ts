@@ -9,7 +9,7 @@ const themes = await import(pathToFileURL(join(sdk, "modes/interactive/theme/the
 export const fixtureTheme = (name: string): Theme => themes.getThemeByName(name);
 
 /** The real Container layout pi 1.3 mounts; only terminal I/O and the editor/footer text are fake. */
-export function installScreenFixture(ctx: ExtensionContext) {
+export function installTuiFixture(ctx: ExtensionContext) {
   const state = { lines: ["initial screen"], columns: 80, rows: 16, overlay: false };
   const statuses = new Map<string, string>();
   const widgets = new Map<string, Component & { dispose?: () => void }>();

@@ -29,6 +29,23 @@ const TITLES: Record<NotificationKind, string> = {
 /** Header line icons. They lead each line; quotedSessions accepts the session line with or without its icon. */
 const ICONS = { title: "🔔", model: "🏷️", session: "🆔" } as const;
 
+/** The title a notification kind shows in Markdown and in a rendered image. */
+export function notificationTitle(kind: NotificationKind): string {
+	return TITLES[kind];
+}
+
+/** The source fields of a rendered image, cleaned of control characters; the session reads as in Markdown. */
+export function notificationHeader(source: NotificationSource, kind: NotificationKind) {
+	validateSessionId(source.sessionId);
+	const clean = (value: string) => metadataValue(value, true);
+	return {
+		directory: clean(source.directoryName),
+		title: TITLES[kind],
+		model: `${clean(source.provider)} · ${clean(source.modelName)}`,
+		session: `session: ${clean(source.sessionId)}`,
+	};
+}
+
 /** Blank lines delimit paragraphs; fenced code blocks remain a single block. */
 export function lastParagraphs(text: string, count: number): string {
 	if (!Number.isInteger(count) || count < 1 || count > 20) throw new Error("tail_paragraphs 必须是 1 到 20 的整数");
@@ -157,20 +174,6 @@ export function notificationPayload(
 	const bounded = Buffer.byteLength(body, "utf8") <= MAX_NOTIFICATION_BODY_BYTES ? body
 		: sliceUtf8(body, MAX_NOTIFICATION_BODY_BYTES, excerpt);
 	return { kind, source: { ...source }, text: bounded, ...(excerpt ? { excerpt } : {}), ...(options.aborted ? { aborted: true } : {}) };
-}
-
-/**
- * Replace the body with one screen representation: a notification is either text or an image, never both.
- * The body keeps its tail when it exceeds the gateway's byte budget, so the end of the screen (where the
- * answer usually is) survives; `excerpt` also lets the gateway trim a body this build overestimated.
- */
-export function replaceNotificationBody(notification: GatewayNotification, body: string): GatewayNotification {
-	const text = body.trim();
-	if (!text) throw new Error("当前 pi 会话没有可发送的内容");
-	const overhead = Buffer.byteLength(renderNotification(notification.source, "x", notification), "utf8") - 1;
-	const budget = MAX_NOTIFICATION_BYTES - overhead;
-	if (budget < 0) throw new Error("通知来源信息过长，无法容纳正文");
-	return { ...notification, text: truncateContent(text, budget, true), excerpt: true };
 }
 
 /**

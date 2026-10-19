@@ -1,5 +1,5 @@
 node_modules/
 *.tgz
-.pi-wecom-files/
+.pi-wecom-aibot-files/
 .env
 .env.*

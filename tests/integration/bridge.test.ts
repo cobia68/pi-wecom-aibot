@@ -6,10 +6,9 @@ import { after, afterEach, beforeEach, test, type TestContext } from "node:test"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
 import { LoopbackClient } from "../support/loopback-client.ts";
-import { installScreenFixture } from "../support/screen-fixture.ts";
-import type { CapturedScreen, RenderOptions } from "../../src/extension/screen/render.ts";
+import { installTuiFixture } from "../support/tui-fixture.ts";
 
-const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-bridge-test-"));
+const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-aibot-bridge-test-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = sandbox;
 const { default: extension } = await import("../../src/extension/index.ts");
@@ -27,8 +26,7 @@ let clock: TestContext["mock"]["timers"];
 let sessionId: string;
 let sessionEntries: any[];
 let autoAcknowledge: boolean;
-let renderedScreens: CapturedScreen[];
-let rasterise: (screen: CapturedScreen, options?: RenderOptions) => Promise<Uint8Array>;
+let rasterise: (screen: any, options?: any) => Promise<Uint8Array>;
 const modelA = { id: "model-a", name: "Model A", provider: "test-provider" };
 const modelB = { id: "model-b", name: "Model B", provider: "another-provider" };
 
@@ -90,8 +88,7 @@ beforeEach(async (t) => {
   sessionId = "pi-session-1";
   sessionEntries = [];
   autoAcknowledge = true;
-  renderedScreens = [];
-  rasterise = async () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  rasterise = async () => Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
   ctx = {
     hasUI: false, cwd: sandbox, isIdle: () => idle,
     model: { ...modelA },
@@ -115,19 +112,23 @@ beforeEach(async (t) => {
     registerTool(tool: { name: string }) { tools.set(tool.name, tool); },
     sendUserMessage(content: any, options: any) { sent.push({ content, options }); idle = false; },
   } as unknown as ExtensionAPI;
-  saveConfig({ botId: "test-bot", secret: "test-secret", enabled: true, welcome: "hello" });
+  saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello" });
   // The real gateway in-process: its routing, status messages and rendered notifications are what these tests assert.
-  extension(pi, { renderScreen: (screen, options) => {
-    renderedScreens.push(structuredClone(screen));
-    return rasterise(screen, options);
-  }, createClient: (options) => new LoopbackClient(options, (url) => {
-    const socket = new FakeWebSocket(url);
-    socket.onSend = (frame) => {
-      if (frame.cmd === "ping" || (autoAcknowledge && frame.cmd === "aibot_send_msg")) socket.acknowledge(frame);
-    };
-    return socket;
-  }) });
+  extension(pi, {
+    renderScreen: (screen, options) => rasterise(screen, options),
+    createClient: (options) => new LoopbackClient(options, (url) => {
+      const socket = new FakeWebSocket(url);
+      socket.onSend = (frame) => {
+        if (frame.cmd === "aibot_upload_media_init") socket.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { upload_id: "upload-1" } });
+        else if (frame.cmd === "aibot_upload_media_chunk") socket.acknowledge(frame);
+        else if (frame.cmd === "aibot_upload_media_finish") socket.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { media_id: "media-1" } });
+        else if (frame.cmd === "ping" || (autoAcknowledge && frame.cmd === "aibot_send_msg")) socket.acknowledge(frame);
+      };
+      return socket;
+    }),
+  });
   await emit("session_start");
+  await command("connect", ctx);
   ws = FakeWebSocket.instances[0];
   ws.open();
   ws.acknowledge();
@@ -144,195 +145,6 @@ after(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-async function configureScreen(t: TestContext, options: { screenMode?: "text" | "image"; imageHosts?: boolean } = {}) {
-  const uploads: string[] = [];
-  t.mock.method(globalThis, "fetch", async (url: string | URL) => { uploads.push(String(url)); return new Response("https://cdn.example/pi-screen.png"); });
-  saveConfig({
-    botId: "test-bot", secret: "test-secret", enabled: true, welcome: "hello", defaultChatId: "default-group", defaultChatType: 2,
-    screenMode: options.screenMode ?? "image",
-    ...(options.imageHosts === false ? {} : { imageHosts: [{ type: "http", url: "https://images.example/upload", fileField: "image" }] }),
-  });
-  const fixture = installScreenFixture(ctx);
-  await emit("session_start");
-  ws = FakeWebSocket.instances.at(-1)!;
-  ws.open();
-  ws.acknowledge();
-  return { ...fixture, uploads };
-}
-
-test("an explicitly requested screen becomes the whole Markdown body", async (t) => {
-  const { state, uploads } = await configureScreen(t);
-  state.lines = ["SCREEN-CONTENT", "code and tool output"];
-  const result = await sendNotification({ chatid: "test-user", screen: true });
-  assert.equal(result.details.status, "sent");
-  assert.equal(result.details.screen, true);
-  assert.equal(renderedScreens.length, 1);
-  assert.match(renderedScreens[0].lines.join("\n"), /SCREEN-CONTENT/);
-  assert.doesNotMatch(renderedScreens[0].lines.join("\n"), /EDITOR|FOOTER/);
-  assert.deepEqual(uploads, ["https://images.example/upload"]);
-  const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-  assert.equal(pushes.length, 1);
-  assertSource(pushes[0].body.markdown.content);
-  assert.match(pushes[0].body.markdown.content, /\n\n!\[pi 终端画面\]\(https:\/\/cdn\.example\/pi-screen\.png\)$/);
-  assert.doesNotMatch(pushes[0].body.markdown.content, /SCREEN-CONTENT|当前 pi 终端画面|code and tool output/);
-  assert.equal(pushes[0].body.msgtype, "markdown");
-});
-
-test("content and screen are mutually exclusive", async (t) => {
-  await configureScreen(t);
-  await assert.rejects(sendNotification({ chatid: "test-user", content: "Current result", screen: true }), /只能二选一/);
-  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
-});
-
-test("text mode sends the last visible lines without any image host", async (t) => {
-  const { state, uploads } = await configureScreen(t, { screenMode: "text", imageHosts: false });
-  state.lines = ["EARLIER LINE", "", "FINAL LINES"];
-  await sendNotification({ chatid: "test-user", screen: true });
-  const push = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
-  assert.ok(push);
-  assertSource(push.body.markdown.content);
-  assert.match(push.body.markdown.content, /\n\nEARLIER LINE\n\nFINAL LINES$/);
-  assert.doesNotMatch(push.body.markdown.content, /!\[|当前 pi 终端画面/);
-  assert.equal(renderedScreens.length, 0);
-  assert.deepEqual(uploads, []);
-});
-
-test("after_settle captures the final screen, waits for upload and ACK, and does not start queued work early", async (t) => {
-  const { state, uploads } = await configureScreen(t);
-  let finish!: (png: Uint8Array) => void;
-  rasterise = () => new Promise((resolve) => { finish = resolve; });
-  autoAcknowledge = false;
-  idle = false;
-  state.lines = ["EARLY-SCREEN"];
-  await sendNotification({ chatid: "test-user", after_settle: true, screen: true });
-  assert.equal(renderedScreens.length, 0);
-  inbound("next-after-screen");
-  await drain();
-  await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "FINAL-ANSWER" }] } });
-  state.lines = ["FINAL-SCREEN"];
-  idle = true;
-  let settled = false;
-  const pending = emit("agent_settled", { aborted: false }).then(() => { settled = true; });
-  assert.equal(renderedScreens.length, 1);
-  assert.ok(renderedScreens[0].lines.includes("FINAL-SCREEN"));
-  assert.equal(uploads.length, 0);
-  assert.equal(settled, false);
-  clock.tick(300); // The existing idle-drain timer fires while rendering is still blocked.
-  assert.equal(sent.length, 0);
-  state.lines = ["LATER-LOCAL-SCREEN"];
-  finish(new Uint8Array([1, 2, 3]));
-  await drain();
-  const push = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
-  assert.ok(push);
-  assert.match(push.body.markdown.content, /!\[pi 终端画面\]/);
-  assert.doesNotMatch(push.body.markdown.content, /FINAL-ANSWER|EARLY-SCREEN/, "the image is the body, not an addition to the answer");
-  assert.equal(sent.length, 0);
-  assert.equal(settled, false, "settlement also waits for WeCom's acknowledgement");
-  ws.acknowledge(push);
-  await pending;
-  assert.equal(renderedScreens.length, 1);
-  await drain();
-  assert.equal(sent.length, 1);
-});
-
-test("an offline completion freezes its screen once and sends the same image on reconnect", async (t) => {
-  const { state, uploads } = await configureScreen(t);
-  idle = false;
-  await sendNotification({ chatid: "test-user", after_settle: true, screen: true });
-  ws.close();
-  state.lines = ["ORIGINAL-SCREEN"];
-  await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "ORIGINAL-ANSWER" }] } });
-  idle = true;
-  await emit("agent_settled", { aborted: false });
-  assert.equal(uploads.length, 1);
-  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
-  state.lines = ["LOCAL-ONLY"];
-  await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "LOCAL-ONLY" }] } });
-  await emit("agent_settled", { aborted: false });
-  clock.tick(1000);
-  ws = FakeWebSocket.instances.at(-1)!;
-  ws.open();
-  ws.acknowledge();
-  await drain();
-  const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-  assert.equal(pushes.length, 1);
-  assert.match(pushes[0].body.markdown.content, /!\[pi 终端画面\]\(https:\/\/cdn\.example\/pi-screen\.png\)$/);
-  assert.doesNotMatch(pushes[0].body.markdown.content, /ORIGINAL-ANSWER|LOCAL-ONLY/);
-  assert.equal(renderedScreens.length, 1);
-  assert.ok(renderedScreens[0].lines.includes("ORIGINAL-SCREEN"));
-  assert.equal(uploads.length, 1);
-});
-
-test("stopping during screen rendering cancels the upload and any late fallback notification", async (t) => {
-  const { uploads } = await configureScreen(t);
-  let finish!: (png: Uint8Array) => void;
-  rasterise = () => new Promise((resolve) => { finish = resolve; });
-  const pending = sendNotification({ chatid: "test-user", screen: true });
-  assert.equal(renderedScreens.length, 1);
-  await command("stop", ctx);
-  finish(new Uint8Array([1]));
-  await assert.rejects(pending, /abort/i);
-  assert.equal(uploads.length, 0);
-  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
-});
-
-test("screen uploads are opt-in and a replaced scheduled request cannot upload an old screen", async (t) => {
-  const { uploads } = await configureScreen(t);
-  await sendNotification({ chatid: "test-user", content: "text only" });
-  idle = false;
-  await sendNotification({ chatid: "test-user", after_settle: true, screen: true });
-  await sendNotification({ chatid: "test-user", content: "replacement", after_settle: true });
-  idle = true;
-  await emit("agent_settled", { aborted: false });
-  assert.equal(renderedScreens.length, 0);
-  assert.equal(uploads.length, 0);
-  assert.match(ws.sent.at(-1).body.markdown.content, /replacement/);
-});
-
-test("the screen command uses default targets, supports explicit targets and has side-effect-free help", async (t) => {
-  const { uploads } = await configureScreen(t);
-  await command("screen", ctx);
-  const first = ws.sent.at(-1);
-  assert.equal(first.body.chatid, "default-group");
-  assert.equal(first.body.chat_type, 2);
-  assert.match(first.body.markdown.content, /!\[pi 终端画面\]/);
-  await command("screen explicit-user", ctx);
-  assert.equal(ws.sent.at(-1).body.chat_type, 1);
-  assert.equal(ws.sent.at(-1).body.chatid, "explicit-user");
-  const notices: string[] = [];
-  t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
-  await command("screen --help", ctx);
-  assert.match(notices.at(-1)!, /imageHosts/);
-  await command("screen --chat-type 2", ctx);
-  assert.match(notices.at(-1)!, /需要和 chatid 一起/);
-  assert.equal(uploads.length, 2);
-  assert.deepEqual(complete("sc")?.map((item) => item.value), ["screen"]);
-  assert.deepEqual(complete("screen x --c")?.map((item) => item.value), ["screen x --chat-type "]);
-});
-
-test("a screen-only tool call can send without a current-run text reply, and unavailable screens still send text", async (t) => {
-  await configureScreen(t);
-  await sendNotification({ chatid: "test-user", screen: true });
-  assert.match(ws.sent.at(-1).body.markdown.content, /!\[pi 终端画面\]/);
-  assert.doesNotMatch(ws.sent.at(-1).body.markdown.content, /当前 pi 终端画面/);
-  Object.assign(ctx, { mode: "rpc" });
-  await sendNotification({ chatid: "test-user", screen: true });
-  assert.match(ws.sent.at(-1).body.markdown.content, /当前 pi 终端画面.*\n\n.*画面获取失败/s);
-  assert.match(ws.sent.at(-1).body.markdown.content, /RPC.*文字照常发送/);
-});
-
-test("start reloads image settings without restarting an unchanged bot connection", async (t) => {
-  const { uploads } = await configureScreen(t);
-  const config = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
-  config.imageHosts[0].url = "https://new-images.example/upload";
-  await writeFile(CONFIG_FILE, JSON.stringify(config));
-  const sockets = FakeWebSocket.instances.length;
-  await command("start", ctx);
-  await sendNotification({ chatid: "test-user", screen: true });
-  assert.equal(FakeWebSocket.instances.length, sockets);
-  assert.deepEqual(uploads, ["https://new-images.example/upload"]);
-});
-
 test("changing welcome text preserves queued work and completion notifications on the same connection", async () => {
   idle = false;
   await sendNotification({ chatid: "test-user", after_settle: true, content: "PENDING-BEFORE-WELCOME-EDIT" });
@@ -341,7 +153,7 @@ test("changing welcome text preserves queued work and completion notifications o
   const config = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
   await writeFile(CONFIG_FILE, JSON.stringify({ ...config, welcome: "UPDATED-WELCOME" }));
   const previous = ws;
-  await command("start", ctx);
+  await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
   if (ws !== previous) { ws.open(); ws.acknowledge(); }
   idle = true;
@@ -364,7 +176,7 @@ test("an allowlist change still revokes queued work and notifications from the o
   await sendNotification({ chatid: "test-user", after_settle: true, content: "OLD-PERMISSION-RESULT" });
   const config = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
   await writeFile(CONFIG_FILE, JSON.stringify({ ...config, allowedUserIds: ["different-user"] }));
-  await command("start", ctx);
+  await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
   ws.open();
   ws.acknowledge();
@@ -405,7 +217,7 @@ test("bulk inbound media uses bounded preparation concurrency and stop cancels w
   assert.equal(peak, 2, "reserving 50 FIFO positions must not start 50 media preparations");
   assert.equal(downloads, 2);
   assert.equal(sent.length, 0);
-  await command("stop", ctx);
+  await command("disconnect", ctx);
   await drain();
   assert.equal(active, 0);
   assert.equal(downloads, 2, "cancelled waiters must never start fetching later");
@@ -421,7 +233,7 @@ test("keeps arrival order when an image download is slower than the next text", 
   finishDownload(new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), { headers: { "content-type": "image/png" } }));
   await drain();
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].content[1].type, "image");
+  assert.deepEqual(sent[0].content.map((part: { type: string }) => part.type), ["image"]);
   idle = true;
   await emit("agent_settled", { aborted: false });
   await drain();
@@ -433,7 +245,7 @@ test("a media download finishing after stop never starts a pi task", async (t) =
   t.mock.method(globalThis, "fetch", () => new Promise<Response>((resolve) => { finishDownload = resolve; }));
   inbound("late-image", { msgtype: "image", image: { url: "https://example.invalid/image" } });
   await drain();
-  await command("stop", ctx);
+  await command("disconnect", ctx);
   finishDownload(new Response("image", { headers: { "content-type": "image/png" } }));
   await drain();
   assert.equal(sent.length, 0);
@@ -443,8 +255,8 @@ test("stop clears old requests so a later local response cannot leak on restart"
   inbound("old-request");
   inbound("old-queued-request");
   await drain();
-  await command("stop", ctx);
-  await command("start", ctx);
+  await command("disconnect", ctx);
+  await command("connect", ctx);
   const nextWs = FakeWebSocket.instances.at(-1)!;
   nextWs.open();
   nextWs.acknowledge();
@@ -456,12 +268,13 @@ test("stop clears old requests so a later local response cannot leak on restart"
   assert.equal(sent.length, 1);
 });
 
-test("changing pi sessions closes the old connection and discards its active request", async () => {
+test("changing pi sessions closes the old connection and discards its active request without reconnecting", async () => {
   inbound("old-session");
   await drain();
+  sessionId = "pi-session-2";
   await emit("session_start", {}, { ...ctx, cwd: join(sandbox, "another-project") });
   assert.equal(ws.readyState, 3);
-  assert.equal(FakeWebSocket.instances.length, 2);
+  assert.equal(FakeWebSocket.instances.length, 1);
 });
 
 test("duplicate callbacks result in one pi task", async () => {
@@ -601,8 +414,9 @@ test("an aborted task ends its status and includes the cancellation in its resul
 });
 
 test("the pi bridge also checks the allowlist before accepting a task", async () => {
-  saveConfig({ botId: "test-bot", secret: "test-secret", enabled: true, welcome: "hello", allowedUserIds: ["allowed-user"] });
+  saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello", allowedUserIds: ["allowed-user"] });
   await emit("session_start");
+  await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
   ws.open();
   ws.acknowledge();
@@ -638,14 +452,14 @@ test("a new session's output cannot fill an old session's active notification", 
   assert.equal(ws.sent.some((frame) => JSON.stringify(frame.body).includes("NEW-SESSION-ONLY")), false);
 });
 
-test("stop remains local to this pi and a session switch does not restart a stopped bridge", async () => {
-  await command("stop", ctx);
-  const { loadConfig } = await import("../../src/extension/config.ts");
-  assert.equal(loadConfig()?.enabled, true, "stopping one pi must not disable other pi startups");
+test("disconnect leaves shared config unchanged and a session switch requires manual connect", async () => {
+  const saved = await readFile(CONFIG_FILE, "utf8");
+  await command("disconnect", ctx);
+  assert.equal(await readFile(CONFIG_FILE, "utf8"), saved);
   sessionId = "pi-session-2";
   await emit("session_start");
   assert.equal(FakeWebSocket.instances.length, 1);
-  await command("start", ctx);
+  await command("connect", ctx);
   assert.equal(FakeWebSocket.instances.length, 2);
 });
 
@@ -816,11 +630,11 @@ test("an explicit session ID cannot mislabel another session's output", async ()
   assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
 });
 
-test("stop cancels notifications scheduled for the end of a run", async () => {
+test("disconnect cancels notifications scheduled for the end of a run", async () => {
   idle = false;
   await sendNotification({ chatid: "test-user", after_settle: true });
-  await command("stop", ctx);
-  await command("start", ctx);
+  await command("disconnect", ctx);
+  await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
   ws.open();
   ws.acknowledge();
@@ -831,15 +645,27 @@ test("stop cancels notifications scheduled for the end of a run", async () => {
   assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
 });
 
+test("wecom_send without a target replies to the chat that sent the WeCom task", async () => {
+  inbound("source-target-task");
+  await drain();
+  const result = await sendNotification({ content: "SOURCE-REPLY" });
+  assert.equal(result.details.chatid, "test-user");
+  const push = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
+  assert.equal(push.body.chatid, "test-user");
+  assert.equal(push.body.chat_type, 1);
+  await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "DONE" }] } });
+  idle = true;
+  await emit("agent_settled", { aborted: false });
+});
+
 test("group messages addressed to the bot reach pi and receive a reply in that conversation", async () => {
   inbound("group-request", {
     chattype: "group", chatid: "test-group", text: { content: "@Robot 帮我检查项目" },
   });
   await drain();
   assert.equal(sent.length, 1);
-  assert.match(sent[0].content[0].text, /chatid="test-group" chat_type=2/);
   assert.match(sent[0].content[0].text, /帮我检查项目/);
-  assert.doesNotMatch(sent[0].content[0].text, /@Robot/);
+  assert.doesNotMatch(sent[0].content[0].text, /@Robot|\[企业微信|chatid=|chat_type=/);
   await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "检查完成" }] } });
   idle = true;
   await emit("agent_settled", { aborted: false });
@@ -969,6 +795,7 @@ test("switching sessions cancels a scheduled notification", async () => {
   sessionId = "pi-session-2";
   sessionEntries = [];
   await emit("session_start");
+  await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
   ws.open();
   ws.acknowledge();
@@ -989,8 +816,9 @@ test("changing branches cannot substitute another branch's reply into a notifica
 });
 
 test("notifications use the configured target without changing an explicit target's chat type", async () => {
-  saveConfig({ botId: "test-bot", secret: "test-secret", enabled: true, welcome: "hello", defaultChatId: "configured-group", defaultChatType: 2 });
+  saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello", defaultChatId: "configured-group", defaultChatType: 2 });
   await emit("session_start");
+  await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
   ws.open();
   ws.acknowledge();
@@ -1011,8 +839,9 @@ test("notifications use the configured target without changing an explicit targe
 
 test("the deployment test command sends a labelled test to the default target and waits for confirmation", async () => {
   autoAcknowledge = false;
-  saveConfig({ botId: "test-bot", secret: "test-secret", enabled: true, welcome: "hello", defaultChatId: "test-user", defaultChatType: 1 });
+  saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello", defaultChatId: "test-user", defaultChatType: 1 });
   await emit("session_start");
+  await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
   ws.open();
   ws.acknowledge();
@@ -1027,7 +856,7 @@ test("the deployment test command sends a labelled test to the default target an
   await pending;
 });
 
-test("help aliases describe targets and the actual config path without executing commands or clearing queued notifications", async (t) => {
+test("every help form describes targets and the actual config path without executing commands or clearing queued notifications", async (t) => {
   const notices: string[] = [];
   t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
   t.mock.method(ctx.ui, "confirm", async () => assert.fail("help must not request confirmation"));
@@ -1035,15 +864,15 @@ test("help aliases describe targets and the actual config path without executing
   const frameCount = ws.sent.length;
   idle = false;
   await sendNotification({ chatid: "test-user", content: "PRESERVED-NOTIFICATION", after_settle: true });
-  const variants = ["--help", "-h", "help", "help test", "setup --help", "setup --bot-id sensitive-bot --secret=sensitive-secret --help", "start --help", "stop -h", "logout --help", "test --help", "test your-userid --chat-type 1 --help", "whoami --help", "whoami --wait 180 -h", "setup whoami --help", "setup whoami --bot-id sensitive-bot --wait 300 -h"];
+  const variants = ["--help", "-h", "setup --help", "setup --bot-id sensitive-bot --secret=sensitive-secret --help", "connect --help", "disconnect -h", "logout --help", "test --help", "test your-userid --chat-type 1 --help", "whoami --help", "whoami --wait 180 -h", "setup whoami --help", "setup whoami --bot-id sensitive-bot --wait 300 -h"];
   for (const args of variants) await command(args, ctx);
   assert.equal(notices.length, variants.length);
   for (const help of notices) {
     assert.ok(help.includes(CONFIG_FILE), "help must use this pi's resolved configuration path");
     assert.doesNotMatch(help, /test-secret|sensitive-secret|sensitive-bot/);
   }
-  assert.equal(notices[0], notices[1]);
-  assert.equal(notices[0], notices[2]);
+  assert.equal(notices[0], notices[1], "--help and -h both show the total help");
+  assert.match(notices[2], /^setup — /, "a topic help is scoped to that command");
   assert.match(notices[0], /defaultChatId/);
   assert.match(notices[0], /defaultChatType/);
   assert.match(notices[0], /1 = 单聊，2 = 群聊/);
@@ -1057,15 +886,15 @@ test("help aliases describe targets and the actual config path without executing
 });
 
 test("help works before configuration without creating a file or starting a connection", async (t) => {
-  await command("stop", ctx);
+  await command("disconnect", ctx);
   clearConfig();
   await emit("session_start");
   const notices: string[] = [];
   t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
   await command("--help", ctx);
-  assert.match(notices[0], /\/wecom setup/);
+  assert.match(notices[0], /\/wecom-aibot setup/);
   // One file of its own next to pi's settings.json, in the agent directory pi was started with.
-  assert.equal(CONFIG_FILE, join(sandbox, "wecom-bot.json"));
+  assert.equal(CONFIG_FILE, join(sandbox, "wecom-aibot.json"));
   assert.ok(notices[0].includes(CONFIG_FILE));
   await assert.rejects(readFile(CONFIG_FILE), { code: "ENOENT" });
   assert.equal(FakeWebSocket.instances.length, 1);
@@ -1076,22 +905,22 @@ test("unknown subcommands point to help instead of silently showing status", asy
   t.mock.method(ctx.ui, "notify", (message: string, type: string) => notices.push({ message, type }));
   await command("strat", ctx);
   assert.equal(notices[0].type, "warning");
-  assert.match(notices[0].message, /\/wecom --help/);
+  assert.match(notices[0].message, /\/wecom-aibot --help/);
   assert.equal(ws.readyState, 1);
   assert.equal(FakeWebSocket.instances.length, 1);
 });
 
-test("subcommand help is scoped and agrees with the help-command alias", async (t) => {
+test("subcommand help is scoped and identical for --help, -h and a leading --help", async (t) => {
   const notices: string[] = [];
   t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
-  await command("start --help", ctx);
-  await command("--help start", ctx);
-  await command("help start", ctx);
+  await command("connect --help", ctx);
+  await command("--help connect", ctx);
+  await command("connect -h", ctx);
   assert.equal(notices[0], notices[1]);
   assert.equal(notices[0], notices[2]);
-  assert.match(notices[0], /用法：\/wecom start$/m);
-  assert.match(notices[0], /enabled/);
-  assert.doesNotMatch(notices[0], /\/wecom setup \[--bot-id/);
+  assert.match(notices[0], /用法：\/wecom-aibot connect$/m);
+  assert.match(notices[0], /每个 session.*手动.*\/wecom-aibot connect/);
+  assert.doesNotMatch(notices[0], /\/wecom-aibot setup \[--bot-id/);
 });
 
 test("actions written as options, unknown options and extra positional arguments fail before side effects", async (t) => {
@@ -1100,15 +929,15 @@ test("actions written as options, unknown options and extra positional arguments
   t.mock.method(ctx.ui, "confirm", async () => assert.fail("invalid arguments must not request confirmation"));
   const saved = await readFile(CONFIG_FILE, "utf8");
   const frameCount = ws.sent.length;
-  const invalid = ["--start", "--stop", "start --unknown", "stop --unknown", "logout extra", "stop extra", "start help", "--chatid user", "--whoami",
-    "setup bot secret", "setup --botid x", "setup --bot-id", "setup --bot-id a --bot-id b", "setup --chat-type 2", "setup whoami --chatid x", "setup whoami --chat-type 2", "setup --wait 300", "setup start", "setup whoami whoami", "setup --whoami",
+  const invalid = ["--connect", "--disconnect", "connect --unknown", "disconnect --unknown", "logout extra", "disconnect extra", "connect help", "--chatid user", "--whoami",
+    "setup bot secret", "setup --botid x", "setup --bot-id", "setup --bot-id a --bot-id b", "setup --chat-type 2", "setup whoami --chatid x", "setup whoami --chat-type 2", "setup --wait 300", "setup connect", "setup whoami whoami", "setup --whoami",
     "setup --chatid 'x'", 'test "user"',
-    "test user 2", "test --chat-type 3 user", "test --chat-type 2", "whoami 120", "whoami --wait 5", "whoami --wait=abc", "start --wait 120"];
+    "test user 2", "test --chat-type 3 user", "test --chat-type 2", "whoami 120", "whoami --wait 5", "whoami --wait=abc", "connect --wait 120"];
   for (const args of invalid) await command(args, ctx);
   assert.equal(notices.length, invalid.length);
   assert.ok(notices.every((notice) => notice.type === "warning"));
-  assert.match(notices[0].message, /start 是子命令，不带 --/);
-  assert.match(notices[0].message, /\/wecom start/);
+  assert.match(notices[0].message, /connect 是子命令，不带 --/);
+  assert.match(notices[0].message, /\/wecom-aibot connect/);
   assert.equal(await readFile(CONFIG_FILE, "utf8"), saved);
   assert.equal(ws.readyState, 1);
   assert.equal(FakeWebSocket.instances.length, 1);
@@ -1149,11 +978,11 @@ test("setup merges into the file as it is now: fields edited after this pi start
   assert.equal(sent.length, 0);
 });
 
-test("start after a logout in another pi reports the missing configuration instead of restoring the secret", async (t) => {
+test("connect after a logout in another pi reports the missing configuration instead of restoring the secret", async (t) => {
   const notices: string[] = [];
   t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
   clearConfig();
-  await command("start", ctx);
+  await command("connect", ctx);
   assert.match(notices.at(-1)!, /尚未配置/);
   await assert.rejects(readFile(CONFIG_FILE), { code: "ENOENT" });
 });
@@ -1204,8 +1033,8 @@ for (const change of ["bot while waiting", "bot during confirmation", "Secret du
 
 test("stopping and restarting during whoami confirmation invalidates that registration's identity", async (t) => {
   const notices = identityDialogs(t, async () => {
-    await command("stop", ctx);
-    await command("start", ctx);
+    await command("disconnect", ctx);
+    await command("connect", ctx);
     return true;
   });
   const pending = command("whoami", ctx);
@@ -1223,13 +1052,13 @@ test("whoami validates its wait and its preconditions before waiting for any mes
   for (const args of ["whoami --wait 5", "whoami --wait 601", "whoami --wait=1.5", "whoami --wait abc"]) await command(args, ctx);
   assert.equal(notices.length, 4);
   assert.ok(notices.every((notice) => notice.type === "warning" && /10～600/.test(notice.message)));
-  await command("stop", ctx);
+  await command("disconnect", ctx);
   await command("whoami", ctx);
-  assert.match(notices.at(-1)!.message, /\/wecom start/);
+  assert.match(notices.at(-1)!.message, /\/wecom-aibot connect/);
   clearConfig();
   await emit("session_start");
   await command("whoami", ctx);
-  assert.match(notices.at(-1)!.message, /\/wecom setup/);
+  assert.match(notices.at(-1)!.message, /\/wecom-aibot setup/);
   assert.equal(ws.sent.length, frameCount, "none of these may send or reply upstream");
 });
 
@@ -1237,7 +1066,7 @@ test("whoami help explains the identification message and the wait", async (t) =
   const notices: string[] = [];
   t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
   await command("whoami --help", ctx);
-  assert.match(notices[0], /用法：\/wecom whoami \[--wait <秒>\]/);
+  assert.match(notices[0], /用法：\/wecom-aibot whoami \[--wait <秒>\]/);
   assert.match(notices[0], /不会交给 pi 处理/);
   assert.match(notices[0], /群聊需 @机器人/);
   assert.match(notices[0], /默认 120/);
@@ -1300,14 +1129,18 @@ test("setup options are used as given: --chatid is always a literal ID, even who
   assert.deepEqual([saved.botId, saved.defaultChatId], ["b3", "whoami"]);
 });
 
-test("setup connects this pi without arming auto-connect for the next one", async () => {
-  saveConfig({ botId: "old-bot", secret: "old-secret", enabled: false, welcome: "hello" });
-  const sockets = FakeWebSocket.instances.length;
-  await command("setup --bot-id fresh-bot --secret fresh-secret --chatid fresh-user", ctx);
-  const saved = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
-  assert.equal(saved.enabled, false, "/wecom start, not setup, is the opt-in for automatic connection");
-  assert.equal(FakeWebSocket.instances.length, sockets + 1, "the current pi still reconnects for this session");
-});
+for (const enabled of [true, false]) {
+  test(`setup connects only this session and preserves inert legacy enabled=${enabled}`, async () => {
+    await writeFile(CONFIG_FILE, JSON.stringify({ botId: "old-bot", secret: "old-secret", enabled, welcome: "hello" }));
+    const sockets = FakeWebSocket.instances.length;
+    await command("setup --bot-id fresh-bot --secret fresh-secret --chatid fresh-user", ctx);
+    const saved = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
+    assert.equal(saved.enabled, enabled, "setup preserves the old field without using it");
+    assert.equal(FakeWebSocket.instances.length, sockets + 1, "setup connects the current session");
+    await emit("session_start");
+    assert.equal(FakeWebSocket.instances.length, sockets + 1, "the next session never connects automatically");
+  });
+}
 
 test("empty or dismissed setup credentials cancel without HTTP requests, config changes or reconnects", async (t) => {
   const notices: string[] = [];
@@ -1348,7 +1181,7 @@ test("empty or dismissed setup credentials cancel without HTTP requests, config 
 });
 
 test("empty setup does not provision a bot or create configuration on first use", async (t) => {
-  await command("stop", ctx);
+  await command("disconnect", ctx);
   clearConfig();
   await emit("session_start");
   const notices: string[] = [];
@@ -1367,7 +1200,7 @@ test("empty setup does not provision a bot or create configuration on first use"
 test("setup help only offers credentials for an existing bot", async (t) => {
   const notices: string[] = [];
   t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
-  for (const input of ["setup --help", "help setup"]) await command(input, ctx);
+  for (const input of ["setup --help", "setup -h"]) await command(input, ctx);
   for (const help of notices) {
     assert.match(help, /已有机器人/);
     assert.match(help, /BotID/);
@@ -1387,13 +1220,13 @@ test("an action and a value never mix: setup whoami runs two actions, quotes are
   const saved = await readFile(CONFIG_FILE, "utf8");
   const frameCount = ws.sent.length;
   await command("setup --whoami", ctx);
-  assert.match(notices.at(-1)!, /请使用 \/wecom setup whoami/);
+  assert.match(notices.at(-1)!, /请使用 \/wecom-aibot setup whoami/);
   await command("setup --wait 300", ctx);
-  assert.match(notices.at(-1)!, /--wait 属于 whoami，写成 \/wecom setup whoami --wait <秒>/);
+  assert.match(notices.at(-1)!, /--wait 属于 whoami，写成 \/wecom-aibot setup whoami --wait <秒>/);
   await command("setup whoami --chatid user_one", ctx);
   assert.match(notices.at(-1)!, /由识别结果决定默认推送目标/);
-  await command("setup start", ctx);
-  assert.match(notices.at(-1)!, /setup 后面只能接 whoami，start 请单独运行/);
+  await command("setup connect", ctx);
+  assert.match(notices.at(-1)!, /setup 后面只能接 whoami，connect 请单独运行/);
   await command("whoami setup", ctx);
   assert.match(notices.at(-1)!, /whoami 后面不能再接其他动作/);
   await command('test "user_one"', ctx);
@@ -1414,13 +1247,12 @@ test("argument completion offers subcommands, each command's own options and who
   assert.deepEqual(values("setup whoami --"), ["setup whoami --bot-id ", "setup whoami --secret ", "setup whoami --wait ", "setup whoami --help"]);
   assert.deepEqual(values("test x --"), ["test x --chat-type ", "test x --help"]);
   assert.deepEqual(values("whoami --w"), ["whoami --wait "]);
-  assert.deepEqual(values("help wh"), ["help whoami"]);
-  // A command with nothing to pass has no --help to offer: `start` and `status` are bare actions.
-  assert.equal(values("start -"), null);
+  // A command with nothing to pass has no --help to offer: `connect` and `status` are bare actions.
+  assert.equal(values("connect -"), null);
   assert.equal(values("status -"), null);
   assert.deepEqual(values("test -"), ["test --chat-type ", "test --help"]);
   // A finished token or a value position shows no list: Enter must run the command, not apply a completion.
-  for (const done of ["setup", "setup whoami", "setup --chatid w", "setup --chatid x w", "whoami --wait", "--help", "help whoami", "start x", "start ", "setup "]) {
+  for (const done of ["setup", "setup whoami", "setup --chatid w", "setup --chatid x w", "whoami --wait", "--help", "connect x", "connect ", "setup "]) {
     assert.equal(complete(done), null, done);
   }
 });
@@ -1449,7 +1281,7 @@ test("an outage is reported once after 30 seconds and recovery is announced once
   clock.tick(1);
   assert.equal(notices.length, 1);
   assert.equal(notices[0].type, "warning");
-  assert.match(notices[0].message, /30 秒.*自动重连.*\/wecom log/);
+  assert.match(notices[0].message, /30 秒.*自动重连.*\/wecom-aibot log/);
   clock.tick(1000);
   ws = FakeWebSocket.instances.at(-1)!;
   ws.open();
@@ -1461,12 +1293,12 @@ test("an outage is reported once after 30 seconds and recovery is announced once
   assert.equal(notices.length, 2);
 });
 
-test("stop cancels a delayed disconnect warning", async (t) => {
+test("disconnect cancels a delayed disconnect warning", async (t) => {
   const notices: string[] = [];
   Object.assign(ctx, { hasUI: true });
   t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
   ws.close();
-  await command("stop", ctx);
+  await command("disconnect", ctx);
   notices.length = 0;
   clock.tick(60_000);
   assert.deepEqual(notices, []);
@@ -1477,6 +1309,7 @@ test("a refused first subscription is reported in pi instead of leaving the brid
   Object.assign(ctx, { hasUI: true });
   t.mock.method(ctx.ui, "notify", (message: string, type: string) => notices.push({ message, type }));
   await emit("session_start");
+  await command("connect", ctx);
   for (const [index, delay] of [1000, 2000, 4000, 8000, 0].entries()) {
     const socket = FakeWebSocket.instances.at(-1)!;
     assert.equal(FakeWebSocket.instances.length, index + 2);
@@ -1487,11 +1320,11 @@ test("a refused first subscription is reported in pi instead of leaving the brid
   const stopped = notices.filter((notice) => /连接已停止/.test(notice.message));
   assert.equal(stopped.length, 1);
   assert.equal(stopped[0].type, "warning");
-  assert.match(stopped[0].message, /subscribe failed: 40001.*BotID\/Secret.*\/wecom start/);
+  assert.match(stopped[0].message, /subscribe failed: 40001.*BotID\/Secret.*\/wecom-aibot connect/);
   await command("status", ctx);
   assert.match(notices.at(-1)!.message, /subscribe failed: 40001/);
-  await command("start", ctx);
-  assert.equal(FakeWebSocket.instances.length, 7, "/wecom start subscribes again");
+  await command("connect", ctx);
+  assert.equal(FakeWebSocket.instances.length, 7, "/wecom-aibot connect subscribes again");
 });
 
 test("a file from WeCom is saved in the project with a .gitignore that keeps it out of commits", async (t) => {
@@ -1500,8 +1333,68 @@ test("a file from WeCom is saved in the project with a .gitignore that keeps it 
   // Saving is real file I/O: wait on the real clock, the mocked one does not cover it.
   const deadline = performance.now() + 4000;
   while (!sent.length && performance.now() < deadline) await drain();
-  const saved = join(sandbox, ".pi-wecom-files", "file-1-file.pdf");
+  const saved = join(sandbox, ".pi-wecom-aibot-files", "file-1-file.pdf");
   assert.ok(sent[0].content[0].text.includes(`[文件已保存到：${saved}]`));
   assert.equal(await readFile(saved, "utf8"), "%PDF-1.4 test");
-  assert.match(await readFile(join(sandbox, ".pi-wecom-files", ".gitignore"), "utf8"), /^\*$/m);
+  assert.match(await readFile(join(sandbox, ".pi-wecom-aibot-files", ".gitignore"), "utf8"), /^\*$/m);
+});
+
+async function imageModeStart() {
+  saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello", sendMode: "image" });
+  const fixture = installTuiFixture(ctx);
+  await emit("session_start");
+  await command("connect", ctx);
+  ws = FakeWebSocket.instances.at(-1)!;
+  ws.open();
+  ws.acknowledge();
+  return fixture;
+}
+
+test("image mode sends an automatic result as a native image message with no Markdown body", async () => {
+  const fixture = await imageModeStart();
+  fixture.state.lines = ["SCREEN-ANSWER", "tool output"];
+  inbound("image-mode-task");
+  await drain();
+  await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "FINAL-ANSWER" }] } });
+  idle = true;
+  await emit("agent_settled", { aborted: false });
+  await drain();
+  const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].body.msgtype, "image");
+  assert.equal(pushes[0].body.image.media_id, "media-1");
+  assert.equal(pushes[0].body.markdown, undefined);
+});
+
+test("image mode keeps explicit content as Markdown and never uploads an image", async () => {
+  await imageModeStart();
+  await sendNotification({ chatid: "test-user", content: "EXPLICIT-CONTENT" });
+  const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+  assert.equal(pushes.at(-1)?.body.msgtype, "markdown");
+  assert.match(pushes.at(-1)?.body.markdown.content ?? "", /EXPLICIT-CONTENT/);
+  assert.equal(ws.sent.some((frame) => frame.cmd === "aibot_upload_media_init"), false);
+});
+
+test("image mode falls back to the Markdown answer when rendering is unavailable", async () => {
+  rasterise = async () => { throw new Error("no rasteriser"); };
+  await imageModeStart();
+  inbound("image-fallback-task");
+  await drain();
+  await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "FINAL-TEXT" }] } });
+  idle = true;
+  await emit("agent_settled", { aborted: false });
+  await drain();
+  const push = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
+  assert.equal(push.body.msgtype, "markdown");
+  assert.match(push.body.markdown.content, /FINAL-TEXT/);
+  assert.equal(ws.sent.some((frame) => frame.cmd === "aibot_upload_media_init"), false);
+});
+
+test("the deployment test stays text even in image mode", async () => {
+  await imageModeStart();
+  await command("test test-user", ctx);
+  const push = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
+  assert.equal(push.body.msgtype, "markdown");
+  assert.match(push.body.markdown.content, /部署测试/);
+  assert.equal(ws.sent.some((frame) => frame.cmd === "aibot_upload_media_init"), false);
 });

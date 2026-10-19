@@ -1,8 +1,10 @@
 /** One WeCom connection, with routing and membership independent of any pi process. */
 import { randomUUID } from "node:crypto";
-import { formatProcessingStatus, quotedSessions, renderNotification, type ProcessingState } from "../shared/notification.ts";
+import { readFileSync, statSync } from "node:fs";
+import { formatProcessingStatus, MAX_NOTIFICATION_BYTES, quotedSessions, renderNotification, type ProcessingState } from "../shared/notification.ts";
 import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
 import { WeComClient, type WeComClientOptions, type WeComInbound } from "./wecom-client.ts";
+import { deliveryFailure } from "../shared/delivery.ts";
 import { parseInbound, senderOf, WECOM_REPLY_WINDOW_MS, WECOM_STREAM_LIFETIME_MS, type ChatRef, type InboundMessage } from "../shared/wecom-protocol.ts";
 import {
 	sameTarget, sessionTarget, validWelcome,
@@ -64,7 +66,7 @@ export class WeComGateway {
 	private readonly choices = new Map<string, Choice>();
 	private readonly seen = new Set<string>();
 	private readonly tasks = new Map<string, Task>();
-	/** /wecom whoami in progress, by pi instance. */
+	/** /wecom-aibot whoami in progress, by pi instance. */
 	private readonly watches = new Map<string, { id: string; expiresAt: number }>();
 	private client: WeComClient | undefined;
 	private status: GatewayStatus = { state: "disconnected", sessions: 0 };
@@ -184,6 +186,23 @@ export class WeComGateway {
 		const content = renderNotification(notification.source, notification.text, {
 			kind: notification.kind, excerpt: notification.excerpt, aborted: notification.aborted,
 		});
+		if (notification.image) {
+			const data = readImage(notification.image.path);
+			const mediaId = data ? await this.client.uploadImage(data, notification.image.filename).catch(() => undefined) : undefined;
+			if (mediaId) {
+				try {
+					await this.client.sendMsg(chat.chatId, chat.chatType, { msgtype: "image", image: { media_id: mediaId } });
+					return;
+				} catch (error) {
+					// A rejection definitely did not deliver the image; an unknown ACK must not be duplicated.
+					if (deliveryFailure(error) !== "rejected") throw error;
+				}
+			}
+			const note = "\n\n（图片发送失败，已改发文字）";
+			const fallback = Buffer.byteLength(content, "utf8") + Buffer.byteLength(note, "utf8") <= MAX_NOTIFICATION_BYTES ? content + note : content;
+			await this.client.sendMsg(chat.chatId, chat.chatType, { msgtype: "markdown", markdown: { content: fallback } });
+			return;
+		}
 		await this.client.sendMsg(chat.chatId, chat.chatType, { msgtype: "markdown", markdown: { content } });
 	}
 
@@ -267,7 +286,7 @@ export class WeComGateway {
 
 	/** Where a message goes, from the current state; changes nothing. */
 	private decide(key: string, message: InboundMessage, eligible: Member[]): Route {
-		// While a pi waits in /wecom whoami, the next message it may receive only identifies the chat.
+		// While a pi waits in /wecom-aibot whoami, the next message it may receive only identifies the chat.
 		const watchers = eligible.filter((member) => this.watches.has(member.instanceId));
 		if (watchers.length) return { kind: "identify", watchers };
 		const quotedIds = message.quoteText ? quotedSessions(message.quoteText) : [];
@@ -278,9 +297,11 @@ export class WeComGateway {
 			return { kind: "offer", reason: quotedIds.length > 1 ? "引用中包含多个 session ID，请选择目标。" : "引用的目标会话已离线或不可用，请重新选择。", pending: message };
 		}
 		const text = message.text.trim();
-		if (/^\/wecom\s+(?:sessions|list)$/i.test(text) || /^\/wecom\s+use\s*$/i.test(text)) return { kind: "offer" };
+		// The pre-rename spelling stays accepted on the WeCom side: there is no completion in a chat,
+		// and an unrecognized command would silently be routed to pi as a task.
+		if (/^\/(?:wecom|wecom-aibot)\s+(?:sessions|list)$/i.test(text) || /^\/(?:wecom|wecom-aibot)\s+use\s*$/i.test(text)) return { kind: "offer" };
 		const choice = this.choices.get(key);
-		const selection = /^\/wecom\s+use\s+(\S+)$/i.exec(text)?.[1] ?? (choice && /^\d+$/.test(text) ? text : undefined);
+		const selection = /^\/(?:wecom|wecom-aibot)\s+use\s+(\S+)$/i.exec(text)?.[1] ?? (choice && /^\d+$/.test(text) ? text : undefined);
 		if (selection !== undefined) {
 			// A number refers to the list that was shown, never to the current order of members.
 			const numeric = /^\d+$/.test(selection);
@@ -375,7 +396,7 @@ export class WeComGateway {
 			choice.targets.push(sessionTarget(member));
 		}
 		if (choice.targets.length < members.length) lines.push("其他会话可用完整 session ID 选择。");
-		lines.push("回复序号，或发送 /wecom use <完整 session ID>。发送 /wecom sessions 可重新选择。");
+		lines.push("回复序号，或发送 /wecom-aibot use <完整 session ID>。发送 /wecom-aibot sessions 可重新选择。");
 		if (choice.pending) lines.push("已暂存最初那条消息（5 分钟内有效），选择后会交给目标 pi。");
 		this.remember(this.choices, key, choice);
 		this.reply(reqId, lines.join("\n\n"));
@@ -388,8 +409,8 @@ export class WeComGateway {
 	private event(inbound: WeComInbound): void {
 		const type = inbound.body?.event?.eventtype;
 		if (type === "disconnected_event") {
-			// Retain membership and each pi's queues. Only an explicit /wecom start resumes.
-			this.client?.stop("机器人连接已被其他机器或旧客户端接管；可在任一 pi 执行 /wecom start 恢复");
+			// Retain membership and each pi's queues. Only an explicit /wecom-aibot connect resumes.
+			this.client?.stop("机器人连接已被其他机器或旧客户端接管；可在任一 pi 执行 /wecom-aibot connect 恢复");
 			return;
 		}
 		const userid = senderOf(inbound.body);
@@ -398,7 +419,7 @@ export class WeComGateway {
 		if (!members.length) return;
 		const content = members.length === 1
 			? renderNotification(members[0].source, members[0].config.welcome || "你好，请把问题或任务发给我。", { kind: "welcome" })
-			: `你好，pi 共享网关有 ${members.length} 个在线会话。发送任务后可选择目标，也可以先发送 /wecom sessions 查看会话。`;
+			: `你好，pi 共享网关有 ${members.length} 个在线会话。发送任务后可选择目标，也可以先发送 /wecom-aibot sessions 查看会话。`;
 		this.client?.respondWelcome(inbound.reqId, { msgtype: "text", text: { content } });
 	}
 
@@ -416,7 +437,18 @@ export class WeComGateway {
 	}
 }
 
-/** WeCom-side receipt for a message consumed by /wecom whoami; the pi shows the result. */
+/** Read a rendered PNG defensively: a missing, non-file or oversized path falls back to Markdown. */
+function readImage(path: string): Buffer | undefined {
+	try {
+		const stat = statSync(path);
+		if (!stat.isFile() || stat.size < 5 || stat.size > 10 * 1024 * 1024) return undefined;
+		return readFileSync(path);
+	} catch {
+		return undefined;
+	}
+}
+
+/** WeCom-side receipt for a message consumed by /wecom-aibot whoami; the pi shows the result. */
 function identityText(identity: ChatIdentity): string {
 	const code = (value: string) => `\`${value.replace(/[`\s]/g, "")}\``;
 	return [

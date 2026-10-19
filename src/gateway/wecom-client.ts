@@ -19,7 +19,7 @@
  *   { cmd: "aibot_event_callback", headers, body }   event
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { DeliveryError } from "../shared/delivery.ts";
 import { WECOM_ACK_TIMEOUT_MS, type WeComState } from "../shared/wecom-protocol.ts";
@@ -344,6 +344,43 @@ export class WeComClient {
 		return this.isReady() && this.send({ cmd: "aibot_respond_update_msg", headers: { req_id: reqId }, body });
 	}
 
+
+	/**
+	 * Upload a PNG as temporary media and return its media_id. init → chunk × N → finish;
+	 * chunks are 512KB of raw bytes and may be retried because the server ignores duplicates.
+	 */
+	async uploadImage(data: Buffer, filename = "pi-notification.png"): Promise<string> {
+		const MAX_IMAGE = 10 * 1024 * 1024;
+		if (data.byteLength < 5 || data.byteLength > MAX_IMAGE) {
+			throw new DeliveryError("图片大小必须在 5 字节到 10MB 之间", "rejected");
+		}
+		const name = filename.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 200) || "pi-notification.png";
+		const CHUNK = 512 * 1024;
+		const totalChunks = Math.ceil(data.byteLength / CHUNK);
+		const md5 = createHash("md5").update(data).digest("hex");
+		const init = await this.sendCommand("aibot_upload_media_init", {
+			type: "image", filename: name, total_size: data.byteLength, total_chunks: totalChunks, md5,
+		});
+		const uploadId = bodyField(init, "upload_id");
+		if (!uploadId) throw new DeliveryError("上传初始化没有返回 upload_id", "rejected");
+		for (let index = 0; index < totalChunks; index++) {
+			const chunk = data.subarray(index * CHUNK, (index + 1) * CHUNK);
+			for (let attempt = 0; ; attempt++) {
+				try {
+					await this.sendCommand("aibot_upload_media_chunk", {
+						upload_id: uploadId, chunk_index: index, base64_data: chunk.toString("base64"),
+					});
+					break;
+				} catch (error) {
+					if (attempt >= 1) throw error;
+				}
+			}
+		}
+		const finish = await this.sendCommand("aibot_upload_media_finish", { upload_id: uploadId });
+		const mediaId = bodyField(finish, "media_id");
+		if (!mediaId) throw new DeliveryError("上传完成没有返回 media_id", "rejected");
+		return mediaId;
+	}
 	/** aibot_send_msg — proactive push to a single user (chat_type=1) or group (chat_type=2). */
 	sendMsg(chatId: string, chatType: 1 | 2, body: Record<string, any>): Promise<WeComResponse> {
 		return this.sendCommand("aibot_send_msg", { chatid: chatId, chat_type: chatType, ...body });
@@ -356,4 +393,14 @@ export class WeComClient {
 		}
 		this.pending.clear();
 	}
+}
+
+function bodyField(response: WeComResponse, key: string): string | undefined {
+	const body = response.body;
+	if (body && typeof body === "object") {
+		const value = (body as Record<string, unknown>)[key];
+		if (typeof value === "string" && value) return value;
+	}
+	const direct = response[key];
+	return typeof direct === "string" && direct ? direct : undefined;
 }

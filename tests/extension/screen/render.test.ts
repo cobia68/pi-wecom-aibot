@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  cellMetrics, cellsToSvg, findFonts, loadFonts, maskSecrets, parseAnsiLine, readFontInfo, renderScreenPng,
+  cellMetrics, cellsToSvg, findEmojiFont, findFonts, loadFonts, maskSecrets, parseAnsiLine, readFontInfo, renderScreenPng,
   type FontEnvironment,
 } from "../../../src/extension/screen/render.ts";
 
@@ -78,6 +78,30 @@ function environment(platform: NodeJS.Platform, files: string[], extra: Partial<
   return { platform, env: {}, home: "/home/test", exists: (path) => files.includes(path), run: () => undefined, ...extra };
 }
 
+test("the card header is set in the proportional font, with the badge in the theme's accent", () => {
+	const header = { title: "project", badge: "会话通知", subtitle: "provider · model", caption: "session: abc" };
+	const svg = cellsToSvg([parseAnsiLine("body")], 20, {
+		families: ["monospace"], sansFamilies: ["Sans"], metrics, foreground: "#eeeeee", background: "#111111",
+		palette: { accent: "#ff00ff", warning: "#ffaa00" }, header,
+	});
+	// Title, subtitle and badge take the proportional stack; only the caption stays monospace.
+	assert.match(svg, /font-family="'Sans', monospace" font-size="17" font-weight="600"/);
+	assert.match(svg, /font-family="'Sans', monospace" font-size="12\.5"/);
+	assert.match(svg, /font-family="'Sans', monospace" font-size="11\.5" fill="#ff00ff">会话通知</);
+	assert.match(svg, /font-family="monospace" font-size="11\.5"/);
+	assert.match(svg, /<polyline points="4 17 10 11 4 5"\/>/, "the accent tile keeps the vector icon, not a font glyph");
+	assert.match(svg, /font-size="15"/, "the terminal grid keeps its own size");
+});
+
+test("the warning tone marks an aborted run, and no header leaves the band out", () => {
+	const options = { families: ["monospace"], metrics, foreground: "#eeeeee", background: "#111111", palette: { warning: "#ffaa00" } };
+	const aborted = cellsToSvg([parseAnsiLine("body")], 20, {
+		...options, header: { title: "project", badge: "已中止", tone: "warning" as const, subtitle: "provider · model", caption: "session: abc" },
+	});
+	assert.match(aborted, /font-size="11\.5" fill="#ffaa00">已中止</);
+	assert.doesNotMatch(cellsToSvg([parseAnsiLine("body")], 20, options), /clipPath/, "without a header there is no band");
+});
+
 test("ANSI parsing retains grapheme widths and text styles, dropping control strings and hyperlinks", () => {
   const cells = parseAnsiLine("\x1b[1;3;4;9;31;44ma中👨‍👩‍👧e\u0301\x1b[0m!\x1b]8;;https://private.invalid\x07链接\x1b]8;;\x07\x1b_pi:c\x07\x1b_Gpayload\x1b\\");
   assert.deepEqual(cells.slice(0, 4).map((cell) => [cell.text, cell.width]), [["a", 1], ["中", 2], ["👨‍👩‍👧", 2], ["é", 1]]);
@@ -121,6 +145,13 @@ test("SVG escapes text and font names while retaining cell backgrounds and decor
   assert.match(svg, /text-anchor="middle"/);
   assert.equal((svg.match(/<rect /g) ?? []).length, 8, "canvas, inverse background, underline and strike bars");
   assert.ok(cellMetrics({ ...metrics, advance: 100 }).width <= 15 * 0.75);
+});
+
+test("monochrome Noto Emoji is accepted while color emoji fonts are ignored", () => {
+  const mono = "/home/test/.local/share/fonts/noto-emoji/NotoEmoji.ttf";
+  assert.equal(findEmojiFont(environment("linux", [mono])), mono);
+  const color = "/usr/share/fonts/truetype/noto/NotoColorEmoji-Regular.ttf";
+  assert.equal(findEmojiFont(environment("linux", [color], { run: () => color })), undefined);
 });
 
 test("Windows discovers Microsoft YaHei in system or per-user fonts without using fontconfig", () => {

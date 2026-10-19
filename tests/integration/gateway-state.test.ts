@@ -44,7 +44,7 @@ function message(content: string) {
 }
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-state-test-"));
+  sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-aibot-state-test-"));
   file = join(sandbox, "bindings.json");
   gateways = [];
   FakeWebSocket.instances = [];
@@ -58,7 +58,7 @@ afterEach(async () => {
 test("gateway recovery does not redirect a prior choice to the first different pi that reconnects", async () => {
   const first = create();
   add(first, "A"); add(first, "B");
-  message("/wecom use session-A");
+  message("/wecom-aibot use session-A");
   const saved = await readFile(file, "utf8");
   assert.match(saved, /session-A/);
   assert.doesNotMatch(saved, /secret|hello/);
@@ -69,7 +69,7 @@ test("gateway recovery does not redirect a prior choice to the first different p
   assert.equal(b.frames.filter((frame) => frame.type === "task").length, 0);
   assert.match(b.ws.sent.at(-1).body.stream.content, /已离线/);
   const a = add(recovered, "A");
-  message("/wecom use session-A");
+  message("/wecom-aibot use session-A");
   const delivered = a.frames.filter((frame) => frame.type === "task");
   assert.equal(delivered.length, 1);
   assert.equal(delivered[0].task.message.text, "must wait for A or a new choice");
@@ -95,7 +95,7 @@ test("a failed binding write cannot start a task in an uncommitted target", asyn
   gateways.push(gateway);
   const a = add(gateway, "A");
   message("must not run");
-  message("/wecom use session-A");
+  message("/wecom-aibot use session-A");
   assert.equal(a.frames.filter((frame) => frame.type === "task").length, 0);
   assert.match(a.ws.sent.at(-1).body.stream.content, /无法保存目标会话/);
 });

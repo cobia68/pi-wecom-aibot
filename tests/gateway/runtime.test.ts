@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { WeComGateway, type GatewayPeer } from "../../src/gateway/runtime.ts";
 import { sessionTarget, type GatewayRegistration, type ServerFrame } from "../../src/shared/gateway-protocol.ts";
@@ -98,7 +101,7 @@ test("multiple sessions retain the first task until a choice and remember that c
 test("quoted replies route by the full session ID without changing the direct-message selection", () => {
   const a = add("A", SESSION_A);
   const b = add("B", SESSION_B);
-  message(`/wecom use ${SESSION_A}`);
+  message(`/wecom-aibot use ${SESSION_A}`);
   message("reply B", { quote: quote(SESSION_B) });
   message("direct A");
   assert.equal(b.peer.messages()[0].task.message.text, "reply B");
@@ -132,7 +135,7 @@ test("a damaged source header cannot redirect a quote through a valid-looking ID
 test("flattened or truncated notification quotes cannot fall back to the selected pi", () => {
   const a = add("A", SESSION_A);
   add("B", SESSION_B);
-  message(`/wecom use ${SESSION_A}`);
+  message(`/wecom-aibot use ${SESSION_A}`);
   for (const content of [`project-B · 会话通知 provider-B · model-B session: ${SESSION_B} result`, "project-B · 会话通知\nprovider-B · model-B"]) {
     message("quote B", { quote: { msgtype: "text", text: { content } } });
     assert.match(prompt(), /重新选择/);
@@ -164,7 +167,7 @@ test("a notification's source header owns routing even when its metadata and out
 test("the selected pi exiting requires a new choice even when only one other pi remains", () => {
   const a = add("A", SESSION_A);
   const b = add("B", SESSION_B);
-  message(`/wecom use ${SESSION_A}`);
+  message(`/wecom-aibot use ${SESSION_A}`);
   gateway.unregister(a.value.instanceId, a.peer);
   message("next task");
   assert.equal(b.peer.messages().length, 0);
@@ -209,8 +212,8 @@ test("group selections are separate for each sender and for each conversation", 
   const a = add("A", SESSION_A);
   const b = add("B", SESSION_B);
   const group = { chattype: "group", chatid: "group-1" };
-  message(`@bot /wecom use ${SESSION_A}`, { ...group, from: { userid: "alice" } });
-  message(`@bot /wecom use ${SESSION_B}`, { ...group, from: { userid: "bob" } });
+  message(`@bot /wecom-aibot use ${SESSION_A}`, { ...group, from: { userid: "alice" } });
+  message(`@bot /wecom-aibot use ${SESSION_B}`, { ...group, from: { userid: "bob" } });
   message("alice task", { ...group, from: { userid: "alice" } });
   message("bob task", { ...group, from: { userid: "bob" } });
   message("another chat", { ...group, chatid: "group-2", from: { userid: "alice" } });
@@ -240,7 +243,7 @@ test("retained messages expire rather than starting a stale task later", (t) => 
   // Keep the fake upstream responsive while advancing time.
   a.ws.onSend = (frame) => { if (frame.cmd === "ping") a.ws.acknowledge(frame); };
   t.mock.timers.tick(301_000);
-  message(`/wecom use ${SESSION_A}`);
+  message(`/wecom-aibot use ${SESSION_A}`);
   assert.equal(a.peer.messages().length, 0);
   assert.match(prompt(), /请发送任务/);
 });
@@ -470,4 +473,69 @@ test("an unreadable message from a permitted sender is answered instead of route
   assert.equal(reply.body.stream.finish, true);
   assert.match(reply.body.stream.content, /无法识别/);
   assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
+});
+
+function imageFile(data = Buffer.alloc(64, 1)): { dir: string; path: string } {
+  const dir = mkdtempSync(join(tmpdir(), "gateway-image-"));
+  const path = join(dir, "screen.png");
+  writeFileSync(path, data);
+  return { dir, path };
+}
+
+test("an image notification uploads media and sends a native image message instead of Markdown", async () => {
+  const a = add("A", SESSION_A);
+  const file = imageFile();
+  const sent: any[] = [];
+  a.ws.onSend = (frame: any) => {
+    sent.push(frame);
+    if (frame.cmd === "aibot_upload_media_init") a.ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { upload_id: "upload-1" } });
+    else if (frame.cmd === "aibot_upload_media_chunk") a.ws.acknowledge(frame);
+    else if (frame.cmd === "aibot_upload_media_finish") a.ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { media_id: "media-1" } });
+    else if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
+  };
+  await gateway.notify("A", { chatId: "user", chatType: 1 }, {
+    kind: "completion", source: a.value.source, text: "fallback", image: { mime: "image/png", filename: "pi-notification.png", path: file.path },
+  });
+  assert.equal(sent.some((frame) => frame.cmd === "aibot_upload_media_init"), true);
+  const push = sent.find((frame) => frame.cmd === "aibot_send_msg");
+  assert.equal(push.body.msgtype, "image");
+  assert.equal(push.body.image.media_id, "media-1");
+  assert.equal(push.body.markdown, undefined);
+  rmSync(file.dir, { recursive: true, force: true });
+});
+
+test("a missing image file falls back to the Markdown body with a visible reason", async () => {
+  const a = add("A", SESSION_A);
+  const sent: any[] = [];
+  a.ws.onSend = (frame: any) => {
+    sent.push(frame);
+    if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
+  };
+  await gateway.notify("A", { chatId: "user", chatType: 1 }, {
+    kind: "completion", source: a.value.source, text: "fallback body",
+    image: { mime: "image/png", filename: "pi-notification.png", path: "/definitely/missing/pi-notification.png" },
+  });
+  const push = sent.find((frame) => frame.cmd === "aibot_send_msg");
+  assert.equal(push.body.msgtype, "markdown");
+  assert.match(push.body.markdown.content, /fallback body/);
+  assert.match(push.body.markdown.content, /图片发送失败，已改发文字/);
+});
+
+test("a rejected media upload falls back to Markdown while a rejected image send also falls back", async () => {
+  const a = add("A", SESSION_A);
+  const file = imageFile();
+  const sent: any[] = [];
+  a.ws.onSend = (frame: any) => {
+    sent.push(frame);
+    if (frame.cmd === "aibot_upload_media_init") a.ws.receive({ headers: frame.headers, errcode: 40006, errmsg: "bad size" });
+    else if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
+  };
+  await gateway.notify("A", { chatId: "user", chatType: 1 }, {
+    kind: "completion", source: a.value.source, text: "fallback body",
+    image: { mime: "image/png", filename: "pi-notification.png", path: file.path },
+  });
+  const push = sent.find((frame) => frame.cmd === "aibot_send_msg");
+  assert.equal(push.body.msgtype, "markdown");
+  assert.match(push.body.markdown.content, /图片发送失败，已改发文字/);
+  rmSync(file.dir, { recursive: true, force: true });
 });

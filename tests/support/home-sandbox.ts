@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { after } from "node:test";
 
 const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
-export const sandboxHome = mkdtempSync(join(tmpdir(), "pi-wecom-home-"));
+export const sandboxHome = mkdtempSync(join(tmpdir(), "pi-wecom-aibot-home-"));
 process.env.HOME = sandboxHome;
 process.env.USERPROFILE = sandboxHome;
 

@@ -10,6 +10,7 @@ import type { WeComConfig } from "./config.ts";
 import type { GatewayClientOptions } from "./gateway-client.ts";
 import type { BridgeClient, ChatIdentity, GatewayTask, TaskState } from "../shared/gateway-protocol.ts";
 import { InboundContentPreparer, type PreparedInboundContent } from "./inbound/content.ts";
+import { rmSync } from "node:fs";
 import { assistantReplyText, captureModelIdentity, captureNotificationSource, latestAssistantReply } from "./notification-source.ts";
 import { NO_REPLY_TEXT, notificationPayload, renderNotification } from "../shared/notification.ts";
 import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
@@ -37,10 +38,12 @@ export interface CompletionRequest {
 	chatType: 1 | 2;
 	source: NotificationSource;
 	content?: string;
+	/** The frozen result of an automatic reply; content is reserved for explicit wecom_send bodies. */
+	result?: string;
+	aborted?: boolean;
 	tailParagraphs?: number;
-	screen?: boolean;
 	afterEntryId: string | null;
-	/** Screen preparation in progress; repeated settle/reconnect events must not capture twice. */
+	/** Image preparation in progress; settle and reconnect must not capture twice. */
 	preparing?: Promise<void>;
 	/** Frozen when the run ends; a reconnect sends exactly this. */
 	ready?: GatewayNotification;
@@ -48,8 +51,8 @@ export interface CompletionRequest {
 	sending?: Promise<void>;
 }
 
-/** Connection readiness of this pi's started bridge, rather than just the upstream socket state. */
-export type BridgeConnectionStatus = "connecting" | "online" | "reconnecting" | "blocked";
+/** Visible connection status after this registration has been usable at least once. */
+export type BridgeConnectionStatus = "online" | "reconnecting" | "blocked";
 
 /** What a session needs from the pi extension that owns it. */
 export interface BridgeHost {
@@ -57,15 +60,15 @@ export interface BridgeHost {
 	context(): ExtensionContext | undefined;
 	/** pi is between agent_settled and its notification boundary: no queued task may start. */
 	settling(): boolean;
-	sendUserMessage(content: (TextContent | ImageContent)[]): void;
+	sendUserMessage(content: (TextContent | ImageContent)[], chat?: { chatId: string; chatType: 1 | 2; userid: string }): void;
 	/** false for a WeCom message this pi has already seen. */
 	firstSeen(msgId: string): boolean;
 	log(line: string): void;
 	notify(message: string, type?: "info" | "warning" | "error"): void;
 	/** The owner may update its display; late updates must not affect a replacement session. */
 	connectionChanged?(session: BridgeSession): void;
-	/** Capture/render/upload in pi; only a Markdown snapshot is returned to the bridge. */
-	prepareScreen(notification: GatewayNotification, ctx: ExtensionContext, signal: AbortSignal): Promise<GatewayNotification>;
+	/** Render this notification as a screen image; failures return the Markdown fallback. */
+	prepareImage(notification: GatewayNotification, ctx: ExtensionContext, signal: AbortSignal): Promise<GatewayNotification>;
 	/** Dispose this session, e.g. after the client gave up or the pi session changed. */
 	stop(reason: string): void;
 }
@@ -78,7 +81,7 @@ export class BridgeSession {
 	state: WeComState = "disconnected";
 	detail: string | undefined;
 	gatewaySessions = 0;
-	/** The shared WeCom connection gave up and waits for /wecom start (from the latest gateway status). */
+	/** The shared WeCom connection gave up and waits for /wecom-aibot connect (from the latest gateway status). */
 	private upstreamStopped = false;
 	private readonly host: BridgeHost;
 	private readonly config: WeComConfig;
@@ -88,20 +91,23 @@ export class BridgeSession {
 	private readonly notifications = new Map<string, CompletionRequest>();
 	/** Frozen deliveries have their own ownership, independent of the next run's scheduling key. */
 	private readonly outbox = new Set<CompletionRequest>();
-	/** /wecom whoami waiting for this registration and subscription; an error ends the wait. */
+	/** /wecom-aibot whoami waiting for this registration and subscription; an error ends the wait. */
 	private readonly readyWaiters = new Set<(error?: Error) => void>();
 	private active: BridgeRequest | undefined;
 	private streamText = "";
 	private finalText = "";
 	private drainTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Aborts inbound media preparation, e.g. when this session is replaced. */
 	private readonly mediaAbort = new AbortController();
 	private disposed = false;
 	/** A stopped upstream has been reported; the next report needs a restart in between. */
 	private stoppedNotice = false;
 	private everSubscribed = false;
+	/** Readiness at the last callback; metadata and socket state can arrive separately. */
+	private connectionReady = false;
 	/** Detect a recovery that arrived before an earlier not-sent result was returned. */
 	private subscription = 0;
-	private disconnectNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+	private connectionNoticeTimer: ReturnType<typeof setTimeout> | undefined;
 	private disconnectReported = false;
 	private disconnectDetail: string | undefined;
 
@@ -118,11 +124,12 @@ export class BridgeSession {
 				if (this.disposed) return;
 				this.gatewaySessions = status.sessions;
 				this.upstreamStopped = status.stopped === true;
-				this.host.connectionChanged?.(this);
+				// stopped/readiness can change without a subsequent onState callback.
+				this.changeState(status.state, status.detail);
 			},
 			onError: (message) => {
 				if (this.disposed) return;
-				// The client has given up: status, whoami and /wecom start must see a stopped bridge, not a live one.
+				// The client has given up: status, whoami and /wecom-aibot connect must see a stopped bridge, not a live one.
 				host.stop(message);
 				host.notify(message, "error");
 			},
@@ -134,29 +141,32 @@ export class BridgeSession {
 
 	start(): void { this.client.start(); }
 
-	get ready(): boolean { return this.client.isReady(); }
-	get connectionStatus(): BridgeConnectionStatus {
-		if (this.upstreamStopped && this.state === "disconnected") return "blocked";
+	get ready(): boolean { return !this.disposed && this.state === "subscribed" && this.client.isReady(); }
+	get connectionStatus(): BridgeConnectionStatus | undefined {
 		if (this.ready) return "online";
-		return this.everSubscribed ? "reconnecting" : "connecting";
+		if (!this.everSubscribed) return undefined;
+		return this.upstreamStopped && this.state === "disconnected" ? "blocked" : "reconnecting";
 	}
 	get queued(): number { return this.queue.length; }
 	get running(): boolean { return !!this.active; }
 	get pendingNotifications(): number { return this.notifications.size + this.outbox.size; }
 
 	dispose(reason: string): void {
+		if (this.disposed) return;
 		this.disposed = true;
 		this.mediaAbort.abort();
 		clearTimeout(this.drainTimer);
 		this.drainTimer = undefined;
-		clearTimeout(this.disconnectNoticeTimer);
-		this.disconnectNoticeTimer = undefined;
+		clearTimeout(this.connectionNoticeTimer);
+		this.connectionNoticeTimer = undefined;
 		if (this.active) this.report(this.active, "stopped");
 		if (this.active || this.queue.length) this.host.log(`cleared active request and ${this.queue.length} queued requests: ${reason}`);
 		this.active?.prepared?.release();
 		for (const request of this.queue) request.prepared?.release();
 		this.active = undefined;
 		this.queue.length = 0;
+		for (const request of this.notifications.values()) removeImage(request.ready);
+		for (const request of this.outbox) removeImage(request.ready);
 		this.notifications.clear();
 		this.outbox.clear();
 		this.streamText = this.finalText = "";
@@ -215,18 +225,20 @@ export class BridgeSession {
 		this.notifications.set(key, request);
 	}
 
-	async notify(chat: ChatRef, notification: GatewayNotification, options: { screen?: boolean; ctx?: ExtensionContext; signal?: AbortSignal } = {}): Promise<void> {
-		const signal = options.signal ? AbortSignal.any([options.signal, this.mediaAbort.signal]) : this.mediaAbort.signal;
+	async notify(chat: ChatRef, notification: GatewayNotification, options: { ctx?: ExtensionContext; signal?: AbortSignal; image?: boolean } = {}): Promise<void> {
+		const signal = options.signal ?? this.mediaAbort.signal;
 		signal.throwIfAborted();
 		const ctx = options.ctx ?? this.host.context();
 		if (!ctx || ctx.sessionManager.getSessionId() !== this.sessionId) throw new Error("pi session_id 已改变，已取消通知");
-		if (options.screen) {
-			renderNotification(notification.source, notification.text, notification);
-			notification = await this.host.prepareScreen(notification, ctx, signal);
-		}
+		if (options.image) notification = await this.host.prepareImage(notification, ctx, signal);
 		signal.throwIfAborted();
 		if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId) throw new Error("pi 会话已停止或切换，已取消通知");
-		return this.client.notify(chat, notification);
+		try {
+			await this.client.notify(chat, notification);
+		} finally {
+			// A direct notification is not retained for reconnect: the gateway has consumed the file.
+			removeImage(notification);
+		}
 	}
 
 	// ---------------------------------------------------------------- whoami
@@ -243,7 +255,7 @@ export class BridgeSession {
 			};
 			const onAbort = () => finish(signal.reason instanceof Error ? signal.reason : abortError());
 			const timer = setTimeout(() => finish(new Error(
-				`${CONNECT_WAIT_MS / 1000} 秒内未连上企业微信（${this.state}${this.detail ? `：${this.detail}` : ""}）；可用 /wecom status 和 /wecom log 查看原因`,
+				`${CONNECT_WAIT_MS / 1000} 秒内未连上企业微信（${this.state}${this.detail ? `：${this.detail}` : ""}）；可用 /wecom-aibot status 和 /wecom-aibot log 查看原因`,
 			)), CONNECT_WAIT_MS);
 			this.readyWaiters.add(finish);
 			signal.addEventListener("abort", onAbort, { once: true });
@@ -259,48 +271,54 @@ export class BridgeSession {
 	// ---------------------------------------------------------------- client events
 	private changeState(next: WeComState, detail: string | undefined): void {
 		if (this.disposed) return;
-		const previous = this.state;
+		const wasReady = this.connectionReady;
 		const wasStopped = this.stoppedNotice;
 		this.state = next;
 		this.detail = detail;
+		this.connectionReady = this.ready;
 		this.stoppedNotice = this.upstreamStopped && next === "disconnected";
-		if (next === "subscribed") {
-			clearTimeout(this.disconnectNoticeTimer);
-			this.disconnectNoticeTimer = undefined;
-			if (!this.everSubscribed) this.host.notify("当前 pi 已通过共享网关连接企业微信", "info");
-			else if (this.disconnectReported || wasStopped) this.host.notify("企业微信机器人连接已恢复", "info");
+		if (this.connectionReady) {
+			clearTimeout(this.connectionNoticeTimer);
+			this.connectionNoticeTimer = undefined;
+			// The first success is shown only in the footer, even after a slow or refused attempt.
+			if (this.everSubscribed && (this.disconnectReported || wasStopped)) this.host.notify("企业微信机器人连接已恢复", "info");
 			this.everSubscribed = true;
 			this.disconnectReported = false;
 			this.disconnectDetail = undefined;
 			for (const wake of [...this.readyWaiters]) wake();
-			if (previous !== "subscribed") {
+			if (!wasReady) {
 				this.subscription++;
 				if (this.active?.result !== undefined) this.finishActive();
-				void this.flushNotifications();
+				const ctx = this.host.context();
+				if (ctx) void this.prepareNotifications(ctx, false);
+				else void this.flushNotifications();
 				this.scheduleDrain();
 			}
 		}
 		if (this.stoppedNotice) {
-			clearTimeout(this.disconnectNoticeTimer);
-			this.disconnectNoticeTimer = undefined;
+			clearTimeout(this.connectionNoticeTimer);
+			this.connectionNoticeTimer = undefined;
 		}
 		if (this.stoppedNotice && !wasStopped) {
 			// Also on the first connection: a refused subscription must not leave the bridge silently waiting.
 			const reason = detail ?? "企业微信连接已停止";
 			for (const wake of [...this.readyWaiters]) wake(new Error(reason));
-			const hint = reason.includes("/wecom start") ? "" : "。请核对 BotID/Secret（/wecom setup），然后运行 /wecom start 恢复";
+			const hint = reason.includes("/wecom-aibot connect") ? "" : "。请核对 BotID/Secret（/wecom-aibot setup），然后运行 /wecom-aibot connect 恢复";
 			this.disconnectReported = true;
 			this.host.notify(`企业微信机器人连接已停止：${reason}${hint}`, "warning");
-		} else if (this.everSubscribed && next !== "subscribed" && !this.stoppedNotice) {
+		} else if (!this.connectionReady && !this.stoppedNotice) {
 			if (detail) this.disconnectDetail = detail;
-			if (!this.disconnectNoticeTimer && !this.disconnectReported) {
-				// One deadline per outage, not one per reconnect attempt. Brief disconnects stay in /wecom log.
-				this.disconnectNoticeTimer = setTimeout(() => {
-					this.disconnectNoticeTimer = undefined;
+			if (!this.connectionNoticeTimer && !this.disconnectReported) {
+				// One deadline for the initial connection or each outage, not one per retry.
+				this.connectionNoticeTimer = setTimeout(() => {
+					this.connectionNoticeTimer = undefined;
 					if (this.disposed || this.ready || this.stoppedNotice) return;
 					this.disconnectReported = true;
-					this.host.notify(`企业微信机器人连接中断已超过 30 秒${this.disconnectDetail ? `：${this.disconnectDetail}` : ""}。仍在自动重连，可运行 /wecom log 查看诊断`, "warning");
-				}, DISCONNECT_NOTICE_MS);
+					this.host.notify(this.everSubscribed
+						? `企业微信机器人连接中断已超过 30 秒${this.disconnectDetail ? `：${this.disconnectDetail}` : ""}。仍在自动重连，可运行 /wecom-aibot log 查看诊断`
+						: "企业微信首次连接等待已超过 30 秒。仍在重试，可运行 /wecom-aibot status 和 /wecom-aibot log 查看原因；/wecom-aibot disconnect 可取消。", "warning");
+				}, this.everSubscribed ? DISCONNECT_NOTICE_MS : CONNECT_WAIT_MS);
+				this.connectionNoticeTimer.unref();
 			}
 		}
 		this.host.connectionChanged?.(this);
@@ -396,7 +414,7 @@ export class BridgeSession {
 			return;
 		}
 		try {
-			this.host.sendUserMessage(prepared.content);
+			this.host.sendUserMessage(prepared.content, prepared.chat);
 		} catch (err) {
 			this.host.log(`sendUserMessage failed: ${errMsg(err)}`);
 			request.result = "pi 未能启动本次任务，请在 pi 中查看错误后重试。";
@@ -420,7 +438,7 @@ export class BridgeSession {
 		if (!this.notifications.has(key)) {
 			this.notifications.set(key, {
 				chatId: active.chatId, chatType: active.chatType, source: active.source, afterEntryId: null,
-				ready: notificationPayload("reply", active.source, active.result, { aborted: active.aborted }),
+				result: active.result, aborted: active.aborted,
 			});
 		}
 		this.host.log(`final notification queued for ${active.label} (${active.result.length} chars)`);
@@ -431,35 +449,41 @@ export class BridgeSession {
 
 	// ---------------------------------------------------------------- notifications
 	private prepareNotifications(ctx: ExtensionContext, aborted: boolean): Promise<void> {
-		const preparations: Promise<void>[] = [];
+		const images: Promise<void>[] = [];
 		for (const [key, request] of this.notifications) {
 			if (request.ready !== undefined) continue;
-			if (request.preparing) { preparations.push(request.preparing); continue; }
+			if (request.preparing) { images.push(request.preparing); continue; }
 			try {
 				if (request.source.sessionId !== ctx.sessionManager.getSessionId()) throw new Error("pi session_id 已改变，已取消通知");
-				const answer = request.content === undefined
+				const answer = request.content === undefined && request.result === undefined
 					? latestAssistantReply(ctx.sessionManager.getBranch(), request.afterEntryId) : undefined;
 				if (answer) request.source = { ...request.source, ...captureModelIdentity(ctx, answer) };
-				const ready = notificationPayload("completion", request.source, request.content ?? answer?.text ?? NO_REPLY_TEXT, {
-					tailParagraphs: request.tailParagraphs, aborted,
-				});
-				// Validate before side effects. Capture every requested image now, before awaiting any upload.
+				// Autonomous replies keep the tail like a normal reply; scheduled excerpts use completion rules.
+				const ready = notificationPayload(request.result !== undefined ? "reply" : "completion", request.source,
+					request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT, {
+						tailParagraphs: request.tailParagraphs, aborted: request.aborted ?? aborted,
+					});
+				// Validate the Markdown fallback before any image side effects.
 				renderNotification(ready.source, ready.text, ready);
-				if (!request.screen) request.ready = ready;
-				else {
-					request.preparing = this.host.prepareScreen(ready, ctx, this.mediaAbort.signal).then((prepared) => {
-						if (this.disposed || this.notifications.get(key) !== request) return;
-						if (this.host.context()?.sessionManager.getSessionId() !== this.sessionId) throw new Error("pi session_id 已改变，已取消通知");
-						renderNotification(prepared.source, prepared.text, prepared);
-						request.ready = prepared;
-					}).catch((err: unknown) => this.cancelNotification(key, request, err));
-					preparations.push(request.preparing);
+				// Explicit content stays Markdown; automatic replies and scheduled answers follow the mode.
+				if (request.content !== undefined || this.config.sendMode !== "image") {
+					request.ready = ready;
+					continue;
 				}
+				const prepare = this.host.prepareImage(ready, ctx, this.mediaAbort.signal).then((prepared) => {
+					if (this.disposed || this.notifications.get(key) !== request) { removeImage(prepared); return; }
+					request.ready = prepared;
+				}).catch((err: unknown) => this.cancelNotification(key, request, err))
+					.finally(() => { request.preparing = undefined; });
+				request.preparing = prepare;
+				images.push(prepare);
 			} catch (err) {
 				this.cancelNotification(key, request, err);
 			}
 		}
-		return preparations.length ? Promise.all(preparations).then(() => this.flushNotifications()) : this.flushNotifications();
+		// Text notifications start their writes synchronously; images flush once their files are ready.
+		const flush = this.flushNotifications();
+		return images.length ? Promise.all(images).then(() => this.flushNotifications()) : flush;
 	}
 
 	private cancelNotification(key: string, request: CompletionRequest, error: unknown): void {
@@ -487,6 +511,7 @@ export class BridgeSession {
 			// Content stays frozen through the ACK; a newer run has an independent outbox entry.
 			request.sending = this.client.notify({ chatId: request.chatId, chatType: request.chatType }, request.ready).then(() => {
 				this.outbox.delete(request);
+				removeImage(request.ready);
 				if (!this.disposed) this.host.log(`notification delivered for session ${request.source.sessionId}`);
 			}).catch((err: unknown) => {
 				if (this.disposed) return;
@@ -497,6 +522,7 @@ export class BridgeSession {
 					return;
 				}
 				this.outbox.delete(request);
+				removeImage(request.ready);
 				// A rejection needs user action; an unknown ACK outcome must never trigger an automatic duplicate.
 				this.host.log(`notification failed (${outcome}): ${errMsg(err)}`);
 				this.host.notify(`企微通知${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errMsg(err)}`, "warning");
@@ -518,6 +544,12 @@ export function connectionConfig(config: WeComConfig): string {
 
 export function abortError(): Error {
 	return Object.assign(new Error("whoami 已取消"), { name: "AbortError" });
+}
+
+function removeImage(notification: GatewayNotification | undefined): void {
+	const path = notification?.image?.path;
+	if (!path) return;
+	try { rmSync(path, { force: true }); } catch { /* best effort */ }
 }
 
 function notificationKey(sessionId: string, target: { chatId: string; chatType: 1 | 2 }): string {

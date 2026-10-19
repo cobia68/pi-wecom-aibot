@@ -1,7 +1,7 @@
 import "../support/home-sandbox.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, afterEach, beforeEach, test } from "node:test";
@@ -11,11 +11,11 @@ import { gatewayEndpoint } from "../../src/shared/gateway-protocol.ts";
 import { startGatewayServer, type GatewayServer } from "../../src/gateway/server.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
 
-const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-multi-test-"));
+const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-aibot-multi-test-"));
 const previousDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = sandbox;
 const { default: extension } = await import("../../src/extension/index.ts");
-const { saveConfig, loadConfig } = await import("../../src/extension/config.ts");
+const { saveConfig, loadConfig, CONFIG_FILE } = await import("../../src/extension/config.ts");
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
 let server: GatewayServer;
 let harnesses: ReturnType<typeof piHarness>[];
@@ -75,22 +75,25 @@ async function result(pi: ReturnType<typeof piHarness>, text: string) {
   await pi.emit("agent_settled", { aborted: false });
 }
 
-async function pair(enabled = true) {
-  const config = loadConfig()!;
-  saveConfig({ ...config, enabled });
+async function pair(connected = true) {
   const a = piHarness("A");
   const b = piHarness("B");
   harnesses.push(a, b);
   await a.emit("session_start");
   await b.emit("session_start");
-  if (enabled) await until(() => a.ready() && b.ready(), "two extension registrations");
+  assert.equal(a.state.clients.length + b.state.clients.length, 0, "neither session inherits a connection");
+  if (connected) {
+    await a.command("connect");
+    await b.command("connect");
+    await until(() => a.ready() && b.ready(), "two manual extension registrations");
+  }
   return { a, b };
 }
 
 beforeEach(async () => {
   harnesses = [];
   FakeWebSocket.instances = [];
-  const config = { botId: `multi-test-${randomUUID()}`, secret: "offline-test-secret", enabled: true, welcome: "hello" };
+  const config = { botId: `multi-test-${randomUUID()}`, secret: "offline-test-secret", welcome: "hello" };
   saveConfig(config);
   server = (await startGatewayServer({ credentials: config, endpoint: gatewayEndpoint(config.botId), idleTimeoutMs: 50, createWebSocket(url) {
     const ws = new FakeWebSocket(url);
@@ -111,22 +114,23 @@ after(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-test("/wecom start registers that pi, repeated start is idempotent, and stop leaves other pi running", async () => {
+test("/wecom-aibot connect registers only that session; repeating connect or disconnecting never changes shared config or other pi", async () => {
+  const saved = await readFile(CONFIG_FILE, "utf8");
   const { a, b } = await pair(false);
   assert.equal(server.gateway.size, 0);
-  await a.command("start");
+  await a.command("connect");
   await until(a.ready, "A started");
   assert.equal(server.gateway.size, 1);
   assert.equal(b.state.clients.length, 0);
-  await b.command("start");
+  await b.command("connect");
   await until(b.ready, "B started");
-  await a.command("start");
+  await a.command("connect");
   assert.equal(server.gateway.size, 2);
   assert.equal(FakeWebSocket.instances.length, 1);
   assert.equal(a.state.clients.length, 1);
-  await a.command("stop");
+  await a.command("disconnect");
   await until(() => server.gateway.size === 1, "only B remains");
-  assert.equal(loadConfig()?.enabled, true);
+  assert.equal(await readFile(CONFIG_FILE, "utf8"), saved);
   await b.notification({ chatid: "user", content: "B still connected" });
   await b.emit("session_shutdown");
   await server.closed;
@@ -180,7 +184,10 @@ test("switching one pi's session invalidates its old route while the other pi co
   a.state.entries = [];
   a.state.idle = true;
   await a.emit("session_start");
-  await until(a.ready, "A re-registered");
+  await until(() => server.gateway.size === 1 && !a.ready(), "old A registration revoked");
+  assert.equal(a.state.clients.length, 1, "new A requires an explicit connect");
+  await a.command("connect");
+  await until(a.ready, "A manually re-registered");
   assert.equal(server.gateway.size, 2);
   assert.equal(FakeWebSocket.instances.length, 1);
   inbound("session-A", "must not reach new A or B");
@@ -193,7 +200,7 @@ test("switching one pi's session invalidates its old route while the other pi co
   assert.match(push.body.markdown.content, /session: session-B\n\nB unaffected$/);
 });
 
-test("a refused registration stops that pi's bridge, so status and start see it as stopped", async () => {
+test("a refused registration stops that pi's bridge, so status and connect see it as disconnected", async () => {
   await pair();
   const c = piHarness("C");
   harnesses.push(c);
@@ -203,12 +210,13 @@ test("a refused registration stops that pi's bridge, so status and start see it 
   // The same full session ID as A: the gateway refuses it, and the client gives up.
   c.state.sessionId = "session-A";
   await c.emit("session_start");
+  await c.command("connect");
   await until(() => notices.some((notice) => notice.includes("另一个 pi 注册")), "duplicate refused");
   await c.command("status");
-  assert.match(notices.at(-1)!, /当前 pi：已停止/);
+  assert.match(notices.at(-1)!, /当前 pi：未连接/);
   assert.equal(server.gateway.size, 2);
   c.state.sessionId = "session-C";
-  await c.command("start");
+  await c.command("connect");
   await until(c.ready, "C registered after switching its session");
   assert.equal(c.state.clients.length, 2);
   assert.equal(server.gateway.size, 3);
@@ -242,7 +250,7 @@ function dialogs(pi: ReturnType<typeof piHarness>, options: { answer?: RegExp; i
   return ui;
 }
 
-test("/wecom whoami identifies the sender's chat, saves it as the default after confirmation and routes nothing", async () => {
+test("/wecom-aibot whoami identifies the sender's chat, saves it as the default after confirmation and routes nothing", async () => {
   const { a, b } = await pair();
   const ui = dialogs(a);
   const running = a.command("whoami");
@@ -260,14 +268,14 @@ test("/wecom whoami identifies the sender's chat, saves it as the default after 
   assert.equal(a.state.sent.length + b.state.sent.length, 0, "the identifying message is not a pi task");
   const receipt = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
   assert.match(receipt.body.stream.content, /whoami 已识别当前群聊/);
-  // Without a default target, the tool and /wecom test can now omit chatid.
+  // Without a default target, the tool and /wecom-aibot test can now omit chatid.
   await a.notification({ content: "to the default" });
   const push = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
   assert.equal(push.body.chatid, "group_chat");
   assert.equal(push.body.chat_type, 2);
 });
 
-test("interactive setup: choosing automatic identification runs whoami after connecting, then confirms like /wecom whoami", async () => {
+test("interactive setup: choosing automatic identification runs whoami after connecting, then confirms like /wecom-aibot whoami", async () => {
   const { a, b } = await pair();
   const { botId, secret } = loadConfig()!;
   const ui = dialogs(a, { inputs: [botId, secret], menu: /自动识别/ });
@@ -276,7 +284,7 @@ test("interactive setup: choosing automatic identification runs whoami after con
   await a.notification({ chatid: "user", content: "barrier" });
   chatMessage({ from: { userid: "user_one" }, chattype: "group", chatid: "group_chat", text: { content: "@bot hi" } });
   await running;
-  assert.equal(ui.confirms.length, 1, "the whoami step asks before saving, as /wecom whoami does");
+  assert.equal(ui.confirms.length, 1, "the whoami step asks before saving, as /wecom-aibot whoami does");
   assert.match(ui.confirms[0], /chatid=group_chat　chat_type=2　userid=user_one/);
   assert.equal(loadConfig()?.defaultChatId, "group_chat");
   assert.equal(loadConfig()?.defaultChatType, 2);

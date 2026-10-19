@@ -15,9 +15,9 @@ import {
 } from "../shared/gateway-protocol.ts";
 
 const AUTH_FAILED = "共享网关认证失败：本机运行中的网关使用不同的 BotID/Secret 或插件版本。"
-	+ "请在仍用旧配置的 pi 中运行 /wecom start 或 /wecom stop（旧版插件需退出该 pi），再在这里运行 /wecom start。";
+	+ "请在仍用旧配置的 pi 中运行 /wecom-aibot connect 或 /wecom-aibot disconnect（旧版插件为 /wecom-aibot start / stop，需退出该 pi），再在这里运行 /wecom-aibot connect。";
 const LEGACY_GATEWAY = "旧版插件的共享网关仍在运行：同一机器人只能有一个长连接。"
-	+ "请在仍使用旧版插件的 pi 窗口执行 /reload 或退出，再在这里运行 /wecom start。";
+	+ "请在仍使用旧版插件的 pi 窗口执行 /reload 或退出，再在这里运行 /wecom-aibot connect。";
 
 export interface GatewayClientOptions {
 	config: WeComConfig;

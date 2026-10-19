@@ -5,11 +5,11 @@ import { FooterComponent, SessionManager, initTheme, type AgentSession, type Ext
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { BridgeConnectionStatus } from "../../src/extension/bridge-session.ts";
 import { WeComStatus, WECOM_STATUS_KEY } from "../../src/extension/status.ts";
-import { fixtureTheme, installScreenFixture } from "../support/screen-fixture.ts";
+import { fixtureTheme, installTuiFixture } from "../support/tui-fixture.ts";
 
 function context(mode: ExtensionContext["mode"] = "tui", hasUI = true) {
   const ctx = { ui: {} } as ExtensionContext;
-  const fixture = installScreenFixture(ctx);
+  const fixture = installTuiFixture(ctx);
   const writes: [string, string | undefined][] = [];
   const setStatus = ctx.ui.setStatus;
   ctx.ui.setStatus = (key, text) => { writes.push([key, text]); setStatus(key, text); };
@@ -17,19 +17,18 @@ function context(mode: ExtensionContext["mode"] = "tui", hasUI = true) {
   return { ...ctx, ...fixture, writes };
 }
 
-test("the name stays exactly wecom-bot; only its foreground color indicates the connection state", () => {
+test("the name stays exactly wecom-aibot; only its foreground color indicates the connection state", () => {
   const ctx = context();
   const status = new WeComStatus();
   const cases: [BridgeConnectionStatus, ThemeColor][] = [
-    ["connecting", "warning"], ["online", "success"],
-    ["reconnecting", "warning"], ["blocked", "error"],
+    ["online", "success"], ["reconnecting", "warning"], ["blocked", "error"],
   ];
   for (const [connection, color] of cases) {
     status.update(ctx, connection);
     const text = ctx.statuses.get(WECOM_STATUS_KEY)!;
-    assert.equal(text, ctx.ui.theme.fg(color, "wecom-bot"));
-    assert.equal(stripVTControlCharacters(text), "wecom-bot");
-    assert.equal(visibleWidth(text), 9);
+    assert.equal(text, ctx.ui.theme.fg(color, "wecom-aibot"));
+    assert.equal(stripVTControlCharacters(text), "wecom-aibot");
+    assert.equal(visibleWidth(text), 11);
   }
   status.clear();
 });
@@ -37,10 +36,10 @@ test("the name stays exactly wecom-bot; only its foreground color indicates the 
 test("fresh SDK contexts and changes with the same color do not cause redundant footer writes", () => {
   const ctx = context();
   const status = new WeComStatus();
-  status.update(ctx, "connecting");
+  status.update(ctx, "reconnecting");
   status.update({ ...ctx }, "reconnecting");
   status.update({ ...ctx }, "reconnecting");
-  assert.deepEqual(ctx.writes, [[WECOM_STATUS_KEY, ctx.ui.theme.fg("warning", "wecom-bot")]]);
+  assert.deepEqual(ctx.writes, [[WECOM_STATUS_KEY, ctx.ui.theme.fg("warning", "wecom-aibot")]]);
   assert.equal(ctx.widgets.size, 1);
   status.clear();
   status.clear();
@@ -58,7 +57,7 @@ test("pi theme invalidation repaints an idle status without a connection event o
   ctx.root.invalidate();
   const light = ctx.statuses.get(WECOM_STATUS_KEY);
   assert.notEqual(light, dark);
-  assert.equal(light, ctx.ui.theme.fg("success", "wecom-bot"));
+  assert.equal(light, ctx.ui.theme.fg("success", "wecom-aibot"));
   const count = ctx.writes.length;
   ctx.root.invalidate();
   assert.equal(ctx.writes.length, count);
@@ -82,10 +81,10 @@ test("the theme observer occupies no rows, leaves other widgets alone, and canno
   observer.dispose?.();
   assert.equal(ctx.writes.length, count);
   assert.deepEqual([...ctx.widgets.values()], [other]);
-  status.update(ctx, "connecting");
+  status.update(ctx, "reconnecting");
   observer.invalidate();
   observer.dispose?.();
-  assert.equal(ctx.statuses.get(WECOM_STATUS_KEY), ctx.ui.theme.fg("warning", "wecom-bot"));
+  assert.equal(ctx.statuses.get(WECOM_STATUS_KEY), ctx.ui.theme.fg("warning", "wecom-aibot"));
   status.clear();
 });
 
@@ -99,7 +98,7 @@ test("a host-disposed theme observer drops its old binding and allows a fresh bi
   assert.equal(ctx.statuses.size, 0);
   status.update(ctx, "online");
   assert.equal(ctx.widgets.size, 1);
-  assert.equal(ctx.statuses.get(WECOM_STATUS_KEY), ctx.ui.theme.fg("success", "wecom-bot"));
+  assert.equal(ctx.statuses.get(WECOM_STATUS_KEY), ctx.ui.theme.fg("success", "wecom-aibot"));
   status.clear();
 });
 
@@ -113,13 +112,13 @@ test("rebinding a different UI removes the old entry and observer but preserves 
   status.update(b, "online");
   assert.deepEqual([...a.statuses], [["other", "Other A"]]);
   assert.equal(a.widgets.size, 0);
-  assert.equal(b.statuses.get(WECOM_STATUS_KEY), b.ui.theme.fg("success", "wecom-bot"));
+  assert.equal(b.statuses.get(WECOM_STATUS_KEY), b.ui.theme.fg("success", "wecom-aibot"));
   status.update(b, undefined);
   assert.deepEqual([...b.statuses], [["other", "Other B"]]);
   assert.equal(b.widgets.size, 0);
 });
 
-test("without a started bridge, neither the name nor a theme observer is installed", () => {
+test("without a visible connection, neither the name nor a theme observer is installed", () => {
   const ctx = context();
   const status = new WeComStatus();
   status.update(ctx, undefined);
@@ -168,15 +167,15 @@ test("pi's real footer retains its model and usage rows, applies the name's colo
       const after = footer.render(80);
       assert.deepEqual(after.slice(0, 2), before);
       assert.match(after[1], /test-model/);
-      assert.equal(stripVTControlCharacters(after[2]), "Other wecom-bot");
-      assert.ok(after[2].includes(ctx.ui.theme.fg(color, "wecom-bot")));
+      assert.equal(stripVTControlCharacters(after[2]), "Other wecom-aibot");
+      assert.ok(after[2].includes(ctx.ui.theme.fg(color, "wecom-aibot")));
       for (const width of [8, 9, 12, 24, 80]) {
         for (const line of footer.render(width)) assert.ok(visibleWidth(line) <= width);
       }
     }
     status.clear();
     assert.match(footer.render(80)[2], /Other/);
-    assert.doesNotMatch(footer.render(80).join("\n"), /wecom-bot/);
+    assert.doesNotMatch(footer.render(80).slice(2).join("\n"), /wecom-aibot/, "the extension row is cleared; the cwd may still contain the package name");
     ctx.statuses.delete("another-extension");
     assert.equal(footer.render(80).length, 2, "no empty extra row remains after all statuses are removed");
   }

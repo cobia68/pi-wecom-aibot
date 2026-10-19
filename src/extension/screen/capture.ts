@@ -44,6 +44,10 @@ export function captureScreen(root: ScreenRoot, marker: Component, theme: Theme)
 		lines, columns,
 		foreground: colorToHex(theme.colors.text),
 		background: backgroundToken ? colorToHex(theme.colors[backgroundToken]) : theme.appearance === "light" ? "#ffffff" : "#000000",
+		palette: {
+			accent: colorToHex(theme.colors.accent), muted: colorToHex(theme.colors.muted),
+			dim: colorToHex(theme.colors.dim), warning: colorToHex(theme.colors.warning),
+		},
 	};
 }
 

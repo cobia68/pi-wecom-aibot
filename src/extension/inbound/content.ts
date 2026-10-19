@@ -11,9 +11,9 @@ function errMsg(err: unknown): string {
 
 /** Files from WeCom are kept in the project, but never committed by accident. */
 async function mediaDirectory(cwd: string): Promise<string> {
-	const dir = join(cwd, ".pi-wecom-files");
+	const dir = join(cwd, ".pi-wecom-aibot-files");
 	await mkdir(dir, { recursive: true });
-	await writeFile(join(dir, ".gitignore"), "# Saved by pi-wecom-bot from WeCom messages.\n*\n", { flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
+	await writeFile(join(dir, ".gitignore"), "# Saved by pi-wecom-aibot from WeCom messages.\n*\n", { flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
 		if (error.code !== "EEXIST") throw error;
 	});
 	return dir;
@@ -22,6 +22,8 @@ async function mediaDirectory(cwd: string): Promise<string> {
 export interface PreparedInboundContent {
 	content: (TextContent | ImageContent)[];
 	label: string;
+	/** The WeCom conversation this prompt belongs to; the bridge makes it the run's default target. */
+	chat: { chatId: string; chatType: 1 | 2; userid: string };
 	/** Release the queued-image budget when handed to pi or discarded. Idempotent. */
 	release(): void;
 }
@@ -92,7 +94,7 @@ async function buildUserContent(
 	message: InboundMessage,
 	signal: AbortSignal,
 	reserveImage: (bytes: number) => void,
-): Promise<{ content: (TextContent | ImageContent)[]; label: string }> {
+): Promise<{ content: (TextContent | ImageContent)[]; label: string; chat: PreparedInboundContent["chat"] }> {
 	signal.throwIfAborted();
 	let text = message.text;
 	if (message.quoteText) text = `> 引用：${message.quoteText}\n\n${text}`;
@@ -138,10 +140,16 @@ async function buildUserContent(
 	if (images.length && /^\[图片\]$/.test(text.trim())) text = "";
 	signal.throwIfAborted();
 	const { chatId, chatType } = message.chat;
-	const header = `[企业微信${chatType === 2 ? "群聊" : "单聊"} chatid=${JSON.stringify(chatId)} chat_type=${chatType} userid=${JSON.stringify(message.userid)}]`;
-	const full = [header, text, ...notes].filter(Boolean).join("\n");
+	const full = [text, ...notes].filter(Boolean).join("\n");
 
-	const content: (TextContent | ImageContent)[] = [{ type: "text", text: full || header }];
+	const content: (TextContent | ImageContent)[] = [];
+	if (full) content.push({ type: "text", text: full });
 	content.push(...images);
-	return { content, label: `${chatType === 2 ? "group" : "single"}/${message.msgtype}` };
+	// A message with neither text nor a usable image still needs one content part.
+	if (!content.length) content.push({ type: "text", text: "（来自企业微信的消息）" });
+	return {
+		content,
+		label: `${chatType === 2 ? "group" : "single"}/${message.msgtype}`,
+		chat: { chatId, chatType, userid: message.userid },
+	};
 }

@@ -86,7 +86,7 @@ async function fakeGateway(t: { after(fn: () => Promise<void>): void }, endpoint
 }
 
 beforeEach(() => {
-  config = { botId: `ipc-test-${randomUUID()}`, secret: "offline-test-secret", enabled: true, welcome: "hello" };
+  config = { botId: `ipc-test-${randomUUID()}`, secret: "offline-test-secret", welcome: "hello" };
   FakeWebSocket.instances = [];
   clients = [];
   autoAcknowledge = true;
@@ -252,7 +252,7 @@ test("after a Secret rotation the client waits for the old gateway to exit, then
   const a = client("A");
   a.connection.start();
   await until(() => a.connection.isReady(), "old configuration ready");
-  // /wecom setup: the old registration leaves, and the old gateway is still in its idle grace.
+  // /wecom-aibot setup: the old registration leaves, and the old gateway is still in its idle grace.
   a.connection.stop();
   const rotated = { ...config, secret: "rotated-secret" };
   const launches: string[] = [];
@@ -280,7 +280,7 @@ test("a gateway that keeps other credentials is reported once after the retry wi
   const wrong = client("B", { secret: "different-secret" }, { retryMs: 300 });
   wrong.connection.start();
   await until(() => wrong.errors.length === 1, "mismatch reported");
-  assert.match(wrong.errors[0], /认证失败.*\/wecom start/);
+  assert.match(wrong.errors[0], /认证失败.*\/wecom-aibot connect/);
   assert.ok(wrong.states.filter((line) => line.includes("等待旧网关退出")).length >= 2, "retried before reporting");
   const settled = wrong.states.length;
   await new Promise((resolve) => setTimeout(resolve, 500));
@@ -299,7 +299,7 @@ test("model metadata updates reach the shared selection list", async () => {
   a.connection.updateSource({ ...source("A"), provider: "new-provider", modelName: "new-model", directoryName: "new-directory" });
   // The acknowledged send follows the metadata update in the same ordered IPC channel.
   await a.connection.notify(user, notification("A"));
-  inbound("/wecom sessions");
+  inbound("/wecom-aibot sessions");
   const text = FakeWebSocket.instances[0].sent.at(-1).body.stream.content;
   assert.match(text, /new-directory · new-provider · new-model/);
 });
@@ -518,7 +518,7 @@ const posixOnly = { skip: process.platform === "win32" && "Windows uses a named 
 test("on POSIX the gateway socket lives in a directory only this user can enter, tightened if it was loose", posixOnly, async () => {
   const endpoint = gatewayEndpoint(config.botId);
   assert.equal(endpoint.startsWith("\0"), false, "no abstract socket: other local users can neither connect nor take the name");
-  assert.equal(dirname(endpoint), join(homedir(), ".pi", "wecom-gateway"));
+  assert.equal(dirname(endpoint), join(homedir(), ".pi", "wecom-aibot-gateway"));
   mkdirSync(dirname(endpoint), { recursive: true });
   chmodSync(dirname(endpoint), 0o755);
   await startServer();
@@ -532,7 +532,7 @@ test("a home directory too long for a socket path falls back to a short per-user
   process.env.HOME = join(sandboxHome, "x".repeat(120));
   try {
     const endpoint = gatewayEndpoint(config.botId);
-    assert.match(endpoint, /^\/tmp\/pi-wecom-\d+\/[0-9a-f]{32}\.sock$/);
+    assert.match(endpoint, /^\/tmp\/pi-wecom-aibot-\d+\/[0-9a-f]{32}\.sock$/);
     assert.ok(Buffer.byteLength(endpoint) <= 100);
   } finally { process.env.HOME = home; }
 });
