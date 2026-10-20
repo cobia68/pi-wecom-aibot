@@ -43,7 +43,7 @@ export function loadConfig(): WeComConfig | undefined {
  * Merge `patch` into the file as it is now, not into a snapshot taken when pi started:
  * other windows and hand edits (e.g. allowedUserIds) survive, and fields this version
  * does not know are kept. A patch without credentials never creates a configuration,
- * so a /wecom-aibot logout in another window is not undone. `expected` binds a delayed
+ * so a /wecom-aibot reset in another window is not undone. `expected` binds a delayed
  * interaction (e.g. whoami confirmation) to the credentials it started with.
  */
 export function updateConfig(

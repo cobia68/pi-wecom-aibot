@@ -31,7 +31,7 @@ pi install git:github.com/cobia68/pi-wecom-aibot
 pi 会把仓库克隆到 `~/.pi/agent/git/github.com/cobia68/pi-wecom-aibot`，并自动安装运行所需的依赖。
 
 > [!TIP]
-> 在末尾加 `@标签` 可以固定版本，例如 `pi install git:github.com/cobia68/pi-wecom-aibot@v0.1.0`。固定后 `pi update` 不会改动它；换版本时用新标签再执行一次 `pi install`。请用标签而不是缩写的 commit 号，否则之后的 `pi update` 会失败。
+> 在末尾加 `@标签` 可以固定版本，例如 `pi install git:github.com/cobia68/pi-wecom-aibot@v0.1.0`。固定后 `pi update` 和 `pi update <source>` 都不会改动它；换版本时用新标签再执行一次 `pi install`。请用标签而不是缩写的 commit 号，否则之后的 `pi update` 会失败。
 
 ### 方式二：从本地目录安装
 
@@ -150,7 +150,7 @@ pi install .
 
 **首次连接未就绪前不显示标签**，也不往正文追加「正在注册」「已连接」的静态通知；重复执行 `/wecom-aibot connect` 不重复提示。首次等待超过 30 秒会提醒一次，可用 `/wecom-aibot status`、`/wecom-aibot log` 排查，或 `/wecom-aibot disconnect` 取消；明确失败会提示原因。
 
-成功连接后才用颜色跟踪断线和恢复。执行 `/wecom-aibot disconnect` / `/wecom-aibot logout`、退出、切换会话或 `/reload` 后隐藏，新 session 必须重新手动连接。每个 pi 独立显示自己的状态，查询 `/wecom-aibot` 不会启动接入。
+成功连接后才用颜色跟踪断线和恢复。执行 `/wecom-aibot disconnect` / `/wecom-aibot reset`、退出、切换会话或 `/reload` 后隐藏，新 session 必须重新手动连接。每个 pi 独立显示自己的状态，查询 `/wecom-aibot` 不会启动接入。
 
 文字保持不变，颜色随连接事件自动切换，无需手动刷新。采用 pi 的 `success` / `warning` / `error` 主题色，主题变化时也会更新；自定义主题以其配色为准。需要文字说明或排查红色状态时，用 `/wecom-aibot` 或 `/wecom-aibot log` 查看详情，处理后执行 `/wecom-aibot connect`。
 
@@ -251,12 +251,14 @@ pi install .
 | `/wecom-aibot connect`    | 当前 session 手动接入并重新读取配置；网关未运行时自动启动  |
 | `/wecom-aibot disconnect` | 仅注销当前 session；不修改配置，最后一个 pi 注销后网关退出 |
 | `/wecom-aibot log`        | 查看最近 20 条运行记录                                     |
-| `/wecom-aibot logout`     | 删除保存的配置并停止接收（需确认）                         |
+| `/wecom-aibot reset`      | 删除整份共享配置并停止接收（需确认）                       |
 | `/wecom-aibot --help`     | 查看全部命令；配置字段说明见 `/wecom-aibot setup --help`         |
 
 `/wecom-aibot disconnect` 只取消当前 session 的排队消息和待发通知，已开始的任务在电脑上照常跑完，但结果不再发回企业微信；其他已接入的 pi 不受影响。它不会改写配置文件；之后需要在当前或新 session 中手动 `/wecom-aibot connect` 才会接入，最后一个 pi 断开后共享网关自动退出。
 
-`whoami` 等待或确认期间，如果机器人凭据被更换、配置被删除或当前注册被重启，旧识别结果不会写入配置，请重新识别。`logout` 若报告删除失败，当前 pi 已停止，但凭据可能仍在磁盘；请检查提示的文件权限后重试。
+`whoami` 等待或确认期间，如果机器人凭据被更换、配置被删除或当前注册被重启，旧识别结果不会写入配置，请重新识别。`reset` 若报告删除失败，当前 pi 已停止，但凭据可能仍在磁盘；请检查提示的文件权限后重试。
+
+`reset` 删除的是整份配置文件：BotID、Secret、默认推送目标、通知模式和白名单一起删除，之后需要重新 `/wecom-aibot setup`。它只停止当前 pi 的接入；其他已连接的 pi 仍会继续收发，直到它们各自 `disconnect` 或退出。
 
 ## 🔄 升级与卸载
 
@@ -267,15 +269,13 @@ pi install .
 | Git 仓库 | `pi update git:github.com/cobia68/pi-wecom-aibot`                            |
 | 本地目录 | 在插件目录执行 `git pull`，再执行 `npm ci --omit=dev --legacy-peer-deps` |
 
-然后关闭所有使用这个机器人的 pi 窗口，再重新打开并逐个执行 `/wecom-aibot connect`。
+`pi update <source>` 只更新这一个插件，等价于 `pi update --extension <source>`；`pi update --extensions` 更新所有已安装的插件；不带目标的 `pi update` 只更新 pi 本身。用 `@标签` 固定过版本的，`pi update` 不会移动它，换版本要用新标签再执行一次 `pi install`。
 
-用 `/wecom-aibot --help` 查看总帮助，`/wecom-aibot <子命令> --help` 查看某个子命令。
-
-只执行 `pi update` 更新的是 pi 本身；`pi update --extensions` 更新所有已安装的插件。
+更新只替换磁盘上的文件，正在运行的 pi 和共享网关进程仍然持有旧代码，`/reload` 也换不掉已经在跑的网关。请关闭所有使用这个机器人的 pi 窗口（共享网关会在最后一个窗口退出后约 1.5 秒自行结束），再重新打开，并逐个执行 `/wecom-aibot connect`。
 
 ### 卸载
 
-1. 在 pi 中执行 `/wecom-aibot logout`，删除保存的 BotID 和 Secret。
+1. 在 pi 中执行 `/wecom-aibot reset`，删除保存的 BotID 和 Secret。
 2. 移除插件：
    - Git 仓库：`pi remove git:github.com/cobia68/pi-wecom-aibot`，会一并删除克隆的仓库
    - 本地目录：在插件目录执行 `pi remove .`，只取消登记，不删除目录

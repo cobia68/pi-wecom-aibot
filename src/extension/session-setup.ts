@@ -86,7 +86,7 @@ export class SessionSetup {
 		const current = this.host.readConfig(ctx);
 		if (!current) {
 			ctx.ui.notify(
-				`配置文件已不存在（可能已在其他 pi 中 /wecom-aibot logout），未保存默认推送目标：${CONFIG_FILE}`,
+				`配置文件已不存在（可能已在其他 pi 中 /wecom-aibot reset），未保存默认推送目标：${CONFIG_FILE}`,
 				"warning",
 			);
 			return;

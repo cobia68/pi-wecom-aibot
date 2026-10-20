@@ -11,7 +11,7 @@
  *   /wecom-aibot setup [whoami] [--bot-id ID] [--secret S] [--chatid ID] [--chat-type 1|2]   配置并连接已有机器人；接 whoami 时连上后识别 chatid
  *   /wecom-aibot whoami [--wait 秒]      等你给机器人发消息，识别 chatid，确认后设为默认推送目标
  *   /wecom-aibot test [chatid] [--chat-type 1|2]
- *   /wecom-aibot connect | disconnect | status | log | logout
+ *   /wecom-aibot connect | disconnect | status | log | reset
  *   /wecom-aibot --help                 命令与配置帮助
  *
  * 工具：
@@ -359,7 +359,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 					return;
 				}
 				case "connect": {
-					// Only the file counts: after a logout in another pi, this window's snapshot must not recreate it.
+					// Only the file counts: after a reset in another pi, this window's snapshot must not recreate it.
 					let current: WeComConfig | undefined;
 					try {
 						current = readConfig(ctx);
@@ -387,19 +387,22 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 					ctx.ui.notify("当前 pi 已断开；其他 pi 不受影响，最后一个 pi 断开后网关自动结束。", "info");
 					return;
 				}
-				case "logout": {
-					const ok = await ctx.ui.confirm("清除企业微信配置？", "将删除 BotID/Secret 并停止桥接。");
+				case "reset": {
+					const ok = await ctx.ui.confirm(
+						"删除整份企业微信配置？",
+						"将删除 BotID/Secret、默认推送目标和通知模式，并停止桥接。",
+					);
 					if (!ok) return;
-					stopBridge("logout");
+					stopBridge("reset");
 					try {
 						clearConfig();
 						cfg = undefined;
-						ctx.ui.notify("已清除企业微信配置", "info");
+						ctx.ui.notify("已删除企业微信配置", "info");
 					} catch (error) {
 						const detail = error instanceof Error ? error.message : String(error);
 						log(`configuration deletion failed: ${detail}`);
 						ctx.ui.notify(
-							`当前 pi 已停止，但配置文件删除失败：${detail}。BotID/Secret 可能仍在 ${CONFIG_FILE}，请检查权限后重试 /wecom-aibot logout。`,
+							`当前 pi 已停止，但配置文件删除失败：${detail}。BotID/Secret 可能仍在 ${CONFIG_FILE}，请检查权限后重试 /wecom-aibot reset。`,
 							"error",
 						);
 					}

@@ -1124,7 +1124,7 @@ test("every help form describes targets and the actual config path without execu
 		"setup --bot-id sensitive-bot --secret=sensitive-secret --help",
 		"connect --help",
 		"disconnect -h",
-		"logout --help",
+		"reset --help",
 		"test --help",
 		"test your-userid --chat-type 1 --help",
 		"whoami --help",
@@ -1201,7 +1201,7 @@ test("actions written as options, unknown options and extra positional arguments
 		"--disconnect",
 		"connect --unknown",
 		"disconnect --unknown",
-		"logout extra",
+		"reset extra",
 		"disconnect extra",
 		"connect help",
 		"--chatid user",
@@ -1283,7 +1283,7 @@ test("setup merges into the file as it is now: fields edited after this pi start
 	assert.equal(sent.length, 0);
 });
 
-test("connect after a logout in another pi reports the missing configuration instead of restoring the secret", async (t) => {
+test("connect after a reset in another pi reports the missing configuration instead of restoring the secret", async (t) => {
 	const notices: string[] = [];
 	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
 	clearConfig();
@@ -1316,7 +1316,7 @@ test("double dash keeps a literal --help target from being interpreted as an opt
 	assert.equal(pushed[0].body.chat_type, 1);
 });
 
-test("logout reports deletion failure and stops this pi without claiming the credentials were cleared", async (t) => {
+test("reset reports deletion failure and stops this pi without claiming the configuration was deleted", async (t) => {
 	if (process.platform === "win32" || process.getuid?.() === 0) {
 		t.skip("uses POSIX directory permissions");
 		return;
@@ -1328,9 +1328,9 @@ test("logout reports deletion failure and stops this pi without claiming the cre
 	// The configuration lives in the plugin folder: that is the directory whose write access governs deletion.
 	await chmod(dirname(CONFIG_FILE), 0o500);
 	try {
-		await command("logout", ctx);
+		await command("reset", ctx);
 		assert.equal(await readFile(CONFIG_FILE, "utf8"), before);
-		assert.equal(notices.includes("已清除企业微信配置"), false);
+		assert.equal(notices.includes("已删除企业微信配置"), false);
 		assert.match(notices.at(-1)!, /已停止.*配置.*删除失败/);
 		assert.equal(ws.readyState, 3);
 	} finally {

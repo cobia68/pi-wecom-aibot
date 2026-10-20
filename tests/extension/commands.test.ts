@@ -99,7 +99,7 @@ test("connection help never promises persisted consent or recommends the old sta
 });
 
 test("a bare action documents no options and offers no --help, while a parameterized command does", () => {
-	for (const name of ["status", "connect", "disconnect", "log", "logout"]) {
+	for (const name of ["status", "connect", "disconnect", "log", "reset"]) {
 		const help = topicHelp(`${name} --help`);
 		assert.doesNotMatch(help, /^选项$/m, name);
 		assert.doesNotMatch(help, /-h, --help/, name);

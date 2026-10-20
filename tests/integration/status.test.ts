@@ -325,13 +325,13 @@ test("a changed session ID revokes the old registration even before a lifecycle 
 	assert.match(h.notices.at(-1)!, /当前 pi：未连接/);
 });
 
-for (const end of ["logout", "session_shutdown", "fatal"] as const) {
+for (const end of ["reset", "session_shutdown", "fatal"] as const) {
 	test(`${end} removes the status and an ended session cannot silently reconnect`, async () => {
 		const h = harness();
 		const client = await connect(h);
 		client.publish({ state: "subscribed", sessions: 1 });
 		assert.equal(h.statuses.get(key), label("success"));
-		if (end === "logout") await h.command("logout");
+		if (end === "reset") await h.command("reset");
 		else if (end === "fatal") client.fail("registration rejected");
 		else await h.emit("session_shutdown", { reason: "quit" });
 		assert.equal(client.stopped.length, 1);

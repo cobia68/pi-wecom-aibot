@@ -119,12 +119,15 @@ const WECOM_COMMANDS: WeComCommand[] = [
 	},
 	{ name: "log", usage: "log", description: "查看最近 20 条日志", maxArgs: 0, options: [], details: [] },
 	{
-		name: "logout",
-		usage: "logout",
-		description: "确认后删除共享配置，并停止当前 pi 的接入",
+		name: "reset",
+		usage: "reset",
+		description: "确认后删除整份共享配置，并停止当前 pi 的接入",
 		maxArgs: 0,
 		options: [],
-		details: ["删除的是同一 pi 用户目录共用的配置文件，之后需要重新 setup。"],
+		details: [
+			"删除的是同一 pi 用户目录共用的整份配置文件：BotID、Secret、默认推送目标、通知模式和白名单一起删除，之后需要重新 setup。",
+			"只停止当前 pi 的接入；其他 pi 若已连接，仍会继续接收，直到它们各自 disconnect 或退出。",
+		],
 	},
 ];
 export type WeComInvocation =
