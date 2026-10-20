@@ -1,9 +1,9 @@
 /** Persist only destination bindings, so gateway recovery cannot silently change a user's pi. */
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { SessionTarget } from "../shared/gateway-protocol.ts";
+import { gatewayDirectory } from "../shared/agent-path.ts";
 
 export class GatewaySelectionStore {
 	private readonly file: string;
@@ -36,7 +36,7 @@ export class GatewaySelectionStore {
 
 export function gatewayStateFile(botId: string): string {
 	const key = createHash("sha256").update(botId).digest("hex").slice(0, 32);
-	return join(homedir(), ".pi", "wecom-aibot-gateway", `${key}.json`);
+	return join(gatewayDirectory(), `${key}.json`);
 }
 
 function validEntry(value: unknown): value is [string, SessionTarget] {

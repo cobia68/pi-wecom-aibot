@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import WebSocket, { WebSocketServer } from "ws";
-import { GATEWAY_PROTOCOL_VERSION, gatewayEndpoint, gatewayProof, readFrames, verifyProof, writeFrame, type ServerFrame } from "../../src/shared/gateway-protocol.ts";
+import { GATEWAY_PROTOCOL_VERSION, gatewayEndpoint, gatewayProof, parseServerFrame, readFrames, verifyProof, writeFrame, type ServerFrame } from "../../src/shared/gateway-protocol.ts";
 
 async function until(predicate: () => boolean, description: string, timeout = 10_000): Promise<void> {
   const deadline = Date.now() + timeout;
@@ -131,7 +131,11 @@ test("the packaged gateway boots under node_modules with runtime dependencies on
     nonce = attempt;
     socket = createConnection(endpoint);
     socket.on("error", () => {});
-    readFrames(socket, (frame: ServerFrame) => { if (frame.type === "hello" && nonce === attempt) hello = frame; });
+    readFrames(socket, (value) => {
+      const parsed = parseServerFrame(value);
+      if (!parsed.ok) throw new Error(parsed.reason);
+      if (parsed.frame.type === "hello" && nonce === attempt) hello = parsed.frame;
+    });
     const current = socket;
     current.once("connect", () => writeFrame(current, { type: "hello", version: GATEWAY_PROTOCOL_VERSION, nonce: attempt }));
     await new Promise((resolve) => setTimeout(resolve, 50));

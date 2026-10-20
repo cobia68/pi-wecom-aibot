@@ -19,6 +19,9 @@ import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 const MAX_QUEUE_SIZE = 50;
 const CONNECT_WAIT_MS = 30_000;
 const DISCONNECT_NOTICE_MS = 30_000;
+/** pi refuses a prompt without telling extensions; only an idle session proves no run is coming. */
+const DISPATCH_CHECK_MS = 5_000;
+const DISPATCH_REJECTED = "pi 没有接受这条企微任务（可能未选择模型、缺少 API key、登录已过期或正在压缩），请在 pi 中处理后重新发送。";
 
 /** A WeCom message accepted by this pi; its status message belongs to the gateway. */
 interface BridgeRequest {
@@ -26,6 +29,7 @@ interface BridgeRequest {
 	source: NotificationSource;
 	chatId: string;
 	chatType: 1 | 2;
+	userid: string;
 	prepared?: PreparedInboundContent;
 	label: string;
 	result?: string;
@@ -41,6 +45,8 @@ export interface CompletionRequest {
 	/** The frozen result of an automatic reply; content is reserved for explicit wecom_send bodies. */
 	result?: string;
 	aborted?: boolean;
+	/** A failure explanation, never a screen capture: it can show what the user is doing locally. */
+	textOnly?: boolean;
 	tailParagraphs?: number;
 	afterEntryId: string | null;
 	/** Image preparation in progress; settle and reconnect must not capture twice. */
@@ -60,7 +66,10 @@ export interface BridgeHost {
 	context(): ExtensionContext | undefined;
 	/** pi is between agent_settled and its notification boundary: no queued task may start. */
 	settling(): boolean;
-	sendUserMessage(content: (TextContent | ImageContent)[], chat?: { chatId: string; chatType: 1 | 2; userid: string }): void;
+	/** Hand a prepared prompt to pi; pi reports success only through before_agent_start. */
+	sendUserMessage(content: (TextContent | ImageContent)[]): void;
+	/** pi confirmed the run of this task, so its replies belong to that conversation. */
+	taskStarted?(chat: { chatId: string; chatType: 1 | 2; userid: string }): void;
 	/** false for a WeCom message this pi has already seen. */
 	firstSeen(msgId: string): boolean;
 	log(line: string): void;
@@ -94,6 +103,11 @@ export class BridgeSession {
 	/** /wecom-aibot whoami waiting for this registration and subscription; an error ends the wait. */
 	private readonly readyWaiters = new Set<(error?: Error) => void>();
 	private active: BridgeRequest | undefined;
+	/** The prompt handed to pi; before_agent_start echoes it only for the run that really started. */
+	private dispatched: { request: BridgeRequest; text: string; images: number } | undefined;
+	/** The run this bridge started; undefined while the session's current run belongs to the user. */
+	private activeRun: BridgeRequest | undefined;
+	private dispatchTimer: ReturnType<typeof setTimeout> | undefined;
 	private streamText = "";
 	private finalText = "";
 	private drainTimer: ReturnType<typeof setTimeout> | undefined;
@@ -157,6 +171,10 @@ export class BridgeSession {
 		this.mediaAbort.abort();
 		clearTimeout(this.drainTimer);
 		this.drainTimer = undefined;
+		clearTimeout(this.dispatchTimer);
+		this.dispatchTimer = undefined;
+		this.dispatched = undefined;
+		this.activeRun = undefined;
 		clearTimeout(this.connectionNoticeTimer);
 		this.connectionNoticeTimer = undefined;
 		if (this.active) this.report(this.active, "stopped");
@@ -165,8 +183,8 @@ export class BridgeSession {
 		for (const request of this.queue) request.prepared?.release();
 		this.active = undefined;
 		this.queue.length = 0;
-		for (const request of this.notifications.values()) removeImage(request.ready);
-		for (const request of this.outbox) removeImage(request.ready);
+		for (const request of this.notifications.values()) this.removeImage(request.ready);
+		for (const request of this.outbox) this.removeImage(request.ready);
 		this.notifications.clear();
 		this.outbox.clear();
 		this.streamText = this.finalText = "";
@@ -206,14 +224,38 @@ export class BridgeSession {
 		if (text.trim()) this.finalText = text;
 	}
 
+	/**
+	 * pi started a run. Only the run that echoes the prompt this bridge handed over belongs to a WeCom
+	 * task; a different prompt means pi refused that task and the user started a local run, whose answer
+	 * must stay in the terminal.
+	 */
+	promptStarted(prompt: string, images: number): boolean {
+		const dispatched = this.dispatched;
+		this.dispatched = undefined;
+		clearTimeout(this.dispatchTimer);
+		this.dispatchTimer = undefined;
+		if (!dispatched || this.disposed || this.active !== dispatched.request) return false;
+		const request = dispatched.request;
+		if (dispatched.text !== prompt || dispatched.images !== images) {
+			// A different prompt started instead: pi never accepted this task's prompt.
+			this.failTask(request, DISPATCH_REJECTED);
+			return false;
+		}
+		this.activeRun = request;
+		this.host.taskStarted?.({ chatId: request.chatId, chatType: request.chatType, userid: request.userid });
+		return true;
+	}
+
 	/** The run ended: the active task's result and every completion notification are frozen and sent. */
 	settle(ctx: ExtensionContext, aborted: boolean): Promise<void> {
-		if (this.active && this.active.result === undefined) {
+		const run = this.activeRun;
+		this.activeRun = undefined;
+		if (run && this.active === run) {
 			const text = (this.finalText || this.streamText).trim();
-			this.active.result = text || NO_REPLY_TEXT;
-			this.active.aborted = aborted;
+			run.result = text || NO_REPLY_TEXT;
+			run.aborted = aborted;
+			this.finishActive();
 		}
-		this.finishActive();
 		return this.prepareNotifications(ctx, aborted);
 	}
 
@@ -237,7 +279,7 @@ export class BridgeSession {
 			await this.client.notify(chat, notification);
 		} finally {
 			// A direct notification is not retained for reconnect: the gateway has consumed the file.
-			removeImage(notification);
+			this.removeImage(notification);
 		}
 	}
 
@@ -347,6 +389,7 @@ export class BridgeSession {
 			source: captureNotificationSource(ctx),
 			chatId: message.chat.chatId,
 			chatType: message.chat.chatType,
+			userid: message.userid,
 			label: `${message.chat.chatType === 2 ? "group" : "single"}/${message.msgtype}`,
 		};
 		if (this.queue.length >= MAX_QUEUE_SIZE) {
@@ -413,13 +456,17 @@ export class BridgeSession {
 			this.queue.unshift(request);
 			return;
 		}
+		this.dispatched = { request, ...promptOf(prepared.content) };
 		try {
-			this.host.sendUserMessage(prepared.content, prepared.chat);
+			this.host.sendUserMessage(prepared.content);
+			// pi accepts the prompt asynchronously and swallows its own refusals, so confirm it later.
+			this.armDispatchCheck();
 		} catch (err) {
+			this.dispatched = undefined;
+			clearTimeout(this.dispatchTimer);
+			this.dispatchTimer = undefined;
 			this.host.log(`sendUserMessage failed: ${errMsg(err)}`);
-			request.result = "pi 未能启动本次任务，请在 pi 中查看错误后重试。";
-			this.finishActive();
-			void this.flushNotifications();
+			this.failTask(request, `pi 未能启动本次任务：${errMsg(err)}`);
 		} finally {
 			// pi now owns its input (or rejected it); this bridge retains no image payload for the active run.
 			prepared.release();
@@ -427,7 +474,37 @@ export class BridgeSession {
 		}
 	}
 
-	private finishActive(): void {
+	/**
+	 * An idle session after a dispatch means pi refused the prompt: no run started and none is coming.
+	 * A busy session still has that run in preparation, so keep waiting for its before_agent_start.
+	 */
+	private armDispatchCheck(): void {
+		if (this.dispatchTimer || !this.dispatched) return;
+		this.dispatchTimer = setTimeout(() => {
+			this.dispatchTimer = undefined;
+			const dispatched = this.dispatched;
+			const ctx = this.host.context();
+			if (!dispatched || this.disposed || !ctx) return;
+			if (!ctx.isIdle()) { this.armDispatchCheck(); return; }
+			this.dispatched = undefined;
+			this.failTask(dispatched.request, DISPATCH_REJECTED);
+		}, DISPATCH_CHECK_MS);
+		this.dispatchTimer.unref();
+	}
+
+	/** Report a task pi never ran; its answer must not be taken from whatever the user runs next. */
+	private failTask(request: BridgeRequest, reason: string): void {
+		this.host.log(`task not started: ${reason}`);
+		if (this.active !== request) return;
+		request.result = reason;
+		request.aborted = false;
+		this.finishActive(true);
+		const ctx = this.host.context();
+		if (ctx) void this.prepareNotifications(ctx, false);
+		else void this.flushNotifications();
+	}
+
+	private finishActive(textOnly = false): void {
 		const active = this.active;
 		if (!active || active.result === undefined) return;
 		// Not handed to the gateway (disconnected): the next subscription finishes it.
@@ -438,7 +515,7 @@ export class BridgeSession {
 		if (!this.notifications.has(key)) {
 			this.notifications.set(key, {
 				chatId: active.chatId, chatType: active.chatType, source: active.source, afterEntryId: null,
-				result: active.result, aborted: active.aborted,
+				result: active.result, aborted: active.aborted, textOnly,
 			});
 		}
 		this.host.log(`final notification queued for ${active.label} (${active.result.length} chars)`);
@@ -448,6 +525,14 @@ export class BridgeSession {
 	}
 
 	// ---------------------------------------------------------------- notifications
+	/** A rendered notification can show the screen, so a file that cannot be deleted is reported, not ignored. */
+	private removeImage(notification: GatewayNotification | undefined): void {
+		const path = notification?.image?.path;
+		if (!path) return;
+		try { rmSync(path, { force: true }); }
+		catch (error) { this.host.log(`could not delete notification image ${path}: ${errMsg(error)}`); }
+	}
+
 	private prepareNotifications(ctx: ExtensionContext, aborted: boolean): Promise<void> {
 		const images: Promise<void>[] = [];
 		for (const [key, request] of this.notifications) {
@@ -466,12 +551,12 @@ export class BridgeSession {
 				// Validate the Markdown fallback before any image side effects.
 				renderNotification(ready.source, ready.text, ready);
 				// Explicit content stays Markdown; automatic replies and scheduled answers follow the mode.
-				if (request.content !== undefined || this.config.sendMode !== "image") {
+				if (request.content !== undefined || request.textOnly || this.config.sendMode !== "image") {
 					request.ready = ready;
 					continue;
 				}
 				const prepare = this.host.prepareImage(ready, ctx, this.mediaAbort.signal).then((prepared) => {
-					if (this.disposed || this.notifications.get(key) !== request) { removeImage(prepared); return; }
+					if (this.disposed || this.notifications.get(key) !== request) { this.removeImage(prepared); return; }
 					request.ready = prepared;
 				}).catch((err: unknown) => this.cancelNotification(key, request, err))
 					.finally(() => { request.preparing = undefined; });
@@ -511,7 +596,7 @@ export class BridgeSession {
 			// Content stays frozen through the ACK; a newer run has an independent outbox entry.
 			request.sending = this.client.notify({ chatId: request.chatId, chatType: request.chatType }, request.ready).then(() => {
 				this.outbox.delete(request);
-				removeImage(request.ready);
+				this.removeImage(request.ready);
 				if (!this.disposed) this.host.log(`notification delivered for session ${request.source.sessionId}`);
 			}).catch((err: unknown) => {
 				if (this.disposed) return;
@@ -522,7 +607,7 @@ export class BridgeSession {
 					return;
 				}
 				this.outbox.delete(request);
-				removeImage(request.ready);
+				this.removeImage(request.ready);
 				// A rejection needs user action; an unknown ACK outcome must never trigger an automatic duplicate.
 				this.host.log(`notification failed (${outcome}): ${errMsg(err)}`);
 				this.host.notify(`企微通知${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errMsg(err)}`, "warning");
@@ -546,14 +631,18 @@ export function abortError(): Error {
 	return Object.assign(new Error("whoami 已取消"), { name: "AbortError" });
 }
 
-function removeImage(notification: GatewayNotification | undefined): void {
-	const path = notification?.image?.path;
-	if (!path) return;
-	try { rmSync(path, { force: true }); } catch { /* best effort */ }
-}
+
 
 function notificationKey(sessionId: string, target: { chatId: string; chatType: 1 | 2 }): string {
 	return JSON.stringify([sessionId, target.chatType, target.chatId]);
+}
+
+/** What before_agent_start reports for the prompt built here: pi's own text/image normalization. */
+function promptOf(content: (TextContent | ImageContent)[]): { text: string; images: number } {
+	return {
+		text: content.filter((part): part is TextContent => part.type === "text").map((part) => part.text).join("\n"),
+		images: content.filter((part) => part.type === "image").length,
+	};
 }
 
 function errMsg(err: unknown): string {

@@ -5,7 +5,7 @@ import { formatProcessingStatus, MAX_NOTIFICATION_BYTES, quotedSessions, renderN
 import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
 import { WeComClient, type WeComClientOptions, type WeComInbound } from "./wecom-client.ts";
 import { deliveryFailure } from "../shared/delivery.ts";
-import { parseInbound, senderOf, WECOM_REPLY_WINDOW_MS, WECOM_STREAM_LIFETIME_MS, type ChatRef, type InboundMessage } from "../shared/wecom-protocol.ts";
+import { parseInbound, senderOf, WECOM_IMAGE_MAX_BYTES, WECOM_IMAGE_MIN_BYTES, WECOM_REPLY_WINDOW_MS, WECOM_STREAM_LIFETIME_MS, type ChatRef, type InboundMessage } from "../shared/wecom-protocol.ts";
 import {
 	sameTarget, sessionTarget, validWelcome,
 	type ChatIdentity, type GatewayCredentials, type GatewayRegistration, type GatewayStatus,
@@ -86,6 +86,8 @@ export class WeComGateway {
 
 	get size(): number { return this.members.size; }
 	owns(instanceId: string, peer: GatewayPeer): boolean { return this.members.get(instanceId)?.peer === peer; }
+	/** Gateway-side diagnostics for pi's log; used when an IPC frame cannot be handled at all. */
+	log(message: string): void { this.broadcast({ type: "log", message }); }
 
 	register(registration: GatewayRegistration, peer: GatewayPeer, resume = false): void {
 		if (registration.config.botId !== this.options.botId) throw new Error("共享网关的 BotID 与本 pi 不一致，请核对配置。");
@@ -187,8 +189,16 @@ export class WeComGateway {
 			kind: notification.kind, excerpt: notification.excerpt, aborted: notification.aborted,
 		});
 		if (notification.image) {
-			const data = readImage(notification.image.path);
-			const mediaId = data ? await this.client.uploadImage(data, notification.image.filename).catch(() => undefined) : undefined;
+			const image = readImage(notification.image.path);
+			let failure = image.reason;
+			let mediaId: string | undefined;
+			if (image.data) {
+				try {
+					mediaId = await this.client.uploadImage(image.data, notification.image.filename);
+				} catch (error) {
+					failure = `上传失败：${errorMessage(error)}`;
+				}
+			}
 			if (mediaId) {
 				try {
 					await this.client.sendMsg(chat.chatId, chat.chatType, { msgtype: "image", image: { media_id: mediaId } });
@@ -196,9 +206,13 @@ export class WeComGateway {
 				} catch (error) {
 					// A rejection definitely did not deliver the image; an unknown ACK must not be duplicated.
 					if (deliveryFailure(error) !== "rejected") throw error;
+					failure = `发送被拒绝：${errorMessage(error)}`;
 				}
 			}
-			const note = "\n\n（图片发送失败，已改发文字）";
+			// The reason belongs in the fallback, as the README promises; a truncated tail is cut, not lost.
+			const reason = failure?.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 200);
+			this.log(`图片通知改发文字：${reason ?? "未知原因"}`);
+			const note = `\n\n（图片发送失败${reason ? `：${reason}` : ""}，已改发文字）`;
 			const fallback = Buffer.byteLength(content, "utf8") + Buffer.byteLength(note, "utf8") <= MAX_NOTIFICATION_BYTES ? content + note : content;
 			await this.client.sendMsg(chat.chatId, chat.chatType, { msgtype: "markdown", markdown: { content: fallback } });
 			return;
@@ -253,7 +267,7 @@ export class WeComGateway {
 
 	private receive(action: () => void): void {
 		try { action(); }
-		catch (error) { this.broadcast({ type: "log", message: `gateway inbound failed: ${error instanceof Error ? error.message : String(error)}` }); }
+		catch (error) { this.log(`gateway inbound failed: ${errorMessage(error)}`); }
 	}
 
 	private broadcastStatus(): void {
@@ -372,8 +386,8 @@ export class WeComGateway {
 		const next = new Map(this.selections);
 		this.remember(next, key, sessionTarget(target));
 		try { this.selectionStore?.save([...next]); }
-		catch {
-			this.reply(reqId, "无法保存目标会话，请在 pi 中检查网关目录权限后重试。");
+		catch (error) {
+			this.reply(reqId, `无法保存目标会话（${errorMessage(error)}），请在 pi 中确认网关目录可写后重试。`);
 			return false;
 		}
 		this.selections.clear();
@@ -437,14 +451,19 @@ export class WeComGateway {
 	}
 }
 
-/** Read a rendered PNG defensively: a missing, non-file or oversized path falls back to Markdown. */
-function readImage(path: string): Buffer | undefined {
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** Read a rendered PNG defensively: a missing, non-file or oversized path falls back to Markdown with a reason. */
+function readImage(path: string): { data?: Buffer; reason?: string } {
 	try {
 		const stat = statSync(path);
-		if (!stat.isFile() || stat.size < 5 || stat.size > 10 * 1024 * 1024) return undefined;
-		return readFileSync(path);
-	} catch {
-		return undefined;
+		if (!stat.isFile()) return { reason: "不是普通文件" };
+		if (stat.size < WECOM_IMAGE_MIN_BYTES || stat.size > WECOM_IMAGE_MAX_BYTES) return { reason: `文件大小 ${stat.size} 字节超出限制` };
+		return { data: readFileSync(path) };
+	} catch (error) {
+		return { reason: errorMessage(error) };
 	}
 }
 

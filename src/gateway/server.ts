@@ -7,12 +7,10 @@ import type { WeComClientOptions } from "./wecom-client.ts";
 import { WeComGateway, type GatewayPeer } from "./runtime.ts";
 import { GatewaySelectionStore } from "./selection-store.ts";
 import {
-	GATEWAY_IDLE_MS, GATEWAY_PROTOCOL_VERSION, IPC_LEASE_MS, gatewayEndpoint, gatewayProof, readFrames,
-	validChat, validNonce, validNotification, validRegistration, validSource, verifyProof, writeFrame,
+	GATEWAY_IDLE_MS, GATEWAY_PROTOCOL_VERSION, IPC_LEASE_MS, gatewayEndpoint, gatewayProof, parseClientFrame, readFrames,
+	validRegistration, verifyProof, writeFrame,
 	type ClientFrame, type GatewayCredentials, type GatewayRegistration, type ServerFrame,
 } from "../shared/gateway-protocol.ts";
-
-const TASK_STATES = new Set<string>(["running", "settled", "stopped", "busy", "failed"]);
 
 export interface GatewayServerOptions extends Pick<WeComClientOptions, "createWebSocket"> {
 	endpoint: string;
@@ -86,77 +84,82 @@ export async function startGatewayServer(options: GatewayServerOptions): Promise
 			sockets.delete(socket);
 			if (registration) gateway.unregister(registration.instanceId, peer);
 		});
-		readFrames(socket, (frame: ClientFrame) => {
+		readFrames(socket, (value) => {
 			if (socket.writableEnded) return;
-			if (!clientNonce) {
-				if (frame.type !== "hello" || frame.version !== GATEWAY_PROTOCOL_VERSION || !validNonce(frame.nonce)) {
-					fail("共享网关协议版本不兼容，请退出使用该机器人的全部 pi 后重新打开");
-					return;
-				}
-				clientNonce = frame.nonce;
-				send({ type: "hello", version: GATEWAY_PROTOCOL_VERSION, endpoint: options.endpoint, nonce,
-					proof: gatewayProof(secret, "server", nonce, clientNonce, options.endpoint) });
-				return;
-			}
-			if (!registration) {
-				if (frame.type !== "register" || !verifyProof(frame.proof, gatewayProof(secret, "client", nonce, clientNonce, options.endpoint))) {
-					fail("网关认证失败");
-					return;
-				}
-				const candidate = copyRegistration(frame.registration);
-				if (!candidate) { fail("无效的 pi 注册信息"); return; }
-				try {
-					gateway.register(candidate, peer, frame.resume === true);
-					registration = candidate;
-					socket.setTimeout(IPC_LEASE_MS);
-				} catch (error) { fail(errorMessage(error)); }
-				return;
-			}
+			if (!clientNonce) { acceptHello(value); return; }
+			if (!registration) { acceptRegister(value); return; }
+			acceptRequest(value, registration);
+		}, (error) => {
+			// A frame this connection cannot even be parsed or handled is a bug, not a retry: say so in pi's log.
+			gateway.log(`共享网关 IPC 帧处理失败：${errorMessage(error)}`);
+		});
+
+		/** The shape is the parser's job; the phase order and the Secret are this connection's. */
+		function acceptHello(value: unknown): void {
+			const parsed = parseClientFrame(value);
+			if (!parsed.ok || parsed.frame.type !== "hello") { fail("共享网关协议版本不兼容，请退出使用该机器人的全部 pi 后重新打开"); return; }
+			if (parsed.frame.version !== GATEWAY_PROTOCOL_VERSION) { fail("共享网关协议版本不兼容，请退出使用该机器人的全部 pi 后重新打开"); return; }
+			clientNonce = parsed.frame.nonce;
+			send({ type: "hello", version: GATEWAY_PROTOCOL_VERSION, endpoint: options.endpoint, nonce,
+				proof: gatewayProof(secret, "server", nonce, clientNonce, options.endpoint) });
+		}
+
+		function acceptRegister(value: unknown): void {
+			const parsed = parseClientFrame(value);
+			if (!parsed.ok || parsed.frame.type !== "register") { fail("网关认证失败"); return; }
+			const frame = parsed.frame;
+			if (!verifyProof(frame.proof, gatewayProof(secret, "client", nonce, clientNonce!, options.endpoint))) { fail("网关认证失败"); return; }
+			const candidate = copyRegistration(frame.registration);
+			if (!candidate) { fail("无效的 pi 注册信息"); return; }
 			try {
-				if (!gateway.owns(registration.instanceId, peer)) throw new Error("该 pi 注册已失效，已拒绝旧连接的请求");
+				gateway.register(candidate, peer, frame.resume === true);
+				registration = candidate;
+				socket.setTimeout(IPC_LEASE_MS);
+			} catch (error) { fail(errorMessage(error)); }
+		}
+
+		/** The gateway refuses an operation with a message; a malformed frame never reaches these calls. */
+		function acceptRequest(value: unknown, registered: GatewayRegistration): void {
+			const parsed = parseClientFrame(value);
+			if (!parsed.ok) { fail(parsed.reason); return; }
+			const frame = parsed.frame;
+			if (frame.type === "hello" || frame.type === "register") { fail("该连接已完成握手"); return; }
+			try {
+				if (!gateway.owns(registered.instanceId, peer)) { fail("该 pi 注册已失效，已拒绝旧连接的请求"); return; }
 				switch (frame.type) {
 					case "ping": send({ type: "pong" }); return;
 					case "resume": gateway.resume(); return;
 					case "unregister":
-						gateway.unregister(registration.instanceId, peer);
+						gateway.unregister(registered.instanceId, peer);
 						socket.end();
 						return;
 					case "source":
-						if (!validSource(frame.source)) throw new Error("无效的会话来源");
-						gateway.updateSource(registration.instanceId, frame.source);
+						gateway.updateSource(registered.instanceId, frame.source);
 						return;
 					case "welcome":
-						gateway.updateWelcome(registration.instanceId, frame.text);
+						gateway.updateWelcome(registered.instanceId, frame.text);
 						return;
 					case "status":
-						if (typeof frame.taskId !== "string" || frame.taskId.length > 256 || !TASK_STATES.has(frame.state)) throw new Error("无效的任务状态");
-						gateway.taskStatus(registration.instanceId, frame.taskId, frame.state);
+						gateway.taskStatus(registered.instanceId, frame.taskId, frame.state);
 						return;
 					case "notify": {
-						if (typeof frame.id !== "string" || !frame.id || frame.id.length > 128) throw new Error("无效的请求 ID");
-						if (!validChat(frame.chat) || !validNotification(frame.notification)) throw new Error("无效的通知");
-						if (pending.has(frame.id) || pending.size >= 100) throw new Error("请求重复或未确认通知过多");
+						if (pending.has(frame.id) || pending.size >= 100) { fail("请求重复或未确认通知过多"); return; }
 						pending.add(frame.id);
-						void gateway.notify(registration.instanceId, frame.chat, frame.notification)
+						void gateway.notify(registered.instanceId, frame.chat, frame.notification)
 							.then(() => send({ type: "result", id: frame.id }))
 							.catch((error: unknown) => send({ type: "result", id: frame.id, error: errorMessage(error), outcome: deliveryFailure(error) }))
 							.finally(() => pending.delete(frame.id));
 						return;
 					}
 					case "watch":
-						if (typeof frame.id !== "string" || !frame.id || frame.id.length > 128 || typeof frame.timeoutMs !== "number" || !Number.isFinite(frame.timeoutMs)) {
-							throw new Error("无效的 whoami 请求");
-						}
-						gateway.watch(registration.instanceId, frame.id, frame.timeoutMs);
+						gateway.watch(registered.instanceId, frame.id, frame.timeoutMs);
 						return;
 					case "unwatch":
-						if (typeof frame.id !== "string") throw new Error("无效的 whoami 请求");
-						gateway.unwatch(registration.instanceId, frame.id);
+						gateway.unwatch(registered.instanceId, frame.id);
 						return;
-					default: throw new Error("未知的网关请求");
 				}
 			} catch (error) { fail(errorMessage(error)); }
-		});
+		}
 	}
 
 	try {

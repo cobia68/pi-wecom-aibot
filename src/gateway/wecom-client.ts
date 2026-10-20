@@ -22,7 +22,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { DeliveryError } from "../shared/delivery.ts";
-import { WECOM_ACK_TIMEOUT_MS, type WeComState } from "../shared/wecom-protocol.ts";
+import { WECOM_ACK_TIMEOUT_MS, WECOM_IMAGE_MAX_BYTES, WECOM_IMAGE_MIN_BYTES, type WeComState } from "../shared/wecom-protocol.ts";
 
 export interface WeComResponse {
 	errcode: number;
@@ -33,8 +33,8 @@ export interface WeComResponse {
 export interface WeComInbound {
 	/** req_id from the callback headers; pass it back when replying. */
 	reqId: string;
+	/** The callback body, already parsed by the bot document's shape. */
 	body: any;
-	raw: any;
 }
 
 export interface WeComClientOptions {
@@ -133,8 +133,9 @@ export class WeComClient {
 		if (ws) {
 			try {
 				ws.close();
-			} catch {
-				/* ignore */
+			} catch (error) {
+				// Closing is best effort, but a failure here means a socket the transport did not expect.
+				this.options.log?.(`WebSocket close failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
 		this.setState("disconnected", reason);
@@ -251,11 +252,11 @@ export class WeComClient {
 		const reqId = typeof msg.headers?.req_id === "string" ? msg.headers.req_id : undefined;
 
 		if (msg?.cmd === "aibot_msg_callback") {
-			if (reqId && this.isReady()) this.options.onMessage?.({ reqId, body: msg.body ?? {}, raw: msg });
+			if (reqId && this.isReady()) this.options.onMessage?.({ reqId, body: msg.body ?? {} });
 			return;
 		}
 		if (msg?.cmd === "aibot_event_callback") {
-			if (reqId && this.isReady()) this.options.onEvent?.({ reqId, body: msg.body ?? {}, raw: msg });
+			if (reqId && this.isReady()) this.options.onEvent?.({ reqId, body: msg.body ?? {} });
 			return;
 		}
 
@@ -296,16 +297,18 @@ export class WeComClient {
 
 	// ----------------------------------------------------------------- outbound
 
-	private send(payload: any): boolean {
+	/** Sends one frame; undefined when written, otherwise why it could not be written. */
+	private send(payload: any): string | undefined {
 		const ws = this.ws;
-		if (!ws || ws.readyState !== 1 /* OPEN */) return false;
+		if (!ws || ws.readyState !== 1 /* OPEN */) return "WebSocket is not connected";
 		try {
 			ws.send(JSON.stringify(payload));
-			return true;
-		} catch (err) {
-			this.options.log?.(`send failed: ${String(err)}`);
-			this.disconnect("WebSocket send failed");
-			return false;
+			return undefined;
+		} catch (error) {
+			// A synchronous failure from the transport is not a socket close: report it without reconnecting.
+			const reason = error instanceof Error ? error.message : String(error);
+			this.options.log?.(`send failed: ${reason}`);
+			return `WebSocket send failed: ${reason}`;
 		}
 	}
 
@@ -321,27 +324,23 @@ export class WeComClient {
 				reject(new DeliveryError(`${cmd} acknowledgement timeout`));
 			}, REQUEST_TIMEOUT_MS);
 			this.pending.set(reqId, { resolve, reject, timer });
-			if (!this.send(payload)) {
+			const failure = this.send(payload);
+			if (failure) {
 				clearTimeout(timer);
 				this.pending.delete(reqId);
-				reject(new DeliveryError("WebSocket is not connected"));
+				reject(new DeliveryError(failure));
 			}
 		});
 	}
 
 	/** aibot_respond_msg — reply to a message callback. */
 	respondMsg(reqId: string, body: any): boolean {
-		return this.isReady() && this.send({ cmd: "aibot_respond_msg", headers: { req_id: reqId }, body });
+		return this.isReady() && this.send({ cmd: "aibot_respond_msg", headers: { req_id: reqId }, body }) === undefined;
 	}
 
 	/** aibot_respond_welcome_msg — reply to an enter_chat event. */
 	respondWelcome(reqId: string, body: any): boolean {
-		return this.isReady() && this.send({ cmd: "aibot_respond_welcome_msg", headers: { req_id: reqId }, body });
-	}
-
-	/** aibot_respond_update_msg — update a template card. */
-	respondUpdate(reqId: string, body: any): boolean {
-		return this.isReady() && this.send({ cmd: "aibot_respond_update_msg", headers: { req_id: reqId }, body });
+		return this.isReady() && this.send({ cmd: "aibot_respond_welcome_msg", headers: { req_id: reqId }, body }) === undefined;
 	}
 
 
@@ -350,9 +349,8 @@ export class WeComClient {
 	 * chunks are 512KB of raw bytes and may be retried because the server ignores duplicates.
 	 */
 	async uploadImage(data: Buffer, filename = "pi-notification.png"): Promise<string> {
-		const MAX_IMAGE = 10 * 1024 * 1024;
-		if (data.byteLength < 5 || data.byteLength > MAX_IMAGE) {
-			throw new DeliveryError("图片大小必须在 5 字节到 10MB 之间", "rejected");
+		if (data.byteLength < WECOM_IMAGE_MIN_BYTES || data.byteLength > WECOM_IMAGE_MAX_BYTES) {
+			throw new DeliveryError(`图片大小必须在 ${WECOM_IMAGE_MIN_BYTES} 字节到 ${WECOM_IMAGE_MAX_BYTES / 1024 / 1024}MB 之间`, "rejected");
 		}
 		const name = filename.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 200) || "pi-notification.png";
 		const CHUNK = 512 * 1024;
@@ -372,7 +370,10 @@ export class WeComClient {
 					});
 					break;
 				} catch (error) {
+					// Chunks are idempotent server-side, so one retry is safe whatever the outcome; the
+					// first reason still reaches the log instead of being hidden by the retry.
 					if (attempt >= 1) throw error;
+					this.options.log?.(`upload chunk ${index} failed, retrying once: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			}
 		}

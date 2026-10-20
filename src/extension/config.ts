@@ -1,12 +1,13 @@
 /**
  * Configuration storage for the WeCom 智能机器人 extension.
- * Stored at ~/.pi/agent/wecom-aibot.json, next to pi's settings.json but separate from it (created 0600 on POSIX).
+ * Stored at <agent-dir>/wecom-aibot/config.json, in the same folder as the gateway socket this
+ * extension also owns (created 0600 on POSIX).
  */
 
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
+import { agentDirectory, pluginDirectory } from "../shared/agent-path.ts";
 
 export type SendMode = "text" | "image";
 
@@ -26,14 +27,13 @@ export interface WeComConfig {
 	sendMode?: SendMode;
 }
 
-const configuredAgentDir = process.env.PI_CODING_AGENT_DIR;
-const agentDir = configuredAgentDir
-	? resolve(configuredAgentDir.replace(/^~(?=$|[\\/])/, homedir()))
-	: join(homedir(), ".pi", "agent");
 /** A file of its own: pi gives extensions no settings writer, and project settings cannot override credentials here. */
-export const CONFIG_FILE = join(agentDir, "wecom-aibot.json");
-/** The pre-rename file name: still read once so an upgrade keeps the saved credentials. */
-export const LEGACY_CONFIG_FILE = join(agentDir, "wecom-bot.json");
+export const CONFIG_FILE = join(pluginDirectory(), "config.json");
+/**
+ * Files earlier versions wrote in the agent directory itself; each is read once so an upgrade keeps
+ * the saved credentials, then moved to CONFIG_FILE. Newest first, so a renamed install wins.
+ */
+export const LEGACY_CONFIG_FILES = [join(agentDirectory(), "wecom-aibot.json"), join(agentDirectory(), "wecom-bot.json")] as const;
 
 export const DEFAULT_WELCOME = "你好，我是 pi 智能助手。直接把问题或任务发给我即可。";
 
@@ -42,12 +42,14 @@ const DEFAULTS: Omit<WeComConfig, "botId" | "secret"> = {
 	sendMode: "text",
 };
 
-export function loadConfig(): WeComConfig | undefined {
-	try {
-		return normalize(readConfigFile());
-	} catch {
-		return undefined;
-	}
+/**
+ * A corrupt file must not look like an unconfigured one: only ENOENT means "no configuration",
+ * every other read error and every unusable value names the file and the field to fix.
+ * Presentation problems that keep the file usable (e.g. a failed legacy migration) go to `warnings`.
+ */
+export function loadConfig(warnings?: string[]): WeComConfig | undefined {
+	const found = readConfigFile(warnings);
+	return found && normalize(found.value, found.file);
 }
 
 /**
@@ -58,17 +60,18 @@ export function loadConfig(): WeComConfig | undefined {
  * interaction (e.g. whoami confirmation) to the credentials it started with.
  */
 export function updateConfig(patch: Partial<WeComConfig>, expected?: Pick<WeComConfig, "botId" | "secret">): WeComConfig {
-	let current: Partial<WeComConfig> | undefined;
+	let found: { file: string; value: unknown } | undefined;
 	try {
-		current = readConfigFile();
+		found = readConfigFile();
 	} catch (error) {
-		throw new Error(`无法读取配置文件 ${CONFIG_FILE}（${error instanceof Error ? error.message : String(error)}）；请修正或删除该文件后重试。`);
+		throw new Error(`${errMsg(error)}；请修正或删除该文件后重试。`);
 	}
-	if (expected && (current?.botId !== expected.botId || current.secret !== expected.secret)) {
+	const current = found?.value as Partial<WeComConfig> | undefined;
+	if (expected && (current?.botId !== expected.botId || current?.secret !== expected.secret)) {
 		throw new Error("机器人配置已改变或配置已删除，默认推送目标未保存；请运行 /wecom-aibot connect 后重新 /wecom-aibot whoami。");
 	}
 	const next = { ...DEFAULTS, ...current, ...patch };
-	const config = normalize(next);
+	const config = normalize(next, found?.file ?? CONFIG_FILE);
 	if (!config) throw new Error("尚未配置，请先运行 /wecom-aibot setup");
 	writeConfigFile(next);
 	return config;
@@ -83,52 +86,85 @@ export function clearConfig(): void {
 	// force only tolerates a missing file; permissions, sharing violations, etc. must reach the caller.
 	rmSync(CONFIG_FILE, { force: true });
 	// A pre-rename file must not resurrect the credentials after a logout.
-	rmSync(LEGACY_CONFIG_FILE, { force: true });
+	for (const legacy of LEGACY_CONFIG_FILES) rmSync(legacy, { force: true });
 }
 
 /** The parsed file, including fields this version does not know; undefined only when it does not exist. */
-function readConfigFile(): Partial<WeComConfig> | undefined {
+function readConfigFile(warnings?: string[]): { file: string; value: unknown } | undefined {
 	const found = readConfigText();
 	if (!found) return undefined;
 	let value: unknown;
 	try { value = JSON.parse(found.text); }
-	catch { throw new Error(`${found.file} 不是有效的 JSON`); }
+	catch (error) { throw new Error(`${found.file} 不是有效的 JSON：${errMsg(error)}`); }
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${found.file} 不是 JSON 对象`);
-	// A pre-rename file is moved under the new name once, after its content has been validated.
-	if (found.file === LEGACY_CONFIG_FILE) {
+	// A legacy file is moved under the new name once, after its content has been validated.
+	if (found.file !== CONFIG_FILE) {
 		try {
 			writeConfigFile(value);
-			rmSync(LEGACY_CONFIG_FILE, { force: true });
-		} catch { /* read-only directory: keep using the legacy file rather than lose the Secret */ }
+			rmSync(found.file, { force: true });
+		} catch (error) {
+			// Keep using the legacy file rather than lose the Secret, but say why the move failed.
+			warnings?.push(`旧配置文件 ${found.file} 暂时无法迁移到 ${CONFIG_FILE}（${errMsg(error)}），正在直接使用旧文件`);
+		}
 	}
-	return value as Partial<WeComConfig>;
+	return { file: found.file, value };
 }
 
-/** The new file, or the pre-rename one when the new one does not exist yet. */
+/** The new file, or an older one when the new one does not exist yet. */
 function readConfigText(): { file: string; text: string } | undefined {
-	for (const file of [CONFIG_FILE, LEGACY_CONFIG_FILE]) {
+	for (const file of [CONFIG_FILE, ...LEGACY_CONFIG_FILES]) {
 		try {
 			return { file, text: readFileSync(file, "utf8") };
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`无法读取配置文件 ${file}：${errMsg(error)}`);
 		}
 	}
 	return undefined;
 }
 
-function normalize(parsed: Partial<WeComConfig> | undefined): WeComConfig | undefined {
-	if (!parsed?.botId || !parsed?.secret) return undefined;
-	// Legacy enabled is deliberately ignored: connection consent belongs only to the current session.
-	return {
-		botId: parsed.botId,
-		secret: parsed.secret,
-		welcome: parsed.welcome ?? DEFAULTS.welcome,
-		allowedUserIds: parsed.allowedUserIds,
-		defaultChatId: typeof parsed.defaultChatId === "string" ? parsed.defaultChatId.trim() || undefined : undefined,
-		defaultChatType: parsed.defaultChatType === 1 || parsed.defaultChatType === 2 ? parsed.defaultChatType : undefined,
-		// Only "image" opts in; a typo or an older value falls back to safe Markdown.
-		sendMode: parsed.sendMode === "image" ? "image" : "text",
+/**
+ * One place decides what a stored value means. A wrong type is an error naming the field, never a silent
+ * default: a string allowlist would otherwise become one userid per character on the gateway side.
+ */
+function normalize(value: unknown, file: string): WeComConfig | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`配置文件 ${file} 的内容无效：必须是 JSON 对象`);
+	const parsed = value as Record<string, unknown>;
+	const text = (name: string): string | undefined => {
+		const raw = parsed[name];
+		if (raw === undefined) return undefined;
+		if (typeof raw !== "string") throw new Error(`配置文件 ${file} 的字段 ${name} 无效：必须是字符串`);
+		return raw;
 	};
+	const botId = text("botId");
+	const secret = text("secret");
+	// A file without credentials is not a configuration; /wecom-aibot setup creates one.
+	if (!botId || !secret) return undefined;
+	const chatType = parsed.defaultChatType;
+	if (chatType !== undefined && chatType !== 1 && chatType !== 2) {
+		throw new Error(`配置文件 ${file} 的字段 defaultChatType 无效：必须是 1（单聊）或 2（群聊）`);
+	}
+	const sendMode = parsed.sendMode;
+	if (sendMode !== undefined && sendMode !== "text" && sendMode !== "image") {
+		throw new Error(`配置文件 ${file} 的字段 sendMode 无效：必须是 "text" 或 "image"`);
+	}
+	const allowed = parsed.allowedUserIds;
+	if (allowed !== undefined && (!Array.isArray(allowed) || allowed.some((id) => typeof id !== "string" || !id.trim()))) {
+		throw new Error(`配置文件 ${file} 的字段 allowedUserIds 无效：必须是 userid 字符串组成的数组`);
+	}
+	return {
+		botId,
+		secret,
+		welcome: text("welcome") ?? DEFAULTS.welcome,
+		allowedUserIds: allowed as string[] | undefined,
+		defaultChatId: text("defaultChatId")?.trim() || undefined,
+		defaultChatType: chatType as 1 | 2 | undefined,
+		sendMode: (sendMode as SendMode | undefined) ?? "text",
+	};
+}
+
+function errMsg(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 /** Write a private temporary file and rename it over the target: a reader never sees a partial file. */

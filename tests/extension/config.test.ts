@@ -103,7 +103,29 @@ test("send mode defaults to text and only an explicit image changes it", () => {
   assert.equal(updateConfig({ sendMode: "image" }).sendMode, "image");
   assert.equal(loadConfig()?.sendMode, "image", "the file keeps the opt-in across reloads");
   writeFileSync(CONFIG_FILE, JSON.stringify({ botId: "bot", secret: "secret", sendMode: "picture" }));
-  assert.equal(loadConfig()?.sendMode, "text", "an unknown value falls back to Markdown");
+  assert.throws(() => loadConfig(), /sendMode/, "a typo must name the field instead of silently changing the mode");
+});
+
+test("every stored field is validated once, with its field name", () => {
+  const cases: [Record<string, unknown>, RegExp][] = [
+    [{ allowedUserIds: "alice" }, /allowedUserIds/],
+    [{ allowedUserIds: ["alice", 7] }, /allowedUserIds/],
+    [{ allowedUserIds: [""] }, /allowedUserIds/],
+    [{ defaultChatType: 3 }, /defaultChatType/],
+    [{ defaultChatType: "2" }, /defaultChatType/],
+    [{ defaultChatId: 42 }, /defaultChatId/],
+    [{ welcome: null }, /welcome/],
+    [{ botId: 42, secret: "secret" }, /botId/],
+  ];
+  for (const [fields, field] of cases) {
+    writeFileSync(CONFIG_FILE, JSON.stringify({ botId: "bot", secret: "secret", ...fields }));
+    assert.throws(() => loadConfig(), (error: Error) => field.test(error.message) && error.message.includes(CONFIG_FILE), JSON.stringify(fields));
+  }
+  // The same validation guards writes, so a broken patch cannot replace a working file.
+  writeFileSync(CONFIG_FILE, JSON.stringify({ botId: "bot", secret: "secret" }));
+  const before = readFileSync(CONFIG_FILE, "utf8");
+  assert.throws(() => updateConfig({ allowedUserIds: "alice" as unknown as string[] }), /allowedUserIds/);
+  assert.equal(readFileSync(CONFIG_FILE, "utf8"), before);
 });
 
 test("removed screen settings do not disable a working text bot and stay untouched", () => {
@@ -119,7 +141,7 @@ test("a corrupt file is reported with its path instead of being overwritten", ()
   writeFileSync(CONFIG_FILE, "{ \"botId\": \"bot\", ");
   assert.throws(() => updateConfig({ botId: "bot", secret: "secret" }), (error: Error) => error.message.includes(CONFIG_FILE));
   assert.equal(readFileSync(CONFIG_FILE, "utf8"), "{ \"botId\": \"bot\", ");
-  assert.equal(loadConfig(), undefined);
+  assert.throws(() => loadConfig(), (error: Error) => error.message.includes(CONFIG_FILE) && /JSON/.test(error.message));
 });
 
 test("a pre-rename configuration keeps its credentials by moving once to the new file", () => {
@@ -138,7 +160,7 @@ test("a corrupt pre-rename configuration is reported by its own path and never p
   assert.throws(() => updateConfig({ welcome: "x" }), (error: Error) => error.message.includes(LEGACY_CONFIG_FILE));
   assert.equal(readFileSync(LEGACY_CONFIG_FILE, "utf8"), "{ \"botId\": ");
   assert.equal(existsSync(CONFIG_FILE), false, "an invalid file must not be migrated");
-  assert.equal(loadConfig(), undefined);
+  assert.throws(() => loadConfig(), (error: Error) => error.message.includes(LEGACY_CONFIG_FILE));
 });
 
 test("a logout clears a pre-rename file so the credentials cannot come back", () => {

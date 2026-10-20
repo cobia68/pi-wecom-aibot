@@ -9,6 +9,9 @@ export type WeComState = "disconnected" | "connecting" | "connected" | "subscrib
 
 /** A command such as aibot_send_msg is acknowledged within this time, or its outcome is unknown. */
 export const WECOM_ACK_TIMEOUT_MS = 10_000;
+/** Upload limits from the 上传临时素材 section: an image is 5 bytes to 10MB, one chunk at most 512KB. */
+export const WECOM_IMAGE_MIN_BYTES = 5;
+export const WECOM_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 /** A stream message must reach finish=true within 10 minutes of its first send. */
 export const WECOM_STREAM_LIFETIME_MS = 600_000;
 /** Replies to a message callback are accepted for 24 hours. */

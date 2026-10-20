@@ -518,7 +518,20 @@ test("a missing image file falls back to the Markdown body with a visible reason
   const push = sent.find((frame) => frame.cmd === "aibot_send_msg");
   assert.equal(push.body.msgtype, "markdown");
   assert.match(push.body.markdown.content, /fallback body/);
-  assert.match(push.body.markdown.content, /图片发送失败，已改发文字/);
+  assert.match(push.body.markdown.content, /图片发送失败：.*ENOENT.*已改发文字/);
+});
+
+test("a selection that cannot be saved reports the real reason instead of blaming permissions", () => {
+  const failing = { load: () => undefined, save: () => { throw new Error("ENOSPC: no space left on device"); }, clear: () => {} };
+  gateway.stop();
+  gateway = new WeComGateway({ botId: "unit-bot", secret: "unit-secret", createWebSocket: (url) => new FakeWebSocket(url) },
+    () => {}, failing);
+  const a = add("A", SESSION_A);
+  const b = add("B", SESSION_B);
+  message("first task");
+  message("2");
+  assert.match(prompt(), /ENOSPC/);
+  assert.equal(a.peer.messages().length + b.peer.messages().length, 0, "an uncommitted choice must not deliver");
 });
 
 test("a rejected media upload falls back to Markdown while a rejected image send also falls back", async () => {
@@ -536,6 +549,6 @@ test("a rejected media upload falls back to Markdown while a rejected image send
   });
   const push = sent.find((frame) => frame.cmd === "aibot_send_msg");
   assert.equal(push.body.msgtype, "markdown");
-  assert.match(push.body.markdown.content, /图片发送失败，已改发文字/);
+  assert.match(push.body.markdown.content, /图片发送失败：.*已改发文字/);
   rmSync(file.dir, { recursive: true, force: true });
 });

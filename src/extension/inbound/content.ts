@@ -22,8 +22,6 @@ async function mediaDirectory(cwd: string): Promise<string> {
 export interface PreparedInboundContent {
 	content: (TextContent | ImageContent)[];
 	label: string;
-	/** The WeCom conversation this prompt belongs to; the bridge makes it the run's default target. */
-	chat: { chatId: string; chatType: 1 | 2; userid: string };
 	/** Release the queued-image budget when handed to pi or discarded. Idempotent. */
 	release(): void;
 }
@@ -36,13 +34,11 @@ export class InboundContentPreparer {
 	private imageBytes = 0;
 	private readonly waiting: (() => void)[] = [];
 
+	/** The limits are constants in production; tests use smaller ones to observe the bounds. */
 	constructor(limits: { concurrency?: number; maxImageBytes?: number } = {}) {
 		this.concurrency = limits.concurrency ?? 2;
 		// Base64 payload bytes retained by this plugin, not pi's own active run or conversation history.
 		this.maxImageBytes = limits.maxImageBytes ?? 128 * 1024 * 1024;
-		if (![this.concurrency, this.maxImageBytes].every((value) => Number.isSafeInteger(value) && value > 0)) {
-			throw new Error("media preparation limits must be positive safe integers");
-		}
 	}
 
 	async prepare(cwd: string, message: InboundMessage, signal: AbortSignal): Promise<PreparedInboundContent> {
@@ -94,7 +90,7 @@ async function buildUserContent(
 	message: InboundMessage,
 	signal: AbortSignal,
 	reserveImage: (bytes: number) => void,
-): Promise<{ content: (TextContent | ImageContent)[]; label: string; chat: PreparedInboundContent["chat"] }> {
+): Promise<{ content: (TextContent | ImageContent)[]; label: string }> {
 	signal.throwIfAborted();
 	let text = message.text;
 	if (message.quoteText) text = `> 引用：${message.quoteText}\n\n${text}`;
@@ -139,7 +135,6 @@ async function buildUserContent(
 
 	if (images.length && /^\[图片\]$/.test(text.trim())) text = "";
 	signal.throwIfAborted();
-	const { chatId, chatType } = message.chat;
 	const full = [text, ...notes].filter(Boolean).join("\n");
 
 	const content: (TextContent | ImageContent)[] = [];
@@ -149,7 +144,6 @@ async function buildUserContent(
 	if (!content.length) content.push({ type: "text", text: "（来自企业微信的消息）" });
 	return {
 		content,
-		label: `${chatType === 2 ? "group" : "single"}/${message.msgtype}`,
-		chat: { chatId, chatType, userid: message.userid },
+		label: `${message.chat.chatType === 2 ? "group" : "single"}/${message.msgtype}`,
 	};
 }

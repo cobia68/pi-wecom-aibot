@@ -8,22 +8,20 @@
  * of the AES key.
  */
 
-import { createDecipheriv, createHash } from "node:crypto";
+import { createDecipheriv } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-/** Interpret an aeskey that may be base64, hex, or raw utf8. */
+/** The aeskey is Base64 (official SDK: `Buffer.from(aesKey, "base64")`), and must decode to 32 bytes. */
 export function parseAesKey(raw: string): Buffer {
-	const trimmed = (raw ?? "").trim();
+	const trimmed = raw.trim();
 	if (!trimmed) throw new Error("empty aeskey");
-	if (/^[0-9a-fA-F]{64}$/.test(trimmed)) return Buffer.from(trimmed, "hex");
-	if (/^[a-zA-Z0-9+/]{43}=?$/.test(trimmed)) {
-		const b64 = Buffer.from(trimmed, "base64");
-		if (b64.length === 32 && b64.toString("base64").replace(/=+$/, "") === trimmed.replace(/=+$/, "")) return b64;
+	const key = Buffer.from(trimmed, "base64");
+	// Buffer.from is lenient about invalid characters; a real 32-byte key round-trips exactly.
+	if (key.length !== 32 || key.toString("base64").replace(/=+$/, "") !== trimmed.replace(/=+$/, "")) {
+		throw new Error("invalid aeskey: expected a Base64-encoded 32-byte key");
 	}
-	const utf8 = Buffer.from(trimmed, "utf8");
-	if (utf8.length === 32) return utf8;
-	throw new Error("invalid aeskey: expected an exact 32-byte key");
+	return key;
 }
 
 export function decryptAes256Cbc(data: Buffer, key: Buffer): Buffer {
@@ -133,6 +131,3 @@ export async function saveMedia(dir: string, baseName: string, media: Downloaded
 	return file;
 }
 
-export function md5(buf: Buffer): string {
-	return createHash("md5").update(buf).digest("hex");
-}

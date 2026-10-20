@@ -66,6 +66,16 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 		if (logLines.length > 200) logLines.shift();
 	};
 
+	/** Read the file, surfacing what still works but should be fixed (e.g. a failed legacy migration). */
+	const readConfig = (ctx: ExtensionContext | undefined): WeComConfig | undefined => {
+		const warnings: string[] = [];
+		try {
+			return loadConfig(warnings);
+		} finally {
+			for (const warning of warnings) { log(warning); notify(ctx, warning, "warning"); }
+		}
+	};
+
 	const notify = (ctx: ExtensionContext | undefined, message: string, type: "info" | "warning" | "error" = "info"): void => {
 		if (ctx?.hasUI) ctx.ui.notify(message, type);
 	};
@@ -73,10 +83,11 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 	const host: BridgeHost = {
 		context: () => sessionCtx,
 		settling: () => settling,
-		sendUserMessage: (content, chat) => {
-			wecomSourceChat = chat ? { ...chat } : undefined;
+		sendUserMessage: (content) => {
 			pi.sendUserMessage(content, { expandPromptTemplates: false });
 		},
+		// pi confirmed the run this task started; only then do its replies belong to that conversation.
+		taskStarted: (chat) => { wecomSourceChat = { ...chat }; },
 		firstSeen(msgId) {
 			if (seenMsgIds.has(msgId)) return false;
 			seenMsgIds.add(msgId);
@@ -162,7 +173,15 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 		wecomSourceChat = undefined;
 		sessionCtx = ctx;
 		screenCapture.bind(ctx);
-		cfg = loadConfig();
+		try {
+			cfg = readConfig(ctx);
+		} catch (error) {
+			// Never treat an unreadable file as “not configured”: the user would edit a different setting.
+			cfg = undefined;
+			const detail = error instanceof Error ? error.message : String(error);
+			log(`configuration unreadable: ${detail}`);
+			ctx.ui.notify(`企业微信配置无法使用：${detail}。修正或删除后运行 /wecom-aibot connect。`, "error");
+		}
 		stopReason = undefined;
 		// Connection consent is never persisted or inherited by a new/resumed/reloaded session.
 	});
@@ -180,6 +199,14 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 	}
 
 	pi.on("model_select", (_event, ctx) => refreshSource(ctx));
+	pi.on("before_agent_start", (event, ctx) => {
+		if (event.messageType !== "user") return;
+		sessionCtx = ctx;
+		const current = bridge;
+		if (!current || current.sessionId !== ctx.sessionManager.getSessionId()) return;
+		// A prompt this bridge did not hand over is a local run: its answer and replies stay local.
+		if (!current.promptStarted(event.prompt, event.images?.length ?? 0)) wecomSourceChat = undefined;
+	});
 	pi.on("agent_start", (_event, ctx) => {
 		// Emitted before the run's prompt is persisted, so the leaf still belongs to the previous run.
 		runStartEntryId = ctx.sessionManager.getLeafId();
@@ -262,7 +289,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 		const found = `已识别${kind}：chatid=${identity.chatId}　chat_type=${identity.chatType}　userid=${identity.userid}`;
 		ctx.ui.notify(found, "info");
 		// Compare with the file as it is now: another pi window may have changed or removed it.
-		const current = loadConfig();
+		const current = readConfig(ctx);
 		if (!current) {
 			ctx.ui.notify(`配置文件已不存在（可能已在其他 pi 中 /wecom-aibot logout），未保存默认推送目标：${CONFIG_FILE}`, "warning");
 			return;
@@ -394,7 +421,14 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 				}
 				case "connect": {
 					// Only the file counts: after a logout in another pi, this window's snapshot must not recreate it.
-					const current = loadConfig();
+					let current: WeComConfig | undefined;
+					try {
+						current = readConfig(ctx);
+					} catch (error) {
+						const detail = error instanceof Error ? error.message : String(error);
+						ctx.ui.notify(`企业微信配置无法使用：${detail}`, "error");
+						return;
+					}
 					if (!current) {
 						ctx.ui.notify("尚未配置，请先运行 /wecom-aibot setup", "warning");
 						return;

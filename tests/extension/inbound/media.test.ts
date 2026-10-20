@@ -19,11 +19,14 @@ test("decrypts WeCom media with every possible 32-byte padding length", () => {
   }
 });
 
-test("accepts the exact key in base64, unpadded base64, hex, or raw form", () => {
+test("accepts the official Base64 key, with or without padding", () => {
   assert.deepEqual(parseAesKey(key.toString("base64")), key);
   assert.deepEqual(parseAesKey(key.toString("base64").replace(/=+$/, "")), key);
-  assert.deepEqual(parseAesKey(key.toString("hex")), key);
-  assert.deepEqual(parseAesKey("a".repeat(32)), Buffer.from("a".repeat(32)));
+});
+
+test("rejects the hex and raw spellings the API never sends", () => {
+  assert.throws(() => parseAesKey(key.toString("hex")), /aeskey/i);
+  assert.throws(() => parseAesKey("a".repeat(32)), /aeskey/i);
 });
 
 test("rejects malformed keys instead of silently truncating them", () => {

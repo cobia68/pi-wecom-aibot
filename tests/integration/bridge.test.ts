@@ -26,6 +26,8 @@ let clock: TestContext["mock"]["timers"];
 let sessionId: string;
 let sessionEntries: any[];
 let autoAcknowledge: boolean;
+/** Simulate pi refusing the prompt: no before_agent_start and no agent_settled, exactly as the SDK does it. */
+let refusePrompt: boolean;
 let rasterise: (screen: any, options?: any) => Promise<Uint8Array>;
 const modelA = { id: "model-a", name: "Model A", provider: "test-provider" };
 const modelB = { id: "model-b", name: "Model B", provider: "another-provider" };
@@ -88,6 +90,7 @@ beforeEach(async (t) => {
   sessionId = "pi-session-1";
   sessionEntries = [];
   autoAcknowledge = true;
+  refusePrompt = false;
   rasterise = async () => Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
   ctx = {
     hasUI: false, cwd: sandbox, isIdle: () => idle,
@@ -110,7 +113,15 @@ beforeEach(async (t) => {
       complete = options.getArgumentCompletions;
     },
     registerTool(tool: { name: string }) { tools.set(tool.name, tool); },
-    sendUserMessage(content: any, options: any) { sent.push({ content, options }); idle = false; },
+    sendUserMessage(content: any, options: any) {
+      sent.push({ content, options });
+      idle = false;
+      // pi echoes the prompt it starts through before_agent_start; a refused prompt echoes nothing.
+      if (!refusePrompt) void emit("before_agent_start", {
+        messageType: "user", prompt: typeof content === "string" ? content : content.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n"),
+        images: typeof content === "string" ? undefined : content.filter((part: any) => part.type === "image"),
+      });
+    },
   } as unknown as ExtensionAPI;
   saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello" });
   // The real gateway in-process: its routing, status messages and rendered notifications are what these tests assert.
@@ -266,6 +277,53 @@ test("stop clears old requests so a later local response cannot leak on restart"
   await drain();
   assert.equal(nextWs.sent.filter((frame) => frame.cmd === "aibot_respond_msg").length, 0);
   assert.equal(sent.length, 1);
+});
+
+test("a task pi refused is reported instead of taking the next local answer", async () => {
+  // pi refuses a prompt (no model, no key, expired OAuth, compaction) without any event: no run starts.
+  refusePrompt = true;
+  inbound("refused-task");
+  await drain();
+  assert.equal(sent.length, 1, "the prompt was handed to pi");
+  // pi refused it and stays idle; the user then asks something locally.
+  idle = false;
+  await emit("before_agent_start", { messageType: "user", prompt: "LOCAL-ONLY-QUESTION" });
+  await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "LOCAL-ONLY-ANSWER" }] } });
+  idle = true;
+  await emit("agent_settled", { aborted: false });
+  await drain();
+  const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].body.chatid, "test-user");
+  assert.match(pushes[0].body.markdown.content, /没有接受/);
+  assert.doesNotMatch(pushes[0].body.markdown.content, /LOCAL-ONLY-ANSWER/);
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body.stream.finish, true);
+  // The local run does not inherit the refused task's conversation as wecom_send's default target.
+  await assert.rejects(sendNotification({ content: "LOCAL-PUSH" }), /缺少 chatid/);
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
+  // The queue is no longer wedged: the next WeCom task runs.
+  refusePrompt = false;
+  inbound("after-refusal");
+  clock.tick(250);
+  await drain();
+  assert.equal(sent.length, 2);
+  assert.match(sent[1].content[0].text, /after-refusal/);
+});
+
+test("a task pi silently refused fails while the session stays idle", async () => {
+  refusePrompt = true;
+  inbound("silently-refused");
+  await drain();
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+  // pi refused the prompt and stays idle; no before_agent_start follows.
+  idle = true;
+  clock.tick(5_000);
+  await drain();
+  const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].body.chatid, "test-user");
+  assert.match(pushes[0].body.markdown.content, /没有接受/);
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body.stream.finish, true);
 });
 
 test("changing pi sessions closes the old connection and discards its active request without reconnecting", async () => {
@@ -986,6 +1044,22 @@ test("connect after a logout in another pi reports the missing configuration ins
   assert.match(notices.at(-1)!, /尚未配置/);
   await assert.rejects(readFile(CONFIG_FILE), { code: "ENOENT" });
 });
+
+for (const [kind, broken] of [
+  ["invalid JSON", "{ \"botId\": "],
+  ["a wrongly typed field", JSON.stringify({ botId: "test-bot", secret: "test-secret", allowedUserIds: "alice" })],
+] as const) {
+  test(`connect reports ${kind} in the configuration instead of calling it unconfigured`, async (t) => {
+    const notices: string[] = [];
+    t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
+    await writeFile(CONFIG_FILE, broken);
+    await command("connect", ctx);
+    const notice = notices.at(-1)!;
+    assert.match(notice, /配置无法使用/);
+    assert.ok(notice.includes(CONFIG_FILE), "the file to fix must be named");
+    assert.doesNotMatch(notice, /尚未配置/);
+  });
+}
 
 test("double dash keeps a literal --help target from being interpreted as an option", async () => {
   await command("test --chat-type 1 -- --help", ctx);

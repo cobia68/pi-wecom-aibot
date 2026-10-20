@@ -84,7 +84,6 @@ export class LoopbackClient implements BridgeClient {
   }
 
   notify(chat: ChatRef, notification: GatewayNotification): Promise<void> {
-    if (notification.source.sessionId !== this.registration.source.sessionId) return Promise.reject(new DeliveryError("通知 session 与注册会话不匹配，已拒绝发送", "rejected"));
     if (!this.isReady()) return Promise.reject(new DeliveryError("共享网关或企微连接未就绪", "not_sent"));
     return this.gateway!.notify(this.registration.instanceId, chat, notification);
   }

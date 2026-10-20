@@ -9,13 +9,13 @@ import type { WeComConfig } from "./config.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 import {
 	GATEWAY_PROTOCOL_VERSION, GATEWAY_RETRY_MS, IPC_HEARTBEAT_MS, IPC_LEASE_MS, IPC_SEND_TIMEOUT_MS,
-	gatewayEndpoint, gatewayProof, legacyGatewayEndpoint, readFrames, sameTarget, sessionTarget, validNonce, validTask, validWelcome, verifyProof, writeFrame,
+	gatewayEndpoint, gatewayProof, legacyGatewayEndpoint, parseServerFrame, readFrames, sameTarget, sessionTarget, validWelcome, verifyProof, writeFrame,
 	type BridgeClient, type ChatIdentity, type GatewayCredentials, type GatewayRegistration,
-	type GatewayStatus, type GatewayTask, type ServerFrame, type TaskState,
+	type GatewayStatus, type GatewayTask, type TaskState,
 } from "../shared/gateway-protocol.ts";
 
 const AUTH_FAILED = "共享网关认证失败：本机运行中的网关使用不同的 BotID/Secret 或插件版本。"
-	+ "请在仍用旧配置的 pi 中运行 /wecom-aibot connect 或 /wecom-aibot disconnect（旧版插件为 /wecom-aibot start / stop，需退出该 pi），再在这里运行 /wecom-aibot connect。";
+	+ "请在仍用旧配置的 pi 中运行 /wecom-aibot connect 或 /wecom-aibot disconnect（旧版插件为 /wecom start 或 /wecom stop，需退出该 pi），再在这里运行 /wecom-aibot connect。";
 const LEGACY_GATEWAY = "旧版插件的共享网关仍在运行：同一机器人只能有一个长连接。"
 	+ "请在仍使用旧版插件的 pi 窗口执行 /reload 或退出，再在这里运行 /wecom-aibot connect。";
 
@@ -123,7 +123,7 @@ export class GatewayClient implements BridgeClient {
 	}
 
 	notify(chat: ChatRef, notification: GatewayNotification): Promise<void> {
-		if (notification.source.sessionId !== this.registration.source.sessionId) return Promise.reject(new DeliveryError("通知 session 与注册会话不匹配，已拒绝发送", "rejected"));
+		// The bridge owns "is this my session"; the gateway is the trust boundary that enforces it.
 		if (!this.isReady()) return Promise.reject(new DeliveryError("共享网关或企微连接未就绪", "not_sent"));
 		return new Promise((resolve, reject) => {
 			const id = randomUUID();
@@ -192,11 +192,20 @@ export class GatewayClient implements BridgeClient {
 		});
 		// The client speaks first; the gateway proves the Secret over this nonce before it learns anything.
 		socket.once("connect", () => writeFrame(socket, { type: "hello", version: GATEWAY_PROTOCOL_VERSION, nonce }));
-		readFrames(socket, (frame: ServerFrame) => {
+		readFrames(socket, (value) => {
 			if (this.socket !== socket || this.stopped) return;
 			this.lastReceived = Date.now();
+			const parsed = parseServerFrame(value);
+			if (!parsed.ok) {
+				this.options.log?.(`共享网关发送了无效数据：${parsed.reason}`);
+				// Before the handshake an unreadable frame means an incompatible gateway; later frames are
+				// independent, so drop only the one that cannot be trusted and keep the connection.
+				if (!handshake) { rejected = true; socket.destroy(); }
+				return;
+			}
+			const frame = parsed.frame;
 			if (!handshake) {
-				if (frame.type !== "hello" || frame.version !== GATEWAY_PROTOCOL_VERSION || frame.endpoint !== this.endpoint || !validNonce(frame.nonce)
+				if (frame.type !== "hello" || frame.version !== GATEWAY_PROTOCOL_VERSION || frame.endpoint !== this.endpoint
 					|| !verifyProof(frame.proof, gatewayProof(this.credentials.secret, "server", frame.nonce, nonce, this.endpoint))) {
 					// Not final: the close handler retries until the retry window has passed.
 					rejected = true;
@@ -237,7 +246,6 @@ export class GatewayClient implements BridgeClient {
 						this.options.log?.("rejected inbound task for a different pi/session registration");
 						return;
 					}
-					if (!validTask(frame.task)) { this.options.log?.("rejected malformed inbound task"); return; }
 					this.options.onTask?.(frame.task);
 					return;
 				case "result": {
@@ -250,12 +258,13 @@ export class GatewayClient implements BridgeClient {
 					return;
 				}
 				case "identity": {
-					const identity = frame.identity;
-					if (typeof identity?.chatId !== "string" || !identity.chatId || ![1, 2].includes(identity.chatType) || typeof identity.userid !== "string") return;
-					this.watches.get(frame.id)?.(undefined, { chatId: identity.chatId, chatType: identity.chatType, userid: identity.userid });
+					this.watches.get(frame.id)?.(undefined, frame.identity);
 					return;
 				}
 			}
+		}, (error) => {
+			// A handler bug must reach pi's log; otherwise it becomes a silent reconnect loop.
+			this.options.log?.(`共享网关数据未处理：${error instanceof Error ? error.message : String(error)}`);
 		});
 	}
 
@@ -337,10 +346,21 @@ function reachable(endpoint: string): Promise<boolean> {
 export function launchGateway(endpoint: string, credentials: GatewayCredentials, log?: (message: string) => void): void {
 	const entry = fileURLToPath(new URL("../gateway/main.mjs", import.meta.url));
 	const executable = /^node(?:\.exe)?$/i.test(basename(process.execPath)) ? process.execPath : "node";
-	const child = spawn(executable, [entry], { cwd: dirname(entry), detached: true, windowsHide: true, stdio: ["pipe", "ignore", "ignore"] });
+	const child = spawn(executable, [entry], { cwd: dirname(entry), detached: true, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+	// A failed startup must name its reason: keep the last lines of the daemon's stderr until it exits.
+	let stderr = "";
+	if (child.stderr) {
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-2_000); });
+		// The daemon outlives pi: its diagnostic pipe must not hold pi's event loop open.
+		(child.stderr as unknown as { unref(): void }).unref();
+	}
 	// A short private pipe bootstraps credentials without files, environment variables or argv.
 	child.on("error", (error) => log?.(`gateway launch failed: ${error.message}`));
-	child.on("exit", (code) => { if (code) log?.(`gateway process exited (${code}); check Node.js and runtime dependencies`); });
+	child.on("exit", (code, signal) => {
+		if (!code && !signal) return;
+		log?.(`gateway process exited (${code ?? signal})${stderr.trim() ? `：${stderr.trim()}` : "；check Node.js and runtime dependencies"}`);
+	});
 	child.stdin.on("error", () => {});
 	child.stdin.end(JSON.stringify({ endpoint, credentials: { botId: credentials.botId, secret: credentials.secret } }));
 	child.unref();

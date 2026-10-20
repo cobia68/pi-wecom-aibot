@@ -10,8 +10,9 @@ import { afterEach, beforeEach, test } from "node:test";
 import { GatewayClient, type GatewayClientOptions } from "../../src/extension/gateway-client.ts";
 import { startGatewayServer, type GatewayServer } from "../../src/gateway/server.ts";
 import {
-  GATEWAY_PROTOCOL_VERSION, gatewayEndpoint, gatewayProof, legacyGatewayEndpoint, readFrames, sessionTarget, writeFrame,
-  type GatewayRegistration, type GatewayTask, type ServerFrame,
+  GATEWAY_PROTOCOL_VERSION, gatewayEndpoint, gatewayProof, legacyGatewayEndpoint, parseClientFrame, parseServerFrame, readFrames,
+  sessionTarget, writeFrame,
+  type ClientFrame, type GatewayRegistration, type GatewayTask, type ServerFrame,
 } from "../../src/shared/gateway-protocol.ts";
 import { notificationPayload } from "../../src/shared/notification.ts";
 import type { NotificationSource } from "../../src/shared/notification-types.ts";
@@ -23,6 +24,23 @@ let server: GatewayServer | undefined;
 let clients: GatewayClient[];
 let autoAcknowledge: boolean;
 const user = { chatId: "user", chatType: 1 as const };
+
+/** The same parsers the client and gateway use, so a test fixture cannot accept a frame production rejects. */
+function readServerFrames(socket: Socket, receive: (frame: ServerFrame) => void): void {
+  readFrames(socket, (value) => {
+    const parsed = parseServerFrame(value);
+    if (!parsed.ok) throw new Error(parsed.reason);
+    receive(parsed.frame);
+  });
+}
+
+function readClientFrames(socket: Socket, receive: (frame: ClientFrame) => void): void {
+  readFrames(socket, (value) => {
+    const parsed = parseClientFrame(value);
+    if (!parsed.ok) throw new Error(parsed.reason);
+    receive(parsed.frame);
+  });
+}
 
 export async function until(predicate: () => boolean, description: string, timeout = 4000): Promise<void> {
   const deadline = Date.now() + timeout;
@@ -327,7 +345,7 @@ test("client drops inbound tasks tagged for another instance, registration or se
   await fakeGateway(t, endpoint, (socket) => {
     wire = socket;
     const nonce = randomUUID();
-    readFrames(socket, (frame) => {
+    readClientFrames(socket, (frame) => {
       if (frame.type === "hello") {
         writeFrame(socket, { type: "hello", version: GATEWAY_PROTOCOL_VERSION, nonce, endpoint, proof: gatewayProof(config.secret, "server", nonce, frame.nonce, endpoint) });
       } else if (frame.type === "register") {
@@ -349,7 +367,7 @@ test("client drops inbound tasks tagged for another instance, registration or se
   writeFrame(wire!, { type: "task", target, task });
   await until(() => a.tasks.length === 1, "valid task delivered");
   assert.equal(a.logs.filter((line) => line.includes("rejected inbound")).length, 3);
-  assert.equal(a.logs.filter((line) => line.includes("rejected malformed")).length, 1);
+  assert.equal(a.logs.filter((line) => line.includes("共享网关发送了无效数据")).length, 1, "a malformed task is named and dropped, not routed");
 });
 
 test("the server refuses a notification labelled with another session, even on an authenticated connection", async (t) => {
@@ -361,7 +379,7 @@ test("the server refuses a notification labelled with another session, even on a
   const registration: GatewayRegistration = { instanceId: "raw", registrationId: "raw-registration", source: source("A"), config: { botId: config.botId, welcome: "hello" } };
   t.after(() => socket.destroy());
   socket.on("error", () => {});
-  readFrames(socket, (frame: ServerFrame) => {
+  readServerFrames(socket, (frame) => {
     frames.push(frame);
     if (frame.type !== "hello") return;
     writeFrame(socket, { type: "register", registration, proof: gatewayProof(config.secret, "client", frame.nonce, clientNonce, endpoint) });
@@ -382,7 +400,7 @@ test("the gateway sends nothing before the client's hello and refuses another pr
   t.after(() => socket.destroy());
   socket.on("error", () => {});
   const frames: ServerFrame[] = [];
-  readFrames(socket, (frame: ServerFrame) => frames.push(frame));
+  readServerFrames(socket, (frame) => frames.push(frame));
   await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(frames.length, 0, "a connection that only listens learns nothing");
@@ -398,7 +416,7 @@ test("a captured gateway hello cannot be replayed: a fake gateway without the Se
   const captured = await new Promise<ServerFrame>((resolve) => {
     const socket = createConnection(endpoint);
     socket.on("error", () => {});
-    readFrames(socket, (frame: ServerFrame) => { resolve(frame); socket.destroy(); });
+    readServerFrames(socket, (frame) => { resolve(frame); socket.destroy(); });
     socket.once("connect", () => writeFrame(socket, { type: "hello", version: GATEWAY_PROTOCOL_VERSION, nonce: randomUUID() }));
   });
   assert.equal(captured.type, "hello");
@@ -406,7 +424,7 @@ test("a captured gateway hello cannot be replayed: a fake gateway without the Se
   await real.closed;
   const received: { type: string }[] = [];
   await fakeGateway(t, endpoint, (socket) => {
-    readFrames(socket, (frame) => {
+    readClientFrames(socket, (frame) => {
       received.push(frame);
       if (frame.type !== "hello") return;
       writeFrame(socket, captured);
@@ -472,7 +490,7 @@ test("a protocol-1 gateway on the endpoint is reported after the retry window an
   await fakeGateway(t, endpoint, (socket) => {
     // Protocol 1 spoke first, with a proof over its own nonce only.
     writeFrame(socket, { type: "hello", version: 1, endpoint, nonce: randomUUID(), proof: "0".repeat(64) });
-    readFrames(socket, (frame) => { received.push(frame.type); });
+    readClientFrames(socket, (frame) => { received.push(frame.type); });
   });
   const a = client("A", {}, { retryMs: 300 });
   a.connection.start();
@@ -486,7 +504,7 @@ test("a protocol-2 gateway is not joined or replaced by a competing connection",
   const endpoint = gatewayEndpoint(config.botId);
   const received: string[] = [];
   await fakeGateway(t, endpoint, (socket) => {
-    readFrames(socket, (frame) => {
+    readClientFrames(socket, (frame) => {
       received.push(frame.type);
       if (frame.type !== "hello") return;
       const nonce = randomUUID();

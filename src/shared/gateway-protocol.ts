@@ -15,6 +15,7 @@ import type { Socket } from "node:net";
 import type { DeliveryFailure } from "./delivery.ts";
 import type { GatewayNotification, NotificationSource } from "./notification-types.ts";
 import { WECOM_ACK_TIMEOUT_MS, type ChatRef, type InboundMessage, type WeComState } from "./wecom-protocol.ts";
+import { agentDirectory, gatewayDirectory } from "./agent-path.ts";
 
 export const GATEWAY_PROTOCOL_VERSION = 3;
 export const IPC_HEARTBEAT_MS = 10_000;
@@ -121,15 +122,16 @@ export interface BridgeClient {
 }
 
 /**
- * Same OS user + BotID share a gateway, including different pi agent directories.
- * POSIX: a socket in a private 0700 directory, so other local users can neither connect nor take the name.
+ * The shared gateway's endpoint for one agent directory and BotID. Multiple pi windows in the same
+ * agent directory meet here; POSIX keeps the socket in a private 0700 directory, so other local users
+ * can neither connect nor take the name.
  */
 export function gatewayEndpoint(botId: string): string {
 	const key = endpointKey(botId);
 	if (process.platform === "win32") return `\\\\.\\pipe\\pi-wecom-aibot-${key}`;
-	const preferred = join(homedir(), ".pi", "wecom-aibot-gateway", `${key}.sock`);
-	// sun_path holds 104–108 bytes; a long home directory falls back to a short per-uid directory.
-	return Buffer.byteLength(preferred) <= 100 ? preferred : join("/tmp", `pi-wecom-aibot-${process.getuid?.() ?? "user"}`, `${key}.sock`);
+	const preferred = join(gatewayDirectory(), `${key}.sock`);
+	// sun_path holds 104–108 bytes; a long agent directory falls back to a short per-user directory.
+	return Buffer.byteLength(preferred) <= 100 ? preferred : join(tmpdir(), `pi-wecom-aibot-${process.getuid?.() ?? "user"}`, `${key}.sock`);
 }
 
 /**
@@ -138,13 +140,18 @@ export function gatewayEndpoint(botId: string): string {
  * that old gateways are already listening on, so renaming it would hide them instead of waiting.
  */
 export function legacyGatewayEndpoint(botId: string): string | undefined {
-	const key = endpointKey(botId);
+	const key = legacyEndpointKey(botId);
 	if (process.platform === "win32") return undefined; // Same pipe name: the version check in the handshake applies.
 	if (process.platform === "linux") return `\0pi-wecom-${key}`;
 	return join(tmpdir(), `pi-wecom-${key}.sock`);
 }
 
 function endpointKey(botId: string): string {
+	return createHash("sha256").update(`${userInfo().username}\0${homedir()}\0${agentDirectory()}\0${botId}`).digest("hex").slice(0, 32);
+}
+
+/** The pre-rename key, which did not include the agent directory: names the historical protocol-1 endpoint. */
+function legacyEndpointKey(botId: string): string {
 	return createHash("sha256").update(`${userInfo().username}\0${homedir()}\0${botId}`).digest("hex").slice(0, 32);
 }
 
@@ -225,8 +232,133 @@ export function verifyProof(proof: unknown, expected: string): boolean {
 	return timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(expected, "hex"));
 }
 
+/** A frame is either accepted as its typed form or rejected with the reason; callers never guess. */
+export type FrameParse<Frame> = { ok: true; frame: Frame } | { ok: false; reason: string };
+
+export function isTaskState(value: unknown): value is TaskState {
+	return value === "running" || value === "settled" || value === "stopped" || value === "busy" || value === "failed";
+}
+
+const WE_COM_STATES = new Set<WeComState>(["disconnected", "connecting", "connected", "subscribed"]);
+const DELIVERY_FAILURES = new Set<DeliveryFailure>(["not_sent", "rejected", "unknown"]);
+
+/** The only reader of what pi sends: every shape check for a client frame lives here. */
+export function parseClientFrame(value: unknown): FrameParse<ClientFrame> {
+	const frame = value as (ClientFrame & Record<string, unknown>) | undefined;
+	if (!frame || typeof frame !== "object") return reject("帧必须是 JSON 对象");
+	switch (frame.type) {
+		case "hello":
+			if (typeof frame.version !== "number") return reject("无效的协议版本");
+			if (!validNonce(frame.nonce)) return reject("无效的握手 nonce");
+			return accept({ type: "hello", version: frame.version, nonce: frame.nonce });
+		case "register":
+			if (!validRegistration(frame.registration)) return reject("无效的 pi 注册信息");
+			if (typeof frame.proof !== "string") return reject("无效的认证证明");
+			if (frame.resume !== undefined && typeof frame.resume !== "boolean") return reject("无效的恢复标记");
+			return accept({ type: "register", registration: frame.registration, proof: frame.proof, ...(frame.resume === true ? { resume: true } : {}) });
+		case "source":
+			if (!validSource(frame.source)) return reject("无效的会话来源");
+			return accept({ type: "source", source: frame.source });
+		case "welcome":
+			if (!validWelcome(frame.text)) return reject("无效的欢迎语");
+			return accept({ type: "welcome", text: frame.text });
+		case "status":
+			if (!validRequestId(frame.taskId)) return reject("无效的任务 ID");
+			if (!isTaskState(frame.state)) return reject("无效的任务状态");
+			return accept({ type: "status", taskId: frame.taskId, state: frame.state });
+		case "notify":
+			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
+			if (!validChat(frame.chat)) return reject("无效的通知目标");
+			if (!validNotification(frame.notification)) return reject("无效的通知");
+			return accept({ type: "notify", id: frame.id, chat: frame.chat, notification: frame.notification });
+		case "watch":
+			if (!validRequestId(frame.id)) return reject("无效的 whoami 请求");
+			if (typeof frame.timeoutMs !== "number" || !Number.isFinite(frame.timeoutMs) || frame.timeoutMs <= 0) return reject("无效的 whoami 超时");
+			return accept({ type: "watch", id: frame.id, timeoutMs: frame.timeoutMs });
+		case "unwatch":
+			if (!validRequestId(frame.id)) return reject("无效的 whoami 请求");
+			return accept({ type: "unwatch", id: frame.id });
+		case "ping":
+		case "resume":
+		case "unregister":
+			return accept({ type: frame.type });
+		default:
+			return reject("未知的网关请求");
+	}
+}
+
+/** The only reader of what the gateway sends; the gateway is authenticated, but its bugs stay contained too. */
+export function parseServerFrame(value: unknown): FrameParse<ServerFrame> {
+	const frame = value as (ServerFrame & Record<string, unknown>) | undefined;
+	if (!frame || typeof frame !== "object") return reject("帧必须是 JSON 对象");
+	switch (frame.type) {
+		case "hello":
+			if (typeof frame.version !== "number") return reject("无效的协议版本");
+			if (typeof frame.endpoint !== "string" || !frame.endpoint) return reject("无效的网关地址");
+			if (!validNonce(frame.nonce)) return reject("无效的握手 nonce");
+			if (typeof frame.proof !== "string") return reject("无效的认证证明");
+			return accept({ type: "hello", version: frame.version, endpoint: frame.endpoint, nonce: frame.nonce, proof: frame.proof });
+		case "registered":
+			if (!validStatus(frame.status)) return reject("无效的注册状态");
+			return accept({ type: "registered", status: frame.status });
+		case "status":
+			if (!validStatus(frame.status)) return reject("无效的连接状态");
+			return accept({ type: "status", status: frame.status });
+		case "task":
+			if (!validTask(frame.task)) return reject("无效的任务");
+			if (!validTarget(frame.target)) return reject("无效的任务目标");
+			return accept({ type: "task", target: frame.target, task: frame.task });
+		case "result":
+			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
+			if (frame.error !== undefined && typeof frame.error !== "string") return reject("无效的送达错误");
+			if (frame.outcome !== undefined && !DELIVERY_FAILURES.has(frame.outcome as DeliveryFailure)) return reject("无效的送达结果");
+			return accept({ type: "result", id: frame.id, ...(frame.error !== undefined ? { error: frame.error } : {}),
+				...(frame.outcome !== undefined ? { outcome: frame.outcome as DeliveryFailure } : {}) });
+		case "identity":
+			if (!validRequestId(frame.id)) return reject("无效的 whoami 请求");
+			if (!validIdentity(frame.identity)) return reject("无效的会话标识");
+			return accept({ type: "identity", id: frame.id, identity: frame.identity });
+		case "log":
+			if (typeof frame.message !== "string") return reject("无效的网关日志");
+			return accept({ type: "log", message: frame.message });
+		case "pong":
+			return accept({ type: "pong" });
+		case "fatal":
+			if (typeof frame.message !== "string") return reject("无效的网关错误");
+			return accept({ type: "fatal", message: frame.message });
+		default:
+			return reject("未知的网关响应");
+	}
+}
+
+function accept<Frame>(frame: Frame): FrameParse<Frame> { return { ok: true, frame }; }
+function reject<Frame>(reason: string): FrameParse<Frame> { return { ok: false, reason }; }
+
+function validRequestId(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
+
+function validStatus(value: unknown): value is GatewayStatus {
+	const status = value as GatewayStatus | undefined;
+	return !!status && typeof status === "object" && WE_COM_STATES.has(status.state)
+		&& (status.detail === undefined || typeof status.detail === "string")
+		&& Number.isSafeInteger(status.sessions) && status.sessions >= 0
+		&& (status.stopped === undefined || typeof status.stopped === "boolean");
+}
+
+function validTarget(value: unknown): value is SessionTarget {
+	const target = value as SessionTarget | undefined;
+	return !!target && [target.instanceId, target.registrationId, target.sessionId].every((item) => typeof item === "string" && !!item && item.length <= 256);
+}
+
+function validIdentity(value: unknown): value is ChatIdentity {
+	const identity = value as ChatIdentity | undefined;
+	return !!identity && typeof identity.chatId === "string" && !!identity.chatId && identity.chatId.length <= 1024
+		&& (identity.chatType === 1 || identity.chatType === 2) && typeof identity.userid === "string" && !!identity.userid;
+}
+
 /** Bounded newline-delimited JSON; a slow or malformed peer only loses its own connection. */
-export function readFrames(socket: Socket, receive: (frame: any) => void): void {
+export function readFrames(socket: Socket, receive: (value: unknown) => void, onError?: (error: unknown) => void): void {
 	socket.setEncoding("utf8");
 	let pending = "";
 	socket.on("data", (chunk: string) => {
@@ -235,18 +367,28 @@ export function readFrames(socket: Socket, receive: (frame: any) => void): void 
 		while ((end = pending.indexOf("\n")) >= 0) {
 			const line = pending.slice(0, end);
 			pending = pending.slice(end + 1);
-			if (Buffer.byteLength(line) > IPC_MAX_BYTES) { socket.destroy(); return; }
+			if (Buffer.byteLength(line) > IPC_MAX_BYTES) { onError?.(new Error("frame exceeds the IPC size limit")); socket.destroy(); return; }
+			let frame: unknown;
+			// Only a malformed line is expected to throw here: it ends the connection.
 			try {
-				const frame: unknown = JSON.parse(line);
-				if (!frame || typeof frame !== "object" || Array.isArray(frame)) throw new Error("invalid frame");
+				frame = JSON.parse(line);
+				if (!frame || typeof frame !== "object" || Array.isArray(frame)) throw new Error("frame is not a JSON object");
+			} catch (error) {
+				onError?.(error);
+				socket.destroy();
+				return;
+			}
+			// A handler bug must be visible: report it and drop the connection instead of reconnecting silently.
+			try {
 				receive(frame);
-			} catch {
+			} catch (error) {
+				onError?.(error);
 				socket.destroy();
 				return;
 			}
 			if (socket.destroyed) return;
 		}
-		if (Buffer.byteLength(pending) > IPC_MAX_BYTES) socket.destroy();
+		if (Buffer.byteLength(pending) > IPC_MAX_BYTES) { onError?.(new Error("frame exceeds the IPC size limit")); socket.destroy(); }
 	});
 }
 

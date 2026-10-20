@@ -43,8 +43,20 @@ function piHarness(id: string) {
     on(type: string, handler: Handler) { handlers.set(type, [...(handlers.get(type) ?? []), handler]); return () => {}; },
     registerTool(tool: { name: string }) { tools.set(tool.name, tool); },
     registerCommand(_name: string, options: { handler: typeof command }) { command = options.handler; },
-    sendUserMessage(content: any) { state.sent.push(content); state.idle = false; },
+    sendUserMessage(content: any) {
+      state.sent.push(content);
+      state.idle = false;
+      // pi echoes the prompt it starts through before_agent_start.
+      void emit("before_agent_start", {
+        messageType: "user", prompt: content.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n"),
+        images: content.filter((part: any) => part.type === "image"),
+      });
+    },
   } as unknown as ExtensionAPI;
+  async function emit(type: string, event: any = {}) {
+    if (type === "message_end") state.entries.push({ type: "message", id: randomUUID(), message: event.message });
+    for (const handler of handlers.get(type) ?? []) await handler({ type, ...event }, ctx);
+  }
   extension(pi, { createClient(options) {
     const client = new GatewayClient({ ...options, launch() { throw new Error("test gateway must already exist"); } });
     state.clients.push(client);
@@ -53,10 +65,7 @@ function piHarness(id: string) {
   return {
     state, ctx, command: (text: string) => command(text, ctx),
     notification: (params: Record<string, unknown>) => tools.get("wecom_send").execute("send", params, undefined, undefined, ctx),
-    async emit(type: string, event: any = {}) {
-      if (type === "message_end") state.entries.push({ type: "message", id: randomUUID(), message: event.message });
-      for (const handler of handlers.get(type) ?? []) await handler({ type, ...event }, ctx);
-    },
+    emit,
     ready: () => state.clients.at(-1)?.isReady() ?? false,
   };
 }

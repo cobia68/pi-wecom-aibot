@@ -35,5 +35,9 @@ export async function bootstrap(overrides = {}) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-	bootstrap().catch(() => { process.exitCode = 1; });
+	bootstrap().catch((error) => {
+		// The client reads this pipe: a failed startup must say why in pi's log.
+		process.stderr.write(`pi-wecom-aibot gateway failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+		process.exitCode = 1;
+	});
 }
