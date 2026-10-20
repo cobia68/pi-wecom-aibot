@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseInbound, senderOf } from "../../src/shared/wecom-protocol.ts";
+import { parseInbound, quotedImage, senderOf } from "../../src/shared/wecom-protocol.ts";
 
 const base = {
 	msgid: "m1",
@@ -80,6 +80,34 @@ test("a quote keeps its plain text, including a quoted Markdown notification", (
 	);
 });
 
+test("a quote that is only a picture, file or video leaves no text behind for pi to read", () => {
+	for (const kind of ["image", "file", "video", "miniprogram"]) {
+		const message = parseInbound({ ...base, quote: { msgtype: kind, [kind]: { url: "https://example.invalid/q" } } });
+		assert.equal(message?.quoteText, undefined, `a ${kind} quote is not words`);
+	}
+});
+
+test("a mixed quote keeps the words it has and drops only its placeholders", () => {
+	const mix = (items: unknown[]) => ({ ...base, quote: { msgtype: "mixed", mixed: { msg_item: items } } });
+	const both = parseInbound(
+		mix([
+			{ msgtype: "text", text: { content: "看图" } },
+			{ msgtype: "image", image: { url: "https://example.invalid/q" } },
+		]),
+	);
+	assert.equal(both?.quoteText, "看图");
+	assert.equal(
+		parseInbound(mix([{ msgtype: "image", image: { url: "https://example.invalid/q" } }]))?.quoteText,
+		undefined,
+		"placeholders alone say nothing",
+	);
+	assert.equal(
+		parseInbound(mix([{ msgtype: "text", text: { content: "  " } }]))?.quoteText,
+		undefined,
+		"blank text is not words either",
+	);
+});
+
 test("malformed callbacks are rejected instead of guessed", () => {
 	assert.equal(senderOf({ from: {} }), undefined);
 	assert.equal(parseInbound({ ...base, from: undefined }), undefined, "no sender");
@@ -94,4 +122,44 @@ test("malformed callbacks are rejected instead of guessed", () => {
 		"[location]",
 		"an unknown type is named, not dropped",
 	);
+});
+
+test("a quote that is not plainly text reports its type, field names and any image link", () => {
+	const image = { url: "https://example.invalid/q", aeskey: "KEY", md5: "m" };
+	assert.deepEqual(quotedImage({ ...base, quote: { msgtype: "image", image } }), {
+		msgtype: "image",
+		quoteFields: ["msgtype", "image"],
+		imageFields: ["url", "aeskey", "md5"],
+		url: image.url,
+		aeskey: "KEY",
+	});
+	const mixed = {
+		msgtype: "mixed",
+		mixed: {
+			msg_item: [
+				{ msgtype: "text", text: { content: "hi" } },
+				{ msgtype: "image", image: { url: "u" } },
+			],
+		},
+	};
+	assert.deepEqual(quotedImage({ ...base, quote: mixed }), {
+		msgtype: "mixed",
+		quoteFields: ["msgtype", "mixed"],
+		imageFields: ["url"],
+		url: "u",
+	});
+	assert.deepEqual(quotedImage({ ...base, quote: { msgtype: "image" } }), {
+		msgtype: "image",
+		quoteFields: ["msgtype"],
+		imageFields: [],
+	});
+	// An unexpected shape is reported rather than silently skipped.
+	assert.deepEqual(quotedImage({ ...base, quote: { msgtype: "file", file: { url: "f" } } }), {
+		msgtype: "file",
+		quoteFields: ["msgtype", "file"],
+		imageFields: [],
+	});
+	for (const msgtype of ["text", "markdown", "voice"])
+		assert.equal(quotedImage({ ...base, quote: { msgtype, [msgtype]: { content: "x" } } }), undefined, msgtype);
+	assert.equal(quotedImage(base), undefined);
 });

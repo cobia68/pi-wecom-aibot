@@ -3,10 +3,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { inspectPng, stampPng } from "../../src/gateway/png-marker.ts";
 import { type GatewayPeer, WeComGateway } from "../../src/gateway/runtime.ts";
 import { type GatewayRegistration, type ServerFrame, sessionTarget } from "../../src/shared/gateway-protocol.ts";
 import { formatProcessingStatus, notificationPayload } from "../../src/shared/notification.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
+import { encryptMedia, MEDIA_KEY, TINY_PNG } from "../support/media.ts";
 
 const SESSION_A = "01234567-89ab-4cde-8012-3456789abcde";
 const SESSION_B = "01234567-89ab-4cde-8012-3456789abcdf";
@@ -724,4 +726,131 @@ test("a rejected media upload falls back to Markdown while a rejected image send
 	assert.equal(push.body.msgtype, "markdown");
 	assert.match(push.body.markdown.content, /图片发送失败：.*已改发文字/);
 	rmSync(file.dir, { recursive: true, force: true });
+});
+
+async function until<T>(read: () => T | undefined): Promise<T> {
+	for (let attempt = 0; attempt < 200; attempt++) {
+		const value = read();
+		if (value !== undefined) return value;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	throw new Error("condition not reached");
+}
+
+function logs(peer: Peer): string[] {
+	return peer.frames.flatMap((frame) => (frame.type === "log" ? [frame.message] : []));
+}
+
+/** The file as WeCom received it: the upload chunks in order. */
+function uploaded(ws: FakeWebSocket): Buffer {
+	const chunks = ws.sent.filter((frame) => frame.cmd === "aibot_upload_media_chunk");
+	chunks.sort((left, right) => left.body.chunk_index - right.body.chunk_index);
+	return Buffer.concat(chunks.map((frame) => Buffer.from(frame.body.base64_data, "base64")));
+}
+
+test("every image the gateway sends carries its session marker; a file it cannot mark is sent as it is", async () => {
+	const a = add("A", SESSION_A);
+	const file = imageFile(TINY_PNG);
+	const image = { mime: "image/png" as const, filename: "pi-notification.png", path: file.path };
+	const previous = a.ws.onSend;
+	a.ws.onSend = (frame: any) => {
+		previous?.(frame);
+		if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
+	};
+	await gateway.notify(
+		"A",
+		{ chatId: "user", chatType: 1 },
+		{ kind: "reply", source: a.value.source, text: "x", image },
+	);
+	assert.equal(inspectPng(uploaded(a.ws))?.session, SESSION_A);
+	assert.ok(logs(a.peer).some((line) => line.includes(`图片已打标记：PNG 1×1；块 IHDR,tEXt,IDAT`)));
+	a.ws.sent.length = 0;
+	writeFileSync(file.path, Buffer.alloc(64, 1));
+	await gateway.notify(
+		"A",
+		{ chatId: "user", chatType: 1 },
+		{ kind: "reply", source: a.value.source, text: "x", image },
+	);
+	assert.deepEqual(uploaded(a.ws), Buffer.alloc(64, 1));
+	assert.ok(logs(a.peer).some((line) => line.startsWith("图片未打标记")));
+	rmSync(file.dir, { recursive: true, force: true });
+});
+
+test("a screenshot carries the marker of the session that took it", async () => {
+	const a = add("A", SESSION_A);
+	message(`/wecom-aibot screen --sessionid ${SESSION_A}`);
+	const file = imageFile(TINY_PNG);
+	gateway.response("A", requests(a.peer)[0].id, {
+		ok: true,
+		image: { mime: "image/png", filename: "screen.png", path: file.path },
+	});
+	await until(() => (a.ws.sent.some((frame) => frame.cmd === "aibot_upload_media_chunk") ? true : undefined));
+	assert.equal(inspectPng(uploaded(a.ws))?.session, SESSION_A);
+	rmSync(file.dir, { recursive: true, force: true });
+});
+
+test("a quoted image routes to the session whose marker it carries", async (t) => {
+	const a = add("A", SESSION_A);
+	const b = add("B", SESSION_B);
+	const encrypted = encryptMedia(stampPng(TINY_PNG, SESSION_B));
+	const fetchMock = t.mock.method(globalThis, "fetch", async () => new Response(new Uint8Array(encrypted)));
+	const url = "https://wecom.example.invalid/q?sign=SECRET";
+	message("这张图里的结果", { quote: { msgtype: "image", image: { url, aeskey: MEDIA_KEY.toString("base64") } } });
+	const task = await until(() => b.peer.messages()[0]);
+	assert.equal(task.task.message.text, "这张图里的结果");
+	assert.equal(a.peer.messages().length, 0);
+	const line = await until(() => logs(a.peer).find((entry) => entry.startsWith("引用图片：")));
+	assert.match(line, new RegExp(`读到标记 session ${SESSION_B}$`));
+	assert.doesNotMatch(line, /SECRET/);
+	assert.equal(String(fetchMock.mock.calls[0].arguments[0]), url);
+});
+
+test("a quoted image without a marker is reported, never redirected to another pi", async (t) => {
+	const a = add("A", SESSION_A);
+	const b = add("B", SESSION_B);
+	t.mock.method(globalThis, "fetch", async () => new Response(new Uint8Array(encryptMedia(TINY_PNG))));
+	message("这张图", { quote: { msgtype: "image", image: { url: "https://example.invalid/q" } } });
+	await until(() => logs(a.peer).find((entry) => entry.startsWith("引用图片：")));
+	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
+	assert.match(prompt(), /引用的通知或图片无法定位到一个在线会话/);
+	assert.doesNotMatch(logs(a.peer).join("\n"), /读到标记/);
+});
+
+test("a quoted image naming a session that is gone is reported, with the sessions that are left", async (t) => {
+	const a = add("A", SESSION_A);
+	const encrypted = encryptMedia(stampPng(TINY_PNG, SESSION_B));
+	t.mock.method(globalThis, "fetch", async () => new Response(new Uint8Array(encrypted)));
+	message("这张图", { quote: { msgtype: "image", image: { url: "https://example.invalid/q" } } });
+	await until(() => logs(a.peer).find((entry) => entry.startsWith("引用图片：")));
+	assert.equal(a.peer.messages().length, 0);
+	assert.match(prompt(), new RegExp(`无法定位到一个在线会话[\\s\\S]*session: ${SESSION_A}`));
+});
+
+test("a quote carrying both text and an image is answered by the text, without downloading", async (t) => {
+	const a = add("A", SESSION_A);
+	const b = add("B", SESSION_B);
+	const fetchMock = t.mock.method(globalThis, "fetch");
+	message("混合", {
+		quote: {
+			msgtype: "mixed",
+			mixed: { msg_item: [{ msgtype: "text", text: { content: `session: ${SESSION_B}` } }] },
+			image: { url: "https://example.invalid/q" },
+		},
+	});
+	assert.equal(b.peer.messages()[0].task.message.text, "混合");
+	assert.equal(a.peer.messages().length, 0);
+	assert.equal(fetchMock.mock.callCount(), 0);
+});
+
+test("an image quoted by someone outside the allowlist is never downloaded", async (t) => {
+	add("A", SESSION_A, (value) => {
+		value.config.allowedUserIds = ["alice"];
+	});
+	const fetchMock = t.mock.method(globalThis, "fetch");
+	message("x", {
+		from: { userid: "mallory" },
+		quote: { msgtype: "image", image: { url: "https://example.invalid/q" } },
+	});
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(fetchMock.mock.callCount(), 0);
 });

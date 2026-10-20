@@ -38,6 +38,7 @@ export interface InboundMessage {
 	userid: string;
 	/** Visible text; the leading @mention of a group message is removed. */
 	text: string;
+	/** Text the message quotes, when it says something in words; a quote that is only a picture leaves this unset. */
 	quoteText?: string;
 	attachments: Attachment[];
 }
@@ -67,7 +68,7 @@ export function parseInbound(value: unknown): InboundMessage | undefined {
 	let text = messageText(body);
 	if (text === undefined) return undefined;
 	if (group) text = text.replace(/^@\S+\s*/, "");
-	const quoteText = body.quote ? messageText(body.quote) : undefined;
+	const quoteText = body.quote ? quotedWords(body.quote) : undefined;
 	return {
 		msgId: body.msgid === undefined || body.msgid === null ? "" : String(body.msgid),
 		msgtype: typeof body.msgtype === "string" ? body.msgtype : "?",
@@ -110,6 +111,62 @@ export function messageText(value: unknown): string | undefined {
 		default:
 			return typeof node?.msgtype === "string" && node.msgtype ? `[${node.msgtype}]` : "";
 	}
+}
+
+/**
+ * A quote that is not plainly text, so it may be an image this gateway sent: its type, field names and
+ * any image download link. A quote never names the message it quotes; the gateway reads the image's own
+ * marker to find out which session sent it.
+ */
+export interface QuotedImage {
+	msgtype: string;
+	/** Top-level fields of the quote, names only. */
+	quoteFields: string[];
+	/** Fields of the quoted image, names only: whether WeCom sent an aeskey, or anything else. */
+	imageFields: string[];
+	url?: string;
+	aeskey?: string;
+}
+
+/** undefined without a quote or for text, Markdown and voice quotes; an image may sit inside a mixed one. */
+export function quotedImage(value: unknown): QuotedImage | undefined {
+	const quote = record(record(value)?.quote);
+	const msgtype = typeof quote?.msgtype === "string" ? quote.msgtype : "";
+	if (!quote || ["text", "markdown", "voice"].includes(msgtype)) return undefined;
+	let image = msgtype === "image" ? record(quote.image) : undefined;
+	if (msgtype === "mixed") {
+		const items = record(quote.mixed)?.msg_item;
+		const entry = Array.isArray(items) ? items.map(record).find((item) => item?.msgtype === "image") : undefined;
+		image = record(entry?.image);
+	}
+	return {
+		msgtype,
+		quoteFields: Object.keys(quote),
+		imageFields: image ? Object.keys(image) : [],
+		...(typeof image?.url === "string" && image.url ? { url: image.url } : {}),
+		...(typeof image?.aeskey === "string" && image.aeskey ? { aeskey: image.aeskey } : {}),
+	};
+}
+
+/** A placeholder standing in for a picture, file or video: it names no target and is not something a person said. */
+const PLACEHOLDER = /^\[[^[\]\s]{1,20}\]$/;
+
+/**
+ * The words of a quote. An image quote carries only a placeholder, and handing that to pi as if the user
+ * had written "[图片]" makes the prompt look like it contains a statement it does not; a mixed quote keeps
+ * its text and loses only the placeholders.
+ */
+function quotedWords(value: unknown): string | undefined {
+	const text = messageText(value);
+	if (text === undefined) return undefined;
+	const words = text
+		.split("\n")
+		.filter((line) => {
+			const trimmed = line.trim();
+			return trimmed && !PLACEHOLDER.test(trimmed);
+		})
+		.join("\n");
+	return words || undefined;
 }
 
 function stringOrUndefined(value: unknown): string | undefined {

@@ -26,6 +26,7 @@ import {
 	type ChatRef,
 	type InboundMessage,
 	parseInbound,
+	quotedImage,
 	record,
 	senderOf,
 	WECOM_IMAGE_MAX_BYTES,
@@ -33,6 +34,8 @@ import {
 	WECOM_REPLY_WINDOW_MS,
 	WECOM_STREAM_LIFETIME_MS,
 } from "../shared/wecom-protocol.ts";
+import { inspectPng, stampPng } from "./png-marker.ts";
+import { readQuotedImage } from "./quoted-image.ts";
 import { WeComClient, type WeComClientOptions, type WeComInbound } from "./wecom-client.ts";
 
 const MAX_SESSIONS = 100;
@@ -247,7 +250,10 @@ export class WeComGateway {
 			let mediaId: string | undefined;
 			if (image.data) {
 				try {
-					mediaId = await this.client.uploadImage(image.data, notification.image.filename);
+					mediaId = await this.client.uploadImage(
+						this.marked(image.data, member.source.sessionId),
+						notification.image.filename,
+					);
 				} catch (error) {
 					failure = `上传失败：${errorMessage(error)}`;
 				}
@@ -393,11 +399,14 @@ export class WeComGateway {
 		for (const member of this.members.values()) member.peer.send(frame);
 	}
 
-	private receive(action: () => void): void {
+	/** One inbound callback; reading a quoted image makes this asynchronous, a failure is only ever logged. */
+	private receive(action: () => void | Promise<void>): void {
+		const failed = (error: unknown) => this.log(`gateway inbound failed: ${errorMessage(error)}`);
 		try {
-			action();
+			const running = action();
+			running?.catch(failed);
 		} catch (error) {
-			this.log(`gateway inbound failed: ${errorMessage(error)}`);
+			failed(error);
 		}
 	}
 
@@ -412,7 +421,7 @@ export class WeComGateway {
 		);
 	}
 
-	private route(inbound: WeComInbound): void {
+	private async route(inbound: WeComInbound): Promise<void> {
 		const userid = senderOf(inbound.body);
 		if (!userid) return;
 		const eligible = this.eligible(userid);
@@ -427,6 +436,8 @@ export class WeComGateway {
 			this.reply(inbound.reqId, "无法识别这条消息，请重新发送。");
 			return;
 		}
+		const quoted = quotedImage(inbound.body);
+		const quoting = message.quoteText !== undefined || quoted !== undefined;
 		this.expire();
 		// While a pi waits in /wecom-aibot whoami, the next message it may receive only identifies the chat.
 		const watchers = eligible.filter((member) => this.watches.has(member.instanceId));
@@ -439,18 +450,31 @@ export class WeComGateway {
 			this.command(command, inbound.reqId, message, eligible);
 			return;
 		}
-		// A quote is the one way to target a message without naming a session.
-		const target = message.quoteText ? quotedMember(eligible, message.quoteText) : undefined;
-		if (message.quoteText && !target) {
-			this.reply(inbound.reqId, `${QUOTE_FAILED}\n\n${sessionsText(eligible, this.tasks)}`);
+		// A quote is the one way to target a message without naming a session. Its text names the
+		// notification it quotes; only an image quote needs the file read below, so nothing else waits.
+		const named = message.quoteText ? quotedMember(eligible, message.quoteText) : undefined;
+		if (named) {
+			this.hand(named, inbound.reqId, message, eligible);
 			return;
 		}
-		if (target) {
-			if (!this.deliver(target, inbound.reqId, message))
-				this.reply(inbound.reqId, `${TARGET_GONE}\n\n${sessionsText(eligible, this.tasks)}`);
-			return;
+		if (quoted) {
+			const reading = await readQuotedImage(quoted);
+			this.log(reading.report);
+			const marked = reading.sessionId
+				? eligible.find((member) => member.source.sessionId === reading.sessionId)
+				: undefined;
+			if (marked) {
+				this.hand(marked, inbound.reqId, message, eligible);
+				return;
+			}
 		}
-		this.reply(inbound.reqId, GUIDANCE);
+		this.reply(inbound.reqId, quoting ? `${QUOTE_FAILED}\n\n${sessionsText(eligible, this.tasks)}` : GUIDANCE);
+	}
+
+	/** Deliver one message to one session, or say why it cannot take it. */
+	private hand(target: Member, reqId: string, message: InboundMessage, eligible: Member[]): void {
+		if (!this.deliver(target, reqId, message))
+			this.reply(reqId, `${TARGET_GONE}\n\n${sessionsText(eligible, this.tasks)}`);
 	}
 
 	private command(
@@ -478,8 +502,7 @@ export class WeComGateway {
 			return;
 		}
 		if (command.kind === "send") {
-			if (!this.deliver(target, reqId, { ...message, text: command.prompt }))
-				this.reply(reqId, `${TARGET_GONE}\n\n${sessionsText(eligible, this.tasks)}`);
+			this.hand(target, reqId, { ...message, text: command.prompt }, eligible);
 			return;
 		}
 		this.request(command.kind, target, reqId, message.chat);
@@ -523,14 +546,14 @@ export class WeComGateway {
 			this.reply(pending.reqId, "截图失败：目标会话没有返回图片。");
 			return;
 		}
-		void this.sendImage(pending.chat, response.image)
+		void this.sendImage(pending.chat, response.image, this.members.get(instanceId)?.source.sessionId)
 			.then((sent) => {
 				if (!sent) this.reply(pending.reqId, "截图已生成，但图片发送失败；详情见 /wecom-aibot log。");
 			})
 			.catch((error: unknown) => this.log(`截图发送失败：${errorMessage(error)}`));
 	}
 
-	private async sendImage(chat: ChatRef, image: GatewayImage): Promise<boolean> {
+	private async sendImage(chat: ChatRef, image: GatewayImage, sessionId?: string): Promise<boolean> {
 		const client = this.client;
 		const read = readImage(image.path);
 		if (!client || !read.data) {
@@ -538,12 +561,30 @@ export class WeComGateway {
 			return false;
 		}
 		try {
-			const mediaId = await client.uploadImage(read.data, image.filename);
+			const data = sessionId ? this.marked(read.data, sessionId) : read.data;
+			const mediaId = await client.uploadImage(data, image.filename);
 			await client.sendMsg(chat.chatId, chat.chatType, { msgtype: "image", image: { media_id: mediaId } });
 			return true;
 		} catch (error) {
 			this.log(`截图发送失败：${errorMessage(error)}`);
 			return false;
+		}
+	}
+
+	/**
+	 * The image as sent: the session marker added, logged so a later quote can be compared with it.
+	 * A file that cannot be marked is still sent; the marker is an aid, not part of the delivery.
+	 */
+	private marked(data: Buffer, sessionId: string): Buffer {
+		try {
+			const stamped = stampPng(data, sessionId);
+			const png = inspectPng(stamped);
+			const shape = png ? `PNG ${png.width}×${png.height}；块 ${png.chunks.join(",")}` : "PNG";
+			this.log(`图片已打标记：${shape}；${stamped.length} 字节；session ${sessionId}`);
+			return stamped;
+		} catch (error) {
+			this.log(`图片未打标记（${errorMessage(error)}），按原图发送`);
+			return data;
 		}
 	}
 
@@ -696,11 +737,11 @@ const GUIDANCE = [
 	"1. 发送 /wecom-aibot sessions 查看在线会话与完整 session ID",
 	"2. 再发送 /wecom-aibot send --sessionid <id> --prompt <正文>",
 	"",
-	"也可以直接引用一条机器人通知，把这条消息定向到该会话。",
+	"也可以直接引用机器人的一条通知或一张图片（如截图），把这条消息定向到该会话。",
 ].join("\n");
 const TARGET_MISSING = "找不到这个 session ID；它可能已离线或写错。";
 const TARGET_GONE = "目标会话已离线。";
-const QUOTE_FAILED = "引用的通知无法定位到一个在线会话。";
+const QUOTE_FAILED = "引用的通知或图片无法定位到一个在线会话。";
 
 function quotedMember(eligible: Member[], quoteText: string): Member | undefined {
 	const ids = quotedSessions(quoteText);
