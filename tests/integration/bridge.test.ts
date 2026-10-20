@@ -952,7 +952,7 @@ test("help works before configuration without creating a file or starting a conn
   await command("--help", ctx);
   assert.match(notices[0], /\/wecom-aibot setup/);
   // One file of its own next to pi's settings.json, in the agent directory pi was started with.
-  assert.equal(CONFIG_FILE, join(sandbox, "wecom-aibot.json"));
+  assert.equal(CONFIG_FILE, join(sandbox, "wecom-aibot", "config.json"));
   assert.ok(notices[0].includes(CONFIG_FILE));
   await assert.rejects(readFile(CONFIG_FILE), { code: "ENOENT" });
   assert.equal(FakeWebSocket.instances.length, 1);
@@ -1075,7 +1075,8 @@ test("logout reports deletion failure and stops this pi without claiming the cre
   Object.assign(ctx, { hasUI: true });
   t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
   const before = await readFile(CONFIG_FILE, "utf8");
-  await chmod(sandbox, 0o500);
+  // The configuration lives in the plugin folder: that is the directory whose write access governs deletion.
+  await chmod(dirname(CONFIG_FILE), 0o500);
   try {
     await command("logout", ctx);
     assert.equal(await readFile(CONFIG_FILE, "utf8"), before);
@@ -1083,7 +1084,7 @@ test("logout reports deletion failure and stops this pi without claiming the cre
     assert.match(notices.at(-1)!, /已停止.*配置.*删除失败/);
     assert.equal(ws.readyState, 3);
   } finally {
-    await chmod(sandbox, 0o700);
+    await chmod(dirname(CONFIG_FILE), 0o700);
   }
 });
 
@@ -1203,18 +1204,16 @@ test("setup options are used as given: --chatid is always a literal ID, even who
   assert.deepEqual([saved.botId, saved.defaultChatId], ["b3", "whoami"]);
 });
 
-for (const enabled of [true, false]) {
-  test(`setup connects only this session and preserves inert legacy enabled=${enabled}`, async () => {
-    await writeFile(CONFIG_FILE, JSON.stringify({ botId: "old-bot", secret: "old-secret", enabled, welcome: "hello" }));
-    const sockets = FakeWebSocket.instances.length;
-    await command("setup --bot-id fresh-bot --secret fresh-secret --chatid fresh-user", ctx);
-    const saved = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
-    assert.equal(saved.enabled, enabled, "setup preserves the old field without using it");
-    assert.equal(FakeWebSocket.instances.length, sockets + 1, "setup connects the current session");
-    await emit("session_start");
-    assert.equal(FakeWebSocket.instances.length, sockets + 1, "the next session never connects automatically");
-  });
-}
+test("setup connects only this session and leaves the shared file otherwise untouched", async () => {
+  await writeFile(CONFIG_FILE, JSON.stringify({ botId: "old-bot", secret: "old-secret", futureField: { kept: true }, welcome: "hello" }));
+  const sockets = FakeWebSocket.instances.length;
+  await command("setup --bot-id fresh-bot --secret fresh-secret --chatid fresh-user", ctx);
+  const saved = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
+  assert.deepEqual(saved.futureField, { kept: true }, "a field this version does not own survives the edit");
+  assert.equal(FakeWebSocket.instances.length, sockets + 1, "setup connects the current session");
+  await emit("session_start");
+  assert.equal(FakeWebSocket.instances.length, sockets + 1, "the next session never connects automatically");
+});
 
 test("empty or dismissed setup credentials cancel without HTTP requests, config changes or reconnects", async (t) => {
   const notices: string[] = [];

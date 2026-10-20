@@ -10,7 +10,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { GatewayClient, type GatewayClientOptions } from "../../src/extension/gateway-client.ts";
 import { startGatewayServer, type GatewayServer } from "../../src/gateway/server.ts";
 import {
-  GATEWAY_PROTOCOL_VERSION, gatewayEndpoint, gatewayProof, legacyGatewayEndpoint, parseClientFrame, parseServerFrame, readFrames,
+  GATEWAY_PROTOCOL_VERSION, gatewayEndpoint, gatewayProof, parseClientFrame, parseServerFrame, readFrames,
   sessionTarget, writeFrame,
   type ClientFrame, type GatewayRegistration, type GatewayTask, type ServerFrame,
 } from "../../src/shared/gateway-protocol.ts";
@@ -521,22 +521,12 @@ test("a protocol-2 gateway is not joined or replaced by a competing connection",
   assert.deepEqual(launches, []);
 });
 
-test("a protocol-1 gateway still serving older pi windows is waited for, not joined by a second WeCom connection", { skip: process.platform === "win32" && "Windows keeps the pipe name; the handshake check applies" }, async (t) => {
-  await fakeGateway(t, legacyGatewayEndpoint(config.botId)!, () => {});
-  const launches: string[] = [];
-  const a = client("A", {}, { retryMs: 300, launch: (endpoint) => { launches.push(endpoint); } });
-  a.connection.start();
-  await until(() => a.errors.length === 1, "older gateway reported");
-  assert.match(a.errors[0], /旧版插件的共享网关仍在运行/);
-  assert.deepEqual(launches, [], "no second gateway competes for the bot's single WeCom connection");
-});
-
 const posixOnly = { skip: process.platform === "win32" && "Windows uses a named pipe" };
 
 test("on POSIX the gateway socket lives in a directory only this user can enter, tightened if it was loose", posixOnly, async () => {
   const endpoint = gatewayEndpoint(config.botId);
   assert.equal(endpoint.startsWith("\0"), false, "no abstract socket: other local users can neither connect nor take the name");
-  assert.equal(dirname(endpoint), join(homedir(), ".pi", "wecom-aibot-gateway"));
+  assert.equal(dirname(endpoint), join(homedir(), ".pi", "agent", "wecom-aibot", "gateway"));
   mkdirSync(dirname(endpoint), { recursive: true });
   chmodSync(dirname(endpoint), 0o755);
   await startServer();

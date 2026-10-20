@@ -71,11 +71,10 @@ test("the total help describes the commands it lists, and a topic help never rep
 	assert.doesNotMatch(topicHelp("connect --help"), /\/wecom-aibot setup \[--bot-id/);
 });
 
-test("setup help documents manual per-session connection and no removed screen settings", () => {
+test("setup help documents manual per-session connection and no removed settings", () => {
 	const help = topicHelp("setup --help");
 	assert.match(help, /每个 session.*手动.*\/wecom-aibot connect/);
-	assert.match(help, /enabled.*忽略/);
-	assert.doesNotMatch(help, /"enabled"\s*:|screenMode|imageHosts|fontFiles|\/wecom-aibot screen/);
+	assert.doesNotMatch(help, /enabled|"enabled"\s*:|screenMode|imageHosts|fontFiles|\/wecom-aibot screen/, "no retired field or command is still documented");
 });
 
 test("connection help never promises persisted consent or recommends the old start action", () => {

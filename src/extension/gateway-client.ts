@@ -9,15 +9,13 @@ import type { WeComConfig } from "./config.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 import {
 	GATEWAY_PROTOCOL_VERSION, GATEWAY_RETRY_MS, IPC_HEARTBEAT_MS, IPC_LEASE_MS, IPC_SEND_TIMEOUT_MS,
-	gatewayEndpoint, gatewayProof, legacyGatewayEndpoint, parseServerFrame, readFrames, sameTarget, sessionTarget, validWelcome, verifyProof, writeFrame,
+	gatewayEndpoint, gatewayProof, parseServerFrame, readFrames, sameTarget, sessionTarget, validWelcome, verifyProof, writeFrame,
 	type BridgeClient, type ChatIdentity, type GatewayCredentials, type GatewayRegistration,
 	type GatewayStatus, type GatewayTask, type TaskState,
 } from "../shared/gateway-protocol.ts";
 
 const AUTH_FAILED = "共享网关认证失败：本机运行中的网关使用不同的 BotID/Secret 或插件版本。"
-	+ "请在仍用旧配置的 pi 中运行 /wecom-aibot connect 或 /wecom-aibot disconnect（旧版插件为 /wecom start 或 /wecom stop，需退出该 pi），再在这里运行 /wecom-aibot connect。";
-const LEGACY_GATEWAY = "旧版插件的共享网关仍在运行：同一机器人只能有一个长连接。"
-	+ "请在仍使用旧版插件的 pi 窗口执行 /reload 或退出，再在这里运行 /wecom-aibot connect。";
+	+ "请在仍用旧配置的 pi 中运行 /wecom-aibot connect 或 /wecom-aibot disconnect，再在这里运行 /wecom-aibot connect。";
 
 export interface GatewayClientOptions {
 	config: WeComConfig;
@@ -286,15 +284,7 @@ export class GatewayClient implements BridgeClient {
 		this.retryTimer.unref();
 	}
 
-	/** Never start a gateway beside a protocol-1 one: both would claim the bot's single WeCom connection. */
-	private async launch(): Promise<void> {
-		const legacy = legacyGatewayEndpoint(this.credentials.botId);
-		if (legacy && await reachable(legacy)) {
-			if (this.stopped || this.block(LEGACY_GATEWAY)) return;
-			this.nextLaunchAt = 0;
-			this.setState("disconnected", "旧版插件的共享网关仍在运行，等待其退出");
-			return;
-		}
+	private launch(): void {
 		if (this.stopped) return;
 		this.blocked = undefined;
 		try {
@@ -332,15 +322,6 @@ export class GatewayClient implements BridgeClient {
 
 function named(name: "AbortError" | "TimeoutError", message: string): Error {
 	return Object.assign(new Error(message), { name });
-}
-
-function reachable(endpoint: string): Promise<boolean> {
-	return new Promise((resolve) => {
-		const probe = createConnection(endpoint);
-		probe.setTimeout(1000, () => { probe.destroy(); resolve(false); });
-		probe.once("connect", () => { probe.destroy(); resolve(true); });
-		probe.once("error", () => { probe.destroy(); resolve(false); });
-	});
 }
 
 export function launchGateway(endpoint: string, credentials: GatewayCredentials, log?: (message: string) => void): void {

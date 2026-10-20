@@ -134,25 +134,8 @@ export function gatewayEndpoint(botId: string): string {
 	return Buffer.byteLength(preferred) <= 100 ? preferred : join(tmpdir(), `pi-wecom-aibot-${process.getuid?.() ?? "user"}`, `${key}.sock`);
 }
 
-/**
- * Where a protocol-1 gateway listens; it may still serve older pi windows after an upgrade.
- * The path keeps the pre-rename `pi-wecom-` spelling on purpose: it names a historical endpoint
- * that old gateways are already listening on, so renaming it would hide them instead of waiting.
- */
-export function legacyGatewayEndpoint(botId: string): string | undefined {
-	const key = legacyEndpointKey(botId);
-	if (process.platform === "win32") return undefined; // Same pipe name: the version check in the handshake applies.
-	if (process.platform === "linux") return `\0pi-wecom-${key}`;
-	return join(tmpdir(), `pi-wecom-${key}.sock`);
-}
-
 function endpointKey(botId: string): string {
 	return createHash("sha256").update(`${userInfo().username}\0${homedir()}\0${agentDirectory()}\0${botId}`).digest("hex").slice(0, 32);
-}
-
-/** The pre-rename key, which did not include the agent directory: names the historical protocol-1 endpoint. */
-function legacyEndpointKey(botId: string): string {
-	return createHash("sha256").update(`${userInfo().username}\0${homedir()}\0${botId}`).digest("hex").slice(0, 32);
 }
 
 export function validSource(value: unknown): value is NotificationSource {

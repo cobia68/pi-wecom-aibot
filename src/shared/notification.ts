@@ -26,13 +26,8 @@ export interface NotificationOptions {
 const TITLES: Record<NotificationKind, string> = {
 	notification: "会话通知", completion: "会话通知", reply: "会话通知", test: "部署测试", welcome: "欢迎",
 };
-/** Header line icons. They lead each line; quotedSessions accepts the session line with or without its icon. */
-const ICONS = { title: "🔔", model: "🏷️", session: "🆔" } as const;
-
-/** The title a notification kind shows in Markdown and in a rendered image. */
-export function notificationTitle(kind: NotificationKind): string {
-	return TITLES[kind];
-}
+/** Header line icons. They lead each line in Markdown and in the rendered image. */
+export const NOTIFICATION_ICONS = { title: "🔔", model: "🏷️", session: "🆔" } as const;
 
 /** The source fields of a rendered image, cleaned of control characters; the session reads as in Markdown. */
 export function notificationHeader(source: NotificationSource, kind: NotificationKind) {
@@ -101,16 +96,19 @@ function metadataValue(value: string, plain: boolean): string {
 	return line.replace(/[\\`*_#\[\]<>]/g, "\\$&");
 }
 
+function sessionIdProblem(sessionId: string): string | undefined {
+	return !sessionId || sessionId.length > 256 || /[\u0000-\u0020\u007f`]/.test(sessionId) ? "无效的 pi session_id" : undefined;
+}
+
 function validateSessionId(sessionId: string): void {
-	if (!sessionId || sessionId.length > 256 || /[\u0000-\u0020\u007f`]/.test(sessionId)) {
-		throw new Error("无效的 pi session_id");
-	}
+	const problem = sessionIdProblem(sessionId);
+	if (problem) throw new Error(problem);
 }
 
 /** Update this small status in place; publish the actual result separately. */
 export function formatProcessingStatus(sessionId: string, state: ProcessingState): string {
 	validateSessionId(sessionId);
-	return `${ICONS.session} session: ${metadataValue(sessionId, false)}  \n${STATUS_TEXT[state]}`;
+	return `${NOTIFICATION_ICONS.session} session: ${metadataValue(sessionId, false)}  \n${STATUS_TEXT[state]}`;
 }
 
 /** One envelope for final notifications, deployment checks and welcome messages. */
@@ -134,28 +132,57 @@ export function renderNotification(
 	body: string,
 	options: { kind?: NotificationKind; excerpt?: boolean; aborted?: boolean } = {},
 ): string {
-	validateSessionId(source.sessionId);
-	if (!body.trim()) throw new Error("当前 pi 会话没有可发送的文本回复");
+	const layout = layoutNotification(source, body, options);
+	if ("reason" in layout) throw new Error(layout.reason);
+	return layout.text;
+}
+
+/**
+ * The same rules as renderNotification, returned instead of rendered: callers that only need to know
+ * whether a notification is sendable do not render it, and the body is rendered exactly once.
+ */
+export function notificationProblem(
+	source: NotificationSource,
+	text: string,
+	options: NotificationOptions = {},
+): string | undefined {
+	const excerpt = options.tailParagraphs !== undefined;
+	if (excerpt && (!Number.isInteger(options.tailParagraphs) || options.tailParagraphs! < 1 || options.tailParagraphs! > 20)) {
+		return "tail_paragraphs 必须是 1 到 20 的整数";
+	}
+	const body = excerpt ? lastParagraphs(text, options.tailParagraphs!) : text;
+	const layout = layoutNotification(source, body, { kind: options.kind, excerpt, aborted: options.aborted });
+	return "reason" in layout ? layout.reason : undefined;
+}
+
+function layoutNotification(
+	source: NotificationSource,
+	body: string,
+	options: { kind?: NotificationKind; excerpt?: boolean; aborted?: boolean },
+): { text: string } | { reason: string } {
+	const invalid = sessionIdProblem(source.sessionId);
+	if (invalid) return { reason: invalid };
+	if (!body.trim()) return { reason: "当前 pi 会话没有可发送的文本回复" };
 	const kind = options.kind ?? "notification";
 	const plain = kind === "welcome";
-	const title = `${ICONS.title} ${metadataValue(source.directoryName, plain)} · ${TITLES[kind]}`;
+	const title = `${NOTIFICATION_ICONS.title} ${metadataValue(source.directoryName, plain)} · ${TITLES[kind]}`;
 	const header = [
 		title,
-		`${ICONS.model} ${metadataValue(source.provider, plain)} · ${metadataValue(source.modelName, plain)}`,
-		`${ICONS.session} session: ${metadataValue(source.sessionId, plain)}`,
+		`${NOTIFICATION_ICONS.model} ${metadataValue(source.provider, plain)} · ${metadataValue(source.modelName, plain)}`,
+		`${NOTIFICATION_ICONS.session} session: ${metadataValue(source.sessionId, plain)}`,
 	].join(plain ? "\n" : "  \n") + "\n\n";
 	const suffix = options.aborted ? "\n\n（本轮任务已中止）" : "";
 	const limit = plain ? 2048 : MAX_NOTIFICATION_BYTES;
 	const budget = limit - Buffer.byteLength(header + suffix, "utf8");
-	if (budget < 0) throw new Error("通知来源信息过长，无法容纳正文");
+	if (budget < 0) return { reason: "通知来源信息过长，无法容纳正文" };
 	let content = body.trim();
 	if (options.excerpt || kind === "reply" || plain) {
 		content = truncateContent(content, budget, !!options.excerpt);
 	}
 	if (Buffer.byteLength(content, "utf8") > budget) {
-		throw new Error("通知内容（含 session_id、供应商、模型、工作目录）不能超过 20480 个 UTF-8 字节；可设置 tail_paragraphs 截取末尾");
+		return { reason: "通知内容（含 session_id、供应商、模型、工作目录）不能超过 20480 个 UTF-8 字节；可设置 tail_paragraphs 截取末尾" };
 	}
-	return header + content + suffix;
+	return { text: header + content + suffix };
 }
 
 /**

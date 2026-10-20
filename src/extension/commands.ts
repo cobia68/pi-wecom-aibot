@@ -297,10 +297,9 @@ export function wecomHelpText(topic?: WeComCommand): string {
 		lines.push(...section("配置", [
 			...alignedRows([
 				["配置文件", `${CONFIG_FILE}\n独立 JSON 文件；同一 pi 用户目录下的多个窗口共用。`],
-				["默认位置", "~/.pi/agent/wecom-aibot.json，与 pi 的 settings.json 同目录但相互独立。\n跟随 pi 的用户目录，无需另行设置；只有用 pi 自己的 PI_CODING_AGENT_DIR 改了这个目录时，配置才随之移动。"],
+				["默认位置", "~/.pi/agent/wecom-aibot/config.json，与其他 pi 配置同在 agent 目录下，但放在插件自己的文件夹里。\n同一文件夹还放着共享网关的 socket 和会话选择记录（gateway/）；PI_CODING_AGENT_DIR 改变时整块随之移动。"],
 				["写入方式", "/wecom-aibot setup 保存 botId、secret 和默认推送目标；其他配置可编辑此 JSON 文件。"],
 				["字段", "botId / secret：机器人凭据；welcome：进入企微聊天时的欢迎语。\ndefaultChatId：默认推送的 userid 或群 chatid；defaultChatType：1 单聊 / 2 群聊。\nallowedUserIds：允许发任务的企微 userid 列表；空列表表示不限制。"],
-				["旧配置", "enabled 已停用并被忽略，即使为 true 也不会自动连接；无需修改已有凭据。"],
 				["sendMode", "通知模式：text（默认）用 Markdown；image 把自动结果渲染成当前 pi 终端图片（含 session 等三行头部，不含 footer/状态栏），通过原生图片消息发送。wecom_send 的显式 content 和 /wecom-aibot test 始终为 Markdown。"],
 			]),
 			"  配置示例（请替换示例中的 BotID、Secret 和目标 ID）：",

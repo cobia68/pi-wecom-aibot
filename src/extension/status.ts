@@ -1,6 +1,6 @@
 /** A colored name in pi's existing footer. The bridge stays hidden until its first usable connection. */
 import type { ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
-import type { BridgeConnectionStatus } from "./bridge-session.ts";
+import type { BridgeConnectionStatus } from "./connection-notices.ts";
 
 export const WECOM_STATUS_KEY = "wecom-aibot";
 const THEME_WIDGET_KEY = "wecom-aibot-theme";

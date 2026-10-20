@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GatewayNotification } from "../../shared/notification-types.ts";
-import { notificationHeader } from "../../shared/notification.ts";
+import { NOTIFICATION_ICONS, notificationHeader } from "../../shared/notification.ts";
 import { renderScreenPng, type CapturedScreen, type ScreenHeader } from "./render.ts";
 
 export interface ScreenImageOptions {
@@ -24,12 +24,13 @@ export interface ScreenImageOptions {
  */
 export function screenImageHeader(notification: GatewayNotification): ScreenHeader {
 	const { directory, title, model, session } = notificationHeader(notification.source, notification.kind);
+	// The same icons lead the same lines as the Markdown header; the image's font stack includes emoji.
 	return {
-		title: directory,
+		title: `${NOTIFICATION_ICONS.title} ${directory}`,
 		badge: notification.aborted ? "已中止" : title,
 		tone: notification.aborted ? "warning" : "accent",
-		subtitle: model,
-		caption: session,
+		subtitle: `${NOTIFICATION_ICONS.model} ${model}`,
+		caption: `${NOTIFICATION_ICONS.session} ${session}`,
 	};
 }
 

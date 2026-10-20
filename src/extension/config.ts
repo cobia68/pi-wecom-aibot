@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { agentDirectory, pluginDirectory } from "../shared/agent-path.ts";
+import { pluginDirectory } from "../shared/agent-path.ts";
 
 export type SendMode = "text" | "image";
 
@@ -29,11 +29,6 @@ export interface WeComConfig {
 
 /** A file of its own: pi gives extensions no settings writer, and project settings cannot override credentials here. */
 export const CONFIG_FILE = join(pluginDirectory(), "config.json");
-/**
- * Files earlier versions wrote in the agent directory itself; each is read once so an upgrade keeps
- * the saved credentials, then moved to CONFIG_FILE. Newest first, so a renamed install wins.
- */
-export const LEGACY_CONFIG_FILES = [join(agentDirectory(), "wecom-aibot.json"), join(agentDirectory(), "wecom-bot.json")] as const;
 
 export const DEFAULT_WELCOME = "你好，我是 pi 智能助手。直接把问题或任务发给我即可。";
 
@@ -42,13 +37,10 @@ const DEFAULTS: Omit<WeComConfig, "botId" | "secret"> = {
 	sendMode: "text",
 };
 
-/**
- * A corrupt file must not look like an unconfigured one: only ENOENT means "no configuration",
- * every other read error and every unusable value names the file and the field to fix.
- * Presentation problems that keep the file usable (e.g. a failed legacy migration) go to `warnings`.
- */
-export function loadConfig(warnings?: string[]): WeComConfig | undefined {
-	const found = readConfigFile(warnings);
+/** A corrupt file must not look like an unconfigured one: only ENOENT means "no configuration",
+ * every other read error and every unusable value names the file and the field to fix. */
+export function loadConfig(): WeComConfig | undefined {
+	const found = readConfigFile();
 	return found && normalize(found.value, found.file);
 }
 
@@ -85,41 +77,27 @@ export function saveConfig(config: WeComConfig): void {
 export function clearConfig(): void {
 	// force only tolerates a missing file; permissions, sharing violations, etc. must reach the caller.
 	rmSync(CONFIG_FILE, { force: true });
-	// A pre-rename file must not resurrect the credentials after a logout.
-	for (const legacy of LEGACY_CONFIG_FILES) rmSync(legacy, { force: true });
 }
 
 /** The parsed file, including fields this version does not know; undefined only when it does not exist. */
-function readConfigFile(warnings?: string[]): { file: string; value: unknown } | undefined {
+function readConfigFile(): { file: string; value: unknown } | undefined {
 	const found = readConfigText();
 	if (!found) return undefined;
 	let value: unknown;
 	try { value = JSON.parse(found.text); }
 	catch (error) { throw new Error(`${found.file} 不是有效的 JSON：${errMsg(error)}`); }
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${found.file} 不是 JSON 对象`);
-	// A legacy file is moved under the new name once, after its content has been validated.
-	if (found.file !== CONFIG_FILE) {
-		try {
-			writeConfigFile(value);
-			rmSync(found.file, { force: true });
-		} catch (error) {
-			// Keep using the legacy file rather than lose the Secret, but say why the move failed.
-			warnings?.push(`旧配置文件 ${found.file} 暂时无法迁移到 ${CONFIG_FILE}（${errMsg(error)}），正在直接使用旧文件`);
-		}
-	}
 	return { file: found.file, value };
 }
 
-/** The new file, or an older one when the new one does not exist yet. */
 function readConfigText(): { file: string; text: string } | undefined {
-	for (const file of [CONFIG_FILE, ...LEGACY_CONFIG_FILES]) {
-		try {
-			return { file, text: readFileSync(file, "utf8") };
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`无法读取配置文件 ${file}：${errMsg(error)}`);
-		}
+	const file = CONFIG_FILE;
+	try {
+		return { file, text: readFileSync(file, "utf8") };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`无法读取配置文件 ${file}：${errMsg(error)}`);
+		return undefined;
 	}
-	return undefined;
 }
 
 /**

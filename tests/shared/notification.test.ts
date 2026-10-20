@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { marked } from "marked";
 import {
   formatNotification, formatProcessingStatus, lastParagraphs, MAX_NOTIFICATION_BYTES,
-  notificationPayload, quotedSessions, renderNotification,
+  notificationPayload, notificationProblem, quotedSessions, renderNotification,
 } from "../../src/shared/notification.ts";
 
 const source = { sessionId: "pi-session-1", provider: "test-provider", modelName: "Model A", directoryName: "pi-wecom-aibot" };
@@ -40,6 +40,18 @@ test("excerpt truncation keeps the tail and session ID within the UTF-8 byte lim
 
 test("invalid paragraph counts cannot silently change the excerpt", () => {
   for (const count of [0, -1, 1.5, 21]) assert.throws(() => lastParagraphs("text", count), /tail_paragraphs/);
+});
+
+test("the sendability check returns the same reasons without rendering", () => {
+  assert.equal(notificationProblem(source, "正文"), undefined);
+  assert.match(notificationProblem(source, "   ")!, /没有可发送的文本/);
+  assert.match(notificationProblem(source, "正文", { tailParagraphs: 0 })!, /tail_paragraphs/);
+  assert.match(notificationProblem({ ...source, sessionId: "bad id" }, "正文")!, /session_id/);
+  assert.match(notificationProblem(source, "x".repeat(MAX_NOTIFICATION_BYTES))!, /20480/);
+  // Whatever the check accepts, the renderer accepts too, with the same layout.
+  const body = "第一段\n\n第二段";
+  assert.equal(notificationProblem(source, body, { tailParagraphs: 1 }), undefined);
+  assert.match(renderNotification(source, lastParagraphs(body, 1), { excerpt: true }), /第二段$/);
 });
 
 test("metadata and abort notice both count towards the byte budget", () => {
@@ -82,13 +94,13 @@ test("every published envelope round-trips: a quoted notification or status rout
   assert.deepEqual(quotedSessions("project · 会话通知\nprovider · model"), [""]);
 });
 
-test("notifications and status messages sent before the header icons still route to their session", () => {
-  for (const legacy of [
+test("a quoted notification routes by its session line, with or without icons in the metadata", () => {
+  for (const layout of [
     "project · 会话通知  \nprovider · model  \nsession: s1\n\nresult",
     "session: s1  \n执行中…",
   ]) {
-    assert.deepEqual(quotedSessions(legacy), ["s1"]);
-    assert.deepEqual(quotedSessions(legacy.split("\n").map((line) => `> ${line}`).join("\n")), ["s1"]);
+    assert.deepEqual(quotedSessions(layout), ["s1"]);
+    assert.deepEqual(quotedSessions(layout.split("\n").map((line) => `> ${line}`).join("\n")), ["s1"]);
   }
 });
 

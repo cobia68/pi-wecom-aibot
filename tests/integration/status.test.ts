@@ -111,25 +111,22 @@ after(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-for (const enabled of [true, false, undefined]) {
-  test(`every new session stays disconnected with legacy enabled=${enabled}; querying never connects`, async () => {
-    writeFileSync(CONFIG_FILE, JSON.stringify({ ...config, enabled }));
-    const saved = readFileSync(CONFIG_FILE, "utf8");
-    const h = harness();
-    assert.equal(h.clients.length, 0);
-    await h.emit("session_start");
-    assert.deepEqual(h.notices, [], "startup must not announce a connection");
-    await h.command("status");
-    await h.command("--help");
-    await h.emit("model_select");
-    await h.emit("agent_start");
-    assert.equal(h.clients.length, 0, "the configuration cannot opt a session into receiving tasks");
-    assert.deepEqual(h.changes, []);
-    assert.match(h.notices[0], /当前 pi：未连接/);
-    assert.doesNotMatch(h.notices[0], /自动连接：开|已启动/);
-    assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved);
-  });
-}
+test("a stored configuration never opts a session into receiving tasks; querying never connects", async () => {
+  const saved = readFileSync(CONFIG_FILE, "utf8");
+  const h = harness();
+  assert.equal(h.clients.length, 0);
+  await h.emit("session_start");
+  assert.deepEqual(h.notices, [], "startup must not announce a connection");
+  await h.command("status");
+  await h.command("--help");
+  await h.emit("model_select");
+  await h.emit("agent_start");
+  assert.equal(h.clients.length, 0, "the configuration cannot opt a session into receiving tasks");
+  assert.deepEqual(h.changes, []);
+  assert.match(h.notices[0], /当前 pi：未连接/);
+  assert.doesNotMatch(h.notices[0], /自动连接：开|已启动/);
+  assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved);
+});
 
 test("manual connect is silent and invisible until both registration and subscription are usable", async () => {
   const saved = readFileSync(CONFIG_FILE, "utf8");

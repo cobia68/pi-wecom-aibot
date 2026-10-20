@@ -1,6 +1,7 @@
 /**
- * Gateway sockets and routing state live under the user's home directory. Import this first in tests that start
- * gateways: HOME points at a temporary directory for this test file and the processes it spawns.
+ * Gateway sockets and routing state live in the plugin folder inside pi's agent directory (or inside HOME for
+ * tests). Import this first in tests that start gateways: HOME points at a temporary directory for this test
+ * file and the processes it spawns.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";

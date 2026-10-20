@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { FooterComponent, SessionManager, initTheme, type AgentSession, type ExtensionContext, type ReadonlyFooterDataProvider, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { BridgeConnectionStatus } from "../../src/extension/bridge-session.ts";
+import type { BridgeConnectionStatus } from "../../src/extension/connection-notices.ts";
 import { WeComStatus, WECOM_STATUS_KEY } from "../../src/extension/status.ts";
 import { fixtureTheme, installTuiFixture } from "../support/tui-fixture.ts";
 

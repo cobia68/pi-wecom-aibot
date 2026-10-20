@@ -11,7 +11,7 @@ import {
 	type ChatIdentity, type GatewayCredentials, type GatewayRegistration, type GatewayStatus,
 	type ServerFrame, type SessionTarget, type TaskState,
 } from "../shared/gateway-protocol.ts";
-import type { GatewaySelectionStore } from "./selection-store.ts";
+import type { SelectionStore } from "./selection-store.ts";
 
 const MAX_SESSIONS = 100;
 const MAX_CONVERSATIONS = 1000;
@@ -72,10 +72,10 @@ export class WeComGateway {
 	private status: GatewayStatus = { state: "disconnected", sessions: 0 };
 	private readonly options: WeComGatewayOptions;
 	private readonly membershipChanged: () => void;
-	private readonly selectionStore: GatewaySelectionStore | undefined;
+	private readonly selectionStore: SelectionStore | undefined;
 	private readonly requireChoice: boolean;
 
-	constructor(options: WeComGatewayOptions, membershipChanged: () => void = () => {}, selectionStore?: GatewaySelectionStore) {
+	constructor(options: WeComGatewayOptions, membershipChanged: () => void = () => {}, selectionStore?: SelectionStore) {
 		this.options = options;
 		this.membershipChanged = membershipChanged;
 		this.selectionStore = selectionStore;
@@ -311,11 +311,9 @@ export class WeComGateway {
 			return { kind: "offer", reason: quotedIds.length > 1 ? "引用中包含多个 session ID，请选择目标。" : "引用的目标会话已离线或不可用，请重新选择。", pending: message };
 		}
 		const text = message.text.trim();
-		// The pre-rename spelling stays accepted on the WeCom side: there is no completion in a chat,
-		// and an unrecognized command would silently be routed to pi as a task.
-		if (/^\/(?:wecom|wecom-aibot)\s+(?:sessions|list)$/i.test(text) || /^\/(?:wecom|wecom-aibot)\s+use\s*$/i.test(text)) return { kind: "offer" };
+		if (/^\/wecom-aibot\s+(?:sessions|list)$/i.test(text) || /^\/wecom-aibot\s+use\s*$/i.test(text)) return { kind: "offer" };
 		const choice = this.choices.get(key);
-		const selection = /^\/(?:wecom|wecom-aibot)\s+use\s+(\S+)$/i.exec(text)?.[1] ?? (choice && /^\d+$/.test(text) ? text : undefined);
+		const selection = /^\/wecom-aibot\s+use\s+(\S+)$/i.exec(text)?.[1] ?? (choice && /^\d+$/.test(text) ? text : undefined);
 		if (selection !== undefined) {
 			// A number refers to the list that was shown, never to the current order of members.
 			const numeric = /^\d+$/.test(selection);

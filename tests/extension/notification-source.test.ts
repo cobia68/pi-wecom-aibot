@@ -48,9 +48,9 @@ test("excerpts identify the original provider and model even when providers shar
   const current = captureNotificationSource(ctx);
   assert.equal(current.modelName, "Other Provider's Model A");
   assert.equal(current.provider, "another-provider");
-  const legacy = captureNotificationSource(ctx, { model: "model-a" });
-  assert.equal(legacy.provider, "未知供应商");
-  assert.equal(legacy.modelName, "model-a");
+  const uncataloguedModel = captureNotificationSource(ctx, { model: "model-a" });
+  assert.equal(uncataloguedModel.provider, "未知供应商");
+  assert.equal(uncataloguedModel.modelName, "model-a");
 });
 
 test("source snapshots survive later context changes and missing models have an explicit label", () => {

@@ -20,7 +20,7 @@ const completions = await wecom.getArgumentCompletions("--h");
 assert.ok(completions.some((item) => item.value === "--help"));
 let help = "";
 await wecom.handler("setup --help", { ui: { notify: (message) => { help = message; } } });
-assert.ok(help.includes("defaultChatId") && help.includes("sendMode") && help.includes("wecom-aibot.json"));
+assert.ok(help.includes("defaultChatId") && help.includes("sendMode") && help.includes("config.json"));
 assert.ok(extension.tools.has("wecom_send"));
 assert.equal(extension.tools.get("wecom_send").definition.parameters.properties.screen, undefined);
 assert.ok((await wecom.getArgumentCompletions("co")).some((item) => item.value === "connect"));

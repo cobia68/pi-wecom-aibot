@@ -5,7 +5,14 @@ import { dirname, join } from "node:path";
 import type { SessionTarget } from "../shared/gateway-protocol.ts";
 import { gatewayDirectory } from "../shared/agent-path.ts";
 
-export class GatewaySelectionStore {
+/** What routing needs from persistence; tests substitute a failing store without a private field in the way. */
+export interface SelectionStore {
+	load(): { entries: [string, SessionTarget][]; requireChoice: boolean };
+	save(entries: [string, SessionTarget][]): void;
+	clear(): void;
+}
+
+export class GatewaySelectionStore implements SelectionStore {
 	private readonly file: string;
 	constructor(file: string) { this.file = file; }
 

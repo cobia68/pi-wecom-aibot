@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { cellMetrics, cellsToSvg, maskSecrets, parseAnsiLine, renderScreenPng } from "../../../src/extension/screen/render.ts";
 import {
-  cellMetrics, cellsToSvg, findEmojiFont, findFonts, loadFonts, maskSecrets, parseAnsiLine, readFontInfo, renderScreenPng,
-  type FontEnvironment,
-} from "../../../src/extension/screen/render.ts";
+  findEmojiFont, findFonts, loadFonts, readFontInfo, type FontEnvironment,
+} from "../../../src/extension/screen/fonts.ts";
 
 const metrics = { advance: 0.6, ascent: 0.8, descent: 0.2, lineGap: 0.2 };
+const palette = { accent: "#ff00ff", muted: "#999999", dim: "#777777", warning: "#ffaa00" };
 const plain = (rows: ReturnType<typeof parseAnsiLine>[]) => rows.map((row) => row.map((cell) => cell.text).join(""));
 
 /** Minimal sfnt tables for the font parser, not a rasterisation fixture. */
@@ -82,19 +84,46 @@ test("the card header is set in the proportional font, with the badge in the the
 	const header = { title: "project", badge: "会话通知", subtitle: "provider · model", caption: "session: abc" };
 	const svg = cellsToSvg([parseAnsiLine("body")], 20, {
 		families: ["monospace"], sansFamilies: ["Sans"], metrics, foreground: "#eeeeee", background: "#111111",
-		palette: { accent: "#ff00ff", warning: "#ffaa00" }, header,
+		palette, header,
 	});
 	// Title, subtitle and badge take the proportional stack; only the caption stays monospace.
 	assert.match(svg, /font-family="'Sans', monospace" font-size="17" font-weight="600"/);
 	assert.match(svg, /font-family="'Sans', monospace" font-size="12\.5"/);
 	assert.match(svg, /font-family="'Sans', monospace" font-size="11\.5" fill="#ff00ff">会话通知</);
 	assert.match(svg, /font-family="monospace" font-size="11\.5"/);
-	assert.match(svg, /<polyline points="4 17 10 11 4 5"\/>/, "the accent tile keeps the vector icon, not a font glyph");
+	assert.match(svg, /#F09082/, "the header carries pi's mark, not a font glyph");
+	assert.match(svg, /#4D9ABF/);
+	assert.match(svg, /#F1BE58/);
 	assert.match(svg, /font-size="15"/, "the terminal grid keeps its own size");
 });
 
+test("without a monochrome emoji font the header drops its leading icons instead of drawing boxes", () => {
+	const svg = cellsToSvg([parseAnsiLine("body")], 40, {
+		families: ["monospace"], metrics, foreground: "#eeeeee", background: "#101010", palette,
+		header: { title: "🔔 project", badge: "会话通知", subtitle: "🏷️ provider · model", caption: "🆔 session: abc" },
+	});
+	assert.doesNotMatch(svg, /🔔|🏷️|🆔/, "no emoji glyph is drawn when the system has none");
+	assert.match(svg, />project</);
+	assert.match(svg, />provider · model</);
+	assert.match(svg, />session: abc</);
+});
+
+test("Windows finds Noto Emoji under the variable-font file name or in the user font directory", () => {
+	const system = "C:\\Windows\\Fonts\\NotoEmoji-VariableFont_wght.ttf";
+	const user = "C:\\Users\\test\\AppData\\Local\\Microsoft\\Windows\\Fonts\\NotoEmoji-Regular.ttf";
+	const systemEnv = environment("win32", [system], { list: (dir) => dir === "C:\\Windows\\Fonts" ? ["NotoEmoji-VariableFont_wght.ttf"] : [] });
+	assert.equal(findEmojiFont(systemEnv), system);
+	const userEnv = environment("win32", [user], {
+		env: { LOCALAPPDATA: "C:\\Users\\test\\AppData\\Local" },
+		list: (dir) => dir.toLowerCase().endsWith("\\fonts") ? ["NotoEmoji-Regular.ttf"] : [],
+	});
+	assert.equal(findEmojiFont(userEnv), user);
+	assert.equal(findEmojiFont(environment("win32", ["C:\\Windows\\Fonts\\seguiemj.ttf"], { list: () => ["seguiemj.ttf"] })),
+		undefined, "Segoe UI Emoji is color and cannot be used by the rasteriser");
+});
+
 test("the warning tone marks an aborted run, and no header leaves the band out", () => {
-	const options = { families: ["monospace"], metrics, foreground: "#eeeeee", background: "#111111", palette: { warning: "#ffaa00" } };
+	const options = { families: ["monospace"], metrics, foreground: "#eeeeee", background: "#111111", palette };
 	const aborted = cellsToSvg([parseAnsiLine("body")], 20, {
 		...options, header: { title: "project", badge: "已中止", tone: "warning" as const, subtitle: "provider · model", caption: "session: abc" },
 	});
@@ -136,7 +165,7 @@ test("known secrets are masked across colour changes and padded line wraps witho
 
 test("SVG escapes text and font names while retaining cell backgrounds and decorations", () => {
   const svg = cellsToSvg([parseAnsiLine('\x1b[1;4;9;7m<&"\x1b[0m中文')], 20, {
-    families: ['Mono"Unsafe', "monospace"], metrics, foreground: "#eeeeee", background: "#101010",
+    families: ['Mono"Unsafe', "monospace"], metrics, foreground: "#eeeeee", background: "#101010", palette,
   });
   assert.match(svg, /&lt;&amp;&quot;/);
   assert.match(svg, /Mono&quot;Unsafe/);
@@ -220,7 +249,7 @@ test("Windows loads YaHei regular and bold, preferring its main family while ret
     "C:\\Windows\\Fonts\\msyhbd.ttc": font("Microsoft YaHei", true),
   };
   const paths: string[] = [];
-  const fonts = loadFonts([], environment("win32", Object.keys(files)), (path) => {
+  const fonts = loadFonts(environment("win32", Object.keys(files)), (path) => {
     paths.push(path);
     assert.ok(path in files, path);
     return files[path];
@@ -241,31 +270,27 @@ test("macOS prefers PingFang SC even when that family occurs after the first eig
     "/System/Library/Fonts/Menlo.ttc": font("Menlo"),
     "/System/Library/Fonts/PingFang.ttc": collection,
   };
-  const fonts = loadFonts([], environment("darwin", Object.keys(files)), (path) => files[path]);
+  const fonts = loadFonts(environment("darwin", Object.keys(files)), (path) => files[path]);
   assert.deepEqual(fonts.families, ["Menlo", "PingFang SC", "PingFang TC", "PingFang HK", "monospace"]);
   assert.equal(fonts.platform, "darwin");
   assert.equal(fonts.hasCjk, true);
 });
 
-test("configured fonts take precedence, expand home, deduplicate files and do not falsely claim Chinese support", () => {
-  const mono = font("Fixture Mono");
-  const cjk = font("Fixture CJK", true);
-  const env = environment("linux", []);
-  const paths: string[] = [];
-  const read = (path: string) => { paths.push(path); return path.endsWith("cjk.ttf") ? cjk : mono; };
-  const latin = loadFonts(["~/mono.ttf", "~/mono.ttf"], env, read);
-  assert.deepEqual(paths, ["/home/test/mono.ttf"]);
-  assert.equal(latin.hasCjk, false);
-  assert.equal(latin.buffers.length, 1);
-  assert.deepEqual(latin.families, ["Fixture Mono", "monospace"]);
-  assert.equal(loadFonts(["mono.ttf", "cjk.ttf"], env, read).hasCjk, true);
-  assert.throws(() => loadFonts([], env, read), /系统字体/);
-  assert.throws(() => loadFonts(["bad.ttf"], env, () => new Uint8Array()), /不是可用的/);
-  assert.throws(() => loadFonts(["missing.ttf"], env, () => { throw new Error("not found"); }), /无法读取 fontFiles/);
+test("a discovered font that cannot be read or parsed is skipped, and no font at all is one error", () => {
+  const unreadable = environment("linux", [
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf", "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+  ]);
+  const fonts = loadFonts(unreadable, (path) => {
+    if (path.endsWith("wqy-microhei.ttc")) throw new Error("permission denied");
+    return font("Fixture Mono");
+  });
+  assert.deepEqual(fonts.families, ["Fixture Mono", "monospace"]);
+  assert.throws(() => loadFonts(environment("linux", ["/usr/share/fonts/mono.ttf"]), () => new Uint8Array()), /系统字体/);
+  assert.throws(() => loadFonts(environment("linux", [])), /系统字体/);
 });
 
 test("rendering refuses empty screens before loading fonts", async () => {
-  await assert.rejects(renderScreenPng({ lines: ["   "], columns: 80, foreground: "#eeeeee", background: "#000000" }), /画面是空的/);
+  await assert.rejects(renderScreenPng({ lines: ["   "], columns: 80, foreground: "#eeeeee", background: "#000000", palette }), /画面是空的/);
 });
 
 for (const [platform, expected] of [["win32", /微软雅黑/], ["darwin", /苹方/], ["linux", /CJK/]] as const) {
@@ -280,26 +305,28 @@ for (const [platform, expected] of [["win32", /微软雅黑/], ["darwin", /苹�
       } else assert.doesNotMatch(error.message, /Linux|apt install|pacman/);
       return true;
     };
-    assert.throws(() => loadFonts([], env), check);
-    const fonts = loadFonts(["latin.ttf"], env, () => font("Latin"));
+    assert.throws(() => loadFonts(env), check);
+    const latin = environment(platform, platform === "win32" ? ["C:\\Windows\\Fonts\\cour.ttf"]
+      : platform === "darwin" ? ["/System/Library/Fonts/Courier New.ttf"] : ["/usr/share/fonts/TTF/DejaVuSansMono.ttf"]);
+    const fonts = loadFonts(latin, () => font("Latin"));
     assert.equal(fonts.hasCjk, false);
-    await assert.rejects(renderScreenPng({ lines: ["中文"], columns: 80, foreground: "#eeeeee", background: "#000000" }, { fonts }), check);
+    await assert.rejects(renderScreenPng({ lines: ["中文"], columns: 80, foreground: "#eeeeee", background: "#000000", palette }, { fonts }), check);
   });
 }
 
 test("Linux can still render an English-only screen when no CJK font is available", async (t) => {
   const mono = findFonts().mono;
   if (!mono) { t.skip("no system monospace font is installed"); return; }
-  const fonts = loadFonts([mono], environment("linux", []));
+  const fonts = loadFonts(environment("linux", [mono]), (path) => readFileSync(path));
   if (fonts.hasCjk) { t.skip("the system monospace font already covers Chinese"); return; }
-  const image = await renderScreenPng({ lines: ["English only 123"], columns: 30, foreground: "#eeeeee", background: "#000000" }, { fonts });
+  const image = await renderScreenPng({ lines: ["English only 123"], columns: 30, foreground: "#eeeeee", background: "#000000", palette }, { fonts });
   assert.deepEqual([...image.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
 });
 
 test("real WASM renders visible glyphs into PNG and bounds very wide screens", async (t) => {
   let fonts;
   try { fonts = loadFonts(); } catch { t.skip("no system font installed; font discovery and missing-font behaviour are tested above"); return; }
-  const screen = { lines: ["Screen render: A123 <code>"], columns: 500, foreground: "#eeeeee", background: "#101010" };
+  const screen = { lines: ["Screen render: A123 <code>"], columns: 500, foreground: "#eeeeee", background: "#101010", palette };
   const image = Buffer.from(await renderScreenPng(screen, { fonts }));
   assert.deepEqual([...image.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
   assert.ok(image.readUInt32BE(16) <= 2400);

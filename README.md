@@ -76,7 +76,7 @@ pi install .
 
 这条消息只用于识别，不会被当成任务。想让通知默认发到某个群，就在那个群里 @机器人 发。
 
-`/wecom-aibot setup` 会配置并连接**当前 session**。之后每个 session 都必须手动执行 `/wecom-aibot connect`，新建、恢复、分叉和 `/reload` 后也不例外；退出或切换会话时自动 disconnect。`connect` / `disconnect` 不修改共享配置，也不影响其他已接入的 pi。旧配置里的 `enabled` 已被忽略，即使为 `true` 也不会自动接入。
+`/wecom-aibot setup` 会配置并连接**当前 session**。之后每个 session 都必须手动执行 `/wecom-aibot connect`，新建、恢复、分叉和 `/reload` 后也不例外；退出或切换会话时自动 disconnect。`connect` / `disconnect` 不修改共享配置，也不影响其他已接入的 pi。
 
 ### 第 3 步：发送测试
 
@@ -108,10 +108,10 @@ pi install .
 
 | 系统          | 位置                                           |
 | :------------ | :--------------------------------------------- |
-| Linux / macOS | `~/.pi/agent/wecom-aibot.json`                   |
-| Windows       | `C:\Users\你的用户名\.pi\agent\wecom-aibot.json` |
+| Linux / macOS | `~/.pi/agent/wecom-aibot/config.json`                   |
+| Windows       | `C:\Users\你的用户名\.pi\agent\wecom-aibot\config.json` |
 
-实际位置以 `/wecom-aibot` 显示的为准。同一台电脑、同一系统用户下的 pi 窗口共用这份配置。`/wecom-aibot setup` 会写好 BotID、Secret 和默认推送目标，其余选项直接编辑：
+实际位置以 `/wecom-aibot` 显示的为准。同一台电脑、同一系统用户下的 pi 窗口共用这份配置。这个文件夹属于插件自己：`config.json` 是配置，`gateway/` 放共享网关的 socket 和会话选择记录；`PI_CODING_AGENT_DIR` 改变时整个文件夹随之移动。`/wecom-aibot setup` 会写好 BotID、Secret 和默认推送目标，其余选项直接编辑：
 
 ```json
 {
@@ -135,7 +135,7 @@ pi install .
 | `welcome`          | 每天第一次打开单聊时的欢迎语                                                              |
 
 - 改完后在每个正在使用的 pi 窗口执行 `/wecom-aibot connect` 生效。只改欢迎语或默认推送目标不会清掉排队任务和通知；更换 BotID、Secret 或 `allowedUserIds` 会撤销旧注册及其待处理工作。
-- 连接状态只属于当前 session，不保存到配置文件。旧 `enabled` 字段留在文件里也无效，不需要改动或重新填写凭据。
+- 连接状态只属于当前 session，不保存到配置文件。
 - Secret 以明文保存，请勿提交到代码仓库或发给他人。
 
 ## 💬 日常使用
@@ -219,7 +219,8 @@ pi install .
 - image 模式截取 pi 编辑框以上最新一屏，不读 scrollback；RPC、JSON、print 模式没有 TUI，自动降级为 Markdown。
 - 图片通过 `aibot_upload_media_*` 上传后以 `msgtype=image` 发送；生成或上传失败时改发 Markdown，并在末尾注明原因。
 - 图片会带上屏幕上的工具输出和文件内容，只发到当前企业微信会话，不经过第三方图床。
-- 头部按终端主题配色，深色、浅色都适用：标题是工作目录，右侧标签为「会话通知」，任务中止时改为警示色的「已中止」；下面两行是供应商 · 模型和 session。图标是 SVG 矢量图形，不依赖 emoji 字体。
+- Windows 和 macOS 自带的是彩色 emoji 字体，图片渲染不支持；想让图片里的 emoji（包括三行开头的图标）正常显示，请安装单色的 Noto Emoji（Windows 放到 `%LOCALAPPDATA%\Microsoft\Windows\Fonts\`，文件名为 `NotoEmoji-Regular.ttf` 或 `NotoEmoji.ttf`）。没有时图片会省略三行开头的图标，Markdown 通知不受影响。
+- 头部按终端主题配色，深色、浅色都适用：标题是工作目录，右侧标签为「会话通知」，任务中止时改为警示色的「已中止」；下面两行是供应商 · 模型和 session，行首图标与 Markdown 一致（🔔 / 🏷️ / 🆔）。左侧是 pi 的三色图标（官方 logo，SVG）。
 - Linux 上中文粗体需要同目录下对应的 `-Bold` 字体文件（如 `NotoSansCJKsc-Bold.otf`）。正文里的 emoji 仍使用单色 `Noto Emoji`（Linux 可放到 `~/.local/share/fonts/noto-emoji/NotoEmoji.ttf`）；找不到时正文 emoji 可能显示为方框。彩色 emoji 字体（如 Noto Color Emoji）当前渲染不支持。
 
 ```json
@@ -257,13 +258,9 @@ pi install .
 | Git 仓库 | `pi update git:github.com/cobia68/pi-wecom-aibot`                            |
 | 本地目录 | 在插件目录执行 `git pull`，再执行 `npm ci --omit=dev --legacy-peer-deps` |
 
-然后关闭所有使用这个机器人的 pi 窗口，再重新打开并逐个执行 `/wecom-aibot connect`。当前本机网关协议为 v3（支持投递结果分类和欢迎语热更新），不能与旧网关混用；原配置文件无需迁移。
+然后关闭所有使用这个机器人的 pi 窗口，再重新打开并逐个执行 `/wecom-aibot connect`。
 
-本次连接行为变化：每个 session 都需手动 `/wecom-aibot connect`，退出、切换或重载时自动断开；旧 `enabled` 字段完全忽略，`connect` / `disconnect` 不再改写它。连接成功只通过状态栏显示，取消静态注册提示。
-
-其他兼容说明：旧的 `screenMode`、`imageHosts`、`fontFiles`、`/wecom-aibot screen` 和 `wecom_send(screen=true)` 已移除，旧字段会被忽略；使用 `sendMode`（`text` / `image`），图片通过企业微信原生图片消息发送，不再需要图床。
-
-帮助入口只剩 `--help` / `-h`：`/wecom-aibot --help` 看总帮助，`/wecom-aibot <子命令> --help` 看某个子命令；`help` 不再是子命令，`/wecom-aibot help` 会按未知子命令报错。
+用 `/wecom-aibot --help` 查看总帮助，`/wecom-aibot <子命令> --help` 查看某个子命令。
 
 只执行 `pi update` 更新的是 pi 本身；`pi update --extensions` 更新所有已安装的插件。
 
@@ -273,7 +270,7 @@ pi install .
 2. 移除插件：
    - Git 仓库：`pi remove git:github.com/cobia68/pi-wecom-aibot`，会一并删除克隆的仓库
    - 本地目录：在插件目录执行 `pi remove .`，只取消登记，不删除目录
-3. 可选清理：各项目里的 `.pi-wecom-aibot-files/`，以及会话选择记录 `~/.pi/wecom-aibot-gateway/`。
+3. 可选清理：各项目里的 `.pi-wecom-aibot-files/`，以及插件文件夹里的网关状态 `~/.pi/agent/wecom-aibot/gateway/`。
 
 ## ❓ 常见问题
 
@@ -306,7 +303,7 @@ pi install .
 <details>
 <summary><b>更换 BotID 或 Secret 后连不上</b></summary>
 
-其他还开着的 pi 窗口仍在用旧配置。在这些窗口执行 `/wecom-aibot connect` 读取新配置，或者关闭所有 pi 窗口后重新打开，再逐个执行 `/wecom-aibot connect`。
+其他还开着的 pi 窗口仍在使用启动时读取的配置。在这些窗口执行 `/wecom-aibot connect` 读取当前配置，或者关闭所有 pi 窗口后重新打开，再逐个执行 `/wecom-aibot connect`。
 
 </details>
 

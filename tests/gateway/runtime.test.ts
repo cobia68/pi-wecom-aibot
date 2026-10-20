@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { WeComGateway, type GatewayPeer } from "../../src/gateway/runtime.ts";
+import type { SelectionStore } from "../../src/gateway/selection-store.ts";
 import { sessionTarget, type GatewayRegistration, type ServerFrame } from "../../src/shared/gateway-protocol.ts";
 import { formatNotification, formatProcessingStatus, notificationPayload } from "../../src/shared/notification.ts";
 import { parseInbound } from "../../src/shared/wecom-protocol.ts";
@@ -522,7 +523,7 @@ test("a missing image file falls back to the Markdown body with a visible reason
 });
 
 test("a selection that cannot be saved reports the real reason instead of blaming permissions", () => {
-  const failing = { load: () => undefined, save: () => { throw new Error("ENOSPC: no space left on device"); }, clear: () => {} };
+  const failing: SelectionStore = { load: () => ({ entries: [], requireChoice: false }), save: () => { throw new Error("ENOSPC: no space left on device"); }, clear: () => {} };
   gateway.stop();
   gateway = new WeComGateway({ botId: "unit-bot", secret: "unit-secret", createWebSocket: (url) => new FakeWebSocket(url) },
     () => {}, failing);

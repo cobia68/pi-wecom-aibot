@@ -7,13 +7,13 @@ import { after, beforeEach, test } from "node:test";
 const sandbox = mkdtempSync(join(tmpdir(), "pi-wecom-aibot-config-test-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = sandbox;
-const { CONFIG_FILE, LEGACY_CONFIG_FILE, DEFAULT_WELCOME, clearConfig, loadConfig, updateConfig } = await import("../../src/extension/config.ts");
+const { CONFIG_FILE, DEFAULT_WELCOME, clearConfig, loadConfig, updateConfig } = await import("../../src/extension/config.ts");
 const readJson = () => JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
 
 beforeEach(() => {
-  // Only the link itself when the file is a symlink; the pre-rename file must not leak between tests.
+  // Only the link itself when the file is a symlink.
+  mkdirSync(dirname(CONFIG_FILE), { recursive: true });
   rmSync(CONFIG_FILE, { force: true });
-  rmSync(LEGACY_CONFIG_FILE, { force: true });
 });
 
 after(() => {
@@ -83,19 +83,15 @@ test("new configurations do not persist a connection preference", () => {
   assert.equal(Object.hasOwn(loadConfig()!, "enabled"), false);
   assert.equal(Object.hasOwn(readJson(), "enabled"), false);
 });
-
-for (const enabled of [true, false]) {
-  test(`legacy enabled=${enabled} is ignored at runtime and preserved on disk`, () => {
-    const legacy = { botId: "bot", secret: "secret", enabled };
-    writeFileSync(CONFIG_FILE, JSON.stringify(legacy));
-    const before = readFileSync(CONFIG_FILE, "utf8");
-    assert.equal(Object.hasOwn(loadConfig()!, "enabled"), false);
-    assert.equal(readFileSync(CONFIG_FILE, "utf8"), before, "loading never rewrites credentials or legacy fields");
-    const updated = updateConfig({ welcome: "hello" });
-    assert.equal(Object.hasOwn(updated, "enabled"), false);
-    assert.deepEqual(readJson(), { ...legacy, welcome: "hello", sendMode: "text" });
-  });
-}
+test("a stored field this version does not know is ignored and preserved", () => {
+  const stored = { botId: "bot", secret: "secret", futureField: { kept: true }, anotherField: [1, 2] };
+  writeFileSync(CONFIG_FILE, JSON.stringify(stored));
+  const before = readFileSync(CONFIG_FILE, "utf8");
+  assert.equal(Object.hasOwn(loadConfig()!, "futureField"), false, "unknown fields never reach the running configuration");
+  assert.equal(readFileSync(CONFIG_FILE, "utf8"), before, "loading never rewrites the file");
+  assert.equal(updateConfig({ welcome: "hello" }).secret, "secret");
+  assert.deepEqual(readJson(), { ...stored, welcome: "hello", sendMode: "text" }, "an edit keeps fields this version does not own");
+});
 
 test("send mode defaults to text and only an explicit image changes it", () => {
   updateConfig({ botId: "bot", secret: "secret" });
@@ -128,47 +124,11 @@ test("every stored field is validated once, with its field name", () => {
   assert.equal(readFileSync(CONFIG_FILE, "utf8"), before);
 });
 
-test("removed screen settings do not disable a working text bot and stay untouched", () => {
-  const legacy = { botId: "bot", secret: "secret", screenMode: "image", imageHosts: [{ type: "http", url: "https://images.example/upload", fileField: "image" }], fontFiles: [42] };
-  writeFileSync(CONFIG_FILE, JSON.stringify(legacy));
-  assert.equal(loadConfig()?.botId, "bot");
-  assert.equal(Object.hasOwn(loadConfig()!, "screenMode"), false);
-  assert.equal(updateConfig({ welcome: "hello" }).secret, "secret");
-  assert.deepEqual(readJson(), { ...legacy, welcome: "hello", sendMode: "text" });
-});
-
 test("a corrupt file is reported with its path instead of being overwritten", () => {
   writeFileSync(CONFIG_FILE, "{ \"botId\": \"bot\", ");
   assert.throws(() => updateConfig({ botId: "bot", secret: "secret" }), (error: Error) => error.message.includes(CONFIG_FILE));
   assert.equal(readFileSync(CONFIG_FILE, "utf8"), "{ \"botId\": \"bot\", ");
   assert.throws(() => loadConfig(), (error: Error) => error.message.includes(CONFIG_FILE) && /JSON/.test(error.message));
-});
-
-test("a pre-rename configuration keeps its credentials by moving once to the new file", () => {
-  writeFileSync(LEGACY_CONFIG_FILE, JSON.stringify({ botId: "bot", secret: "legacy-secret", welcome: "hi" }), { mode: 0o644 });
-  assert.equal(loadConfig()?.secret, "legacy-secret");
-  assert.equal(readJson().secret, "legacy-secret", "the credentials are readable under the new name");
-  assert.equal(existsSync(LEGACY_CONFIG_FILE), false, "the old file is removed only after the new one was written");
-  if (process.platform !== "win32") assert.equal(statSync(CONFIG_FILE).mode & 0o777, 0o600);
-  // A second read must not need the legacy file, and updates keep working.
-  assert.equal(updateConfig({ defaultChatId: "boss", defaultChatType: 1 }).defaultChatId, "boss");
-  assert.equal(readJson().secret, "legacy-secret");
-});
-
-test("a corrupt pre-rename configuration is reported by its own path and never partially written", () => {
-  writeFileSync(LEGACY_CONFIG_FILE, "{ \"botId\": ");
-  assert.throws(() => updateConfig({ welcome: "x" }), (error: Error) => error.message.includes(LEGACY_CONFIG_FILE));
-  assert.equal(readFileSync(LEGACY_CONFIG_FILE, "utf8"), "{ \"botId\": ");
-  assert.equal(existsSync(CONFIG_FILE), false, "an invalid file must not be migrated");
-  assert.throws(() => loadConfig(), (error: Error) => error.message.includes(LEGACY_CONFIG_FILE));
-});
-
-test("a logout clears a pre-rename file so the credentials cannot come back", () => {
-  writeFileSync(LEGACY_CONFIG_FILE, JSON.stringify({ botId: "bot", secret: "legacy-secret" }));
-  clearConfig();
-  assert.equal(existsSync(LEGACY_CONFIG_FILE), false);
-  assert.equal(existsSync(CONFIG_FILE), false);
-  assert.equal(loadConfig(), undefined);
 });
 
 test("a symlinked configuration stays a private symlink after an atomic update", { skip: process.platform === "win32" && "symlinks need extra rights on Windows" }, () => {
