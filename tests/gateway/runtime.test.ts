@@ -103,6 +103,34 @@ test("send names its target, and the target receives exactly the prompt", () => 
   assert.equal(a.peer.messages()[0].task.message.text, "检查构建");
 });
 
+test("a task's text result replaces its status message instead of a second push", async () => {
+  const a = add("A", SESSION_A);
+  const frames: any[] = [];
+  a.ws.onSend = (frame: any) => { frames.push(frame); if (frame.cmd === "aibot_respond_msg") a.ws.acknowledge(frame); };
+  const task = send(SESSION_A, "task");
+  const id = task.headers.req_id;
+  assert.equal(gateway.taskStatus("A", id, "running"), true);
+  assert.equal(gateway.taskStatus("A", id, "settled"), true);
+  await gateway.notify("A", { chatId: "user", chatType: 1 }, { kind: "reply", source: a.value.source, text: "RESULT-BODY" });
+  const finish = frames.filter((frame) => frame.cmd === "aibot_respond_msg" && frame.body.stream.finish).at(-1);
+  assert.match(finish.body.stream.content, /RESULT-BODY$/);
+  assert.match(finish.body.stream.content, new RegExp(`session: ${SESSION_A}`));
+  assert.equal(frames.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "one bubble per task");
+});
+
+test("without a result notification the settled status closes after the grace window", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const a = add("A", SESSION_A);
+  const task = send(SESSION_A, "task");
+  const id = task.headers.req_id;
+  gateway.taskStatus("A", id, "running");
+  gateway.taskStatus("A", id, "settled");
+  t.mock.timers.tick(1_000);
+  const finish = a.ws.sent.filter((frame: any) => frame.cmd === "aibot_respond_msg").at(-1);
+  assert.equal(finish.body.stream.finish, true);
+  assert.equal(finish.body.stream.content, formatProcessingStatus(SESSION_A, "settled"));
+});
+
 test("an unknown session ID gets an error plus the current list, never a guess", () => {
   const a = add("A", SESSION_A);
   const b = add("B", SESSION_B);
@@ -460,7 +488,8 @@ test("a final state WeCom could not take while disconnected is sent after the re
   const task = send(SESSION_A, "task");
   gateway.taskStatus("A", task.headers.req_id, "running");
   a.ws.close();
-  assert.equal(gateway.taskStatus("A", task.headers.req_id, "settled"), false);
+  // Settled is deferred until its result arrives; the status itself is closed by the grace timer.
+  assert.equal(gateway.taskStatus("A", task.headers.req_id, "settled"), true);
   t.mock.timers.tick(1_000);
   const next = FakeWebSocket.instances.at(-1)!;
   assert.notEqual(next, a.ws);

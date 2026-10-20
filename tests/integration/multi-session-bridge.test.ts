@@ -106,7 +106,7 @@ beforeEach(async () => {
   saveConfig(config);
   server = (await startGatewayServer({ credentials: config, endpoint: gatewayEndpoint(config.botId), idleTimeoutMs: 50, createWebSocket(url) {
     const ws = new FakeWebSocket(url);
-    ws.onSend = (frame) => { if (["aibot_subscribe", "aibot_send_msg", "ping"].includes(frame.cmd)) ws.acknowledge(frame); };
+    ws.onSend = (frame) => { if (["aibot_subscribe", "aibot_send_msg", "aibot_respond_msg", "ping"].includes(frame.cmd)) ws.acknowledge(frame); };
     queueMicrotask(() => ws.open());
     return ws;
   } }))!;
@@ -161,8 +161,8 @@ test("two real extension instances process separate tasks and publish their own 
   assert.equal(pushes.length, 2);
   assert.match(pushes[0].body.markdown.content, /project-B.*\n🏷️ provider-B · Model B.*\n🆔 session: session-B\n\nRESULT-B$/);
   assert.match(pushes[1].body.markdown.content, /project-A.*\n🏷️ provider-A · Model A.*\n🆔 session: session-A\n\nRESULT-A$/);
-  const statuses = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg");
-  assert.equal(statuses.filter((frame) => frame.body.stream.finish === true).length, 2);
+  await until(() => FakeWebSocket.instances[0].sent
+    .filter((frame) => frame.cmd === "aibot_respond_msg" && frame.body.stream.finish === true).length === 2, "both status messages close");
 });
 
 test("one pi exiting cannot clear another pi's pending notification or relabel its reconnect snapshot", async () => {

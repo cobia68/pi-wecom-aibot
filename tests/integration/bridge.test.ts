@@ -145,7 +145,7 @@ beforeEach(async (t) => {
         if (frame.cmd === "aibot_upload_media_init") socket.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { upload_id: "upload-1" } });
         else if (frame.cmd === "aibot_upload_media_chunk") socket.acknowledge(frame);
         else if (frame.cmd === "aibot_upload_media_finish") socket.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { media_id: "media-1" } });
-        else if (frame.cmd === "ping" || (autoAcknowledge && frame.cmd === "aibot_send_msg")) socket.acknowledge(frame);
+        else if (frame.cmd === "ping" || frame.cmd === "aibot_respond_msg" || (autoAcknowledge && frame.cmd === "aibot_send_msg")) socket.acknowledge(frame);
       };
       return socket;
     }),
@@ -300,15 +300,14 @@ test("a task pi refused is reported instead of taking the next local answer", as
   idle = true;
   await emit("agent_settled", { aborted: false });
   await drain();
-  const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-  assert.equal(pushes.length, 1);
-  assert.equal(pushes[0].body.chatid, "test-user");
-  assert.match(pushes[0].body.markdown.content, /没有接受/);
-  assert.doesNotMatch(pushes[0].body.markdown.content, /LOCAL-ONLY-ANSWER/);
-  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body.stream.finish, true);
+  const status = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1)!;
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "the failure replaces the status message");
+  assert.equal(status.body.stream.finish, true);
+  assert.match(status.body.stream.content, /没有接受/);
+  assert.doesNotMatch(status.body.stream.content, /LOCAL-ONLY-ANSWER/);
   // The local run does not inherit the refused task's conversation as wecom_send's default target.
   await assert.rejects(sendNotification({ content: "LOCAL-PUSH" }), /缺少 chatid/);
-  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
   // The queue is no longer wedged: the next WeCom task runs.
   refusePrompt = false;
   inbound("after-refusal");
@@ -327,11 +326,10 @@ test("a task pi silently refused fails while the session stays idle", async () =
   idle = true;
   clock.tick(5_000);
   await drain();
-  const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-  assert.equal(pushes.length, 1);
-  assert.equal(pushes[0].body.chatid, "test-user");
-  assert.match(pushes[0].body.markdown.content, /没有接受/);
-  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body.stream.finish, true);
+  const status = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1)!;
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+  assert.match(status.body.stream.content, /没有接受/);
+  assert.equal(status.body.stream.finish, true);
 });
 
 test("changing pi sessions closes the old connection and discards its active request without reconnecting", async () => {
@@ -364,6 +362,7 @@ test("a status message and a scheduled notification produce only one final resul
   await emit("agent_settled", { aborted: false });
   const results = ws.sent.filter((frame) => (frame.body?.markdown?.content ?? frame.body?.stream?.content ?? "").includes("RESULT-1024"));
   assert.equal(results.length, 1, "同一任务的结果只能发送一次");
+  clock.tick(1_000); // the scheduled notification owns the result; the status closes by itself
   const statuses = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg");
   assert.equal(statuses.length, 2, "状态消息只在开始和结束时各更新一次");
   assert.equal(statuses[0].body.stream.finish, false);
@@ -383,7 +382,10 @@ test("a scheduled notification for another chat does not suppress the sender's r
   idle = true;
   await emit("agent_settled", { aborted: false });
   const targets = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").map((frame) => [frame.body.chatid, frame.body.chat_type]);
-  assert.deepEqual(targets.sort(), [["another-chat", 2], ["test-user", 1]]);
+  assert.deepEqual(targets, [["another-chat", 2]], "the source chat's result replaces its status message");
+  const status = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1)!;
+  assert.equal(status.body.stream.finish, true);
+  assert.match(status.body.stream.content, /\n\nRESULT$/);
 });
 
 test("assistant streaming does not replace the compact status with partial results", async () => {
@@ -401,7 +403,8 @@ test("assistant streaming does not replace the compact status with partial resul
   await emit("message_end", { message: { role: "assistant", model: "model-b", provider: "another-provider", content: [{ type: "text", text: "NEW-ANSWER" }] } });
   idle = true;
   await emit("agent_settled", { aborted: false });
-  const result = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1).body.markdown.content;
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+  const result = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body.stream.content;
   assertSource(result, "Model B", "another-provider");
   assert.match(result, /\n\nNEW-ANSWER$/);
   assert.doesNotMatch(result, /OLD-TOOL-TURN/);
@@ -426,14 +429,10 @@ test("a completed reply survives reconnect and ignores unrelated local output", 
   const status = nextWs.sent.find((frame) => frame.cmd === "aibot_respond_msg");
   assert.equal(status.headers.req_id, "callback-reconnect");
   assert.equal(status.body.stream.finish, true);
-  assert.match(status.body.stream.content, /本轮已结束/);
-  const replies = nextWs.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-  assert.equal(replies.length, 1);
-  assert.equal(replies[0].body.chatid, "test-user");
-  assert.equal(replies[0].body.chat_type, 1);
-  assertSource(replies[0].body.markdown.content);
-  assert.match(replies[0].body.markdown.content, /\n\nREMOTE-RESULT$/);
-  assert.doesNotMatch(replies[0].body.markdown.content, /LOCAL-ONLY|UNRELATED|Model B/);
+  assertSource(status.body.stream.content);
+  assert.match(status.body.stream.content, /\n\nREMOTE-RESULT$/);
+  assert.doesNotMatch(status.body.stream.content, /LOCAL-ONLY|UNRELATED|Model B/);
+  assert.equal(nextWs.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
 });
 
 test("a long task closes the status animation and later sends exactly one final notification", async () => {
@@ -460,7 +459,7 @@ test("long Chinese and emoji replies remain valid UTF-8 within the byte limit", 
   await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "汉字🙂".repeat(4000) }] } });
   idle = true;
   await emit("agent_settled", { aborted: false });
-  const content = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1).body.markdown.content;
+  const content = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body.stream.content;
   assertSource(content);
   assert.ok(Buffer.byteLength(content, "utf8") <= 20_480);
   assert.equal(content.includes("\ufffd"), false);
@@ -474,9 +473,8 @@ test("an aborted task ends its status and includes the cancellation in its resul
   await emit("agent_settled", { aborted: true });
   const status = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
   assert.equal(status.body.stream.finish, true);
-  assert.match(status.body.stream.content, /本轮已结束/);
-  const result = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1).body.markdown.content;
-  assert.equal((result.match(/已中止/g) ?? []).length, 1);
+  assert.equal((status.body.stream.content.match(/已中止/g) ?? []).length, 1);
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
 });
 
 test("the pi bridge also checks the allowlist before accepting a task", async () => {
@@ -649,7 +647,7 @@ test("a completion notification waits for the real final reply", async () => {
 });
 
 test("completion without a new reply cannot accidentally forward an earlier task", async () => {
-  ws.onSend = (frame) => { if (frame.cmd === "aibot_send_msg") ws.acknowledge(frame); };
+  ws.onSend = (frame) => { if (["aibot_send_msg", "aibot_respond_msg"].includes(frame.cmd)) ws.acknowledge(frame); };
   await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "PREVIOUS-TASK" }] } });
   idle = false;
   await sendNotification({ chatid: "test-user", after_settle: true });
@@ -673,9 +671,10 @@ test("a recorded model error is sent once while the status only reports that the
     role: "assistant", model: "model-a", provider: "test-provider", content: [],
     stopReason: "error", errorMessage: "429: rate limit exceeded",
   } });
-  ws.onSend = (frame) => { if (frame.cmd === "aibot_send_msg") ws.acknowledge(frame); };
+  ws.onSend = (frame) => { if (["aibot_send_msg", "aibot_respond_msg"].includes(frame.cmd)) ws.acknowledge(frame); };
   idle = true;
   await emit("agent_settled", { aborted: false });
+  clock.tick(1_000); // the scheduled notification owns the result; the status closes by itself
   const status = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body.stream.content;
   assert.equal(status, "🆔 session: pi-session-1  \n本轮已结束。");
   const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
@@ -691,7 +690,7 @@ test("an explicit session ID cannot mislabel another session's output", async ()
   const rejected = assert.rejects(sendNotification({
     chatid: "test-user", session_id: "another-session", content: "result",
   }), /session_id/);
-  if (ws.sent.at(-1).cmd === "aibot_send_msg") ws.acknowledge();
+  if (["aibot_send_msg", "aibot_respond_msg"].includes(ws.sent.at(-1).cmd)) ws.acknowledge();
   await rejected;
   assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
 });
@@ -737,12 +736,9 @@ test("group messages addressed to the bot reach pi and receive a reply in that c
   await emit("agent_settled", { aborted: false });
   const reply = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
   assert.equal(reply.headers.req_id, "callback-group-request");
-  assert.match(reply.body.stream.content, /本轮已结束/);
-  const notification = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
-  assert.equal(notification.body.chatid, "test-group");
-  assert.equal(notification.body.chat_type, 2);
-  assertSource(notification.body.markdown.content);
-  assert.match(notification.body.markdown.content, /\n\n检查完成$/);
+  assert.match(reply.body.stream.content, /\n\n检查完成$/);
+  assertSource(reply.body.stream.content);
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "the result replaces the reply to the asker");
 });
 
 for (const reconnectEarly of [false, true]) test(`a known-unsent completion survives a closing socket (${reconnectEarly ? "reconnect before result" : "result before reconnect"})`, async () => {
@@ -820,15 +816,15 @@ test("a newer queued task keeps its reply while an older completion awaits ACK a
   idle = true;
   const settled = emit("agent_settled", { aborted: false });
   const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-  assert.equal(pushes.length, 2);
+  assert.equal(pushes.length, 1, "the newer reply replaces its own status message");
   assert.match(pushes[0].body.markdown.content, /OLDER-COMPLETION/);
-  assert.match(pushes[1].body.markdown.content, /NEWER-REPLY/);
+  const reply = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
+  assert.match(reply.body.stream.content, /NEWER-REPLY/);
   ws.acknowledge(pushes[0]);
   await drain();
-  ws.acknowledge(pushes[1]);
   await settled;
   await emit("agent_settled", { aborted: false });
-  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 2);
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1, "the merged reply is not pushed twice");
 });
 
 test("an offline completion notification retains its snapshot until reconnect", async () => {
@@ -1465,9 +1461,9 @@ test("image mode falls back to the Markdown answer when rendering is unavailable
   idle = true;
   await emit("agent_settled", { aborted: false });
   await drain();
-  const push = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
-  assert.equal(push.body.msgtype, "markdown");
-  assert.match(push.body.markdown.content, /FINAL-TEXT/);
+  const reply = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
+  assert.match(reply.body.stream.content, /FINAL-TEXT/);
+  assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
   assert.equal(ws.sent.some((frame) => frame.cmd === "aibot_upload_media_init"), false);
 });
 

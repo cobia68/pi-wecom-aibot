@@ -19,6 +19,8 @@ const MAX_WATCH_MS = 10 * 60_000;
 const REQUEST_TIMEOUT_MS = 20_000;
 /** End a status message before WeCom ends it on its own; the result follows as a notification. */
 const STREAM_DEADLINE_MS = WECOM_STREAM_LIFETIME_MS - 10_000;
+/** Settle and its result notification travel one IPC channel; this is the most the status waits for it. */
+const MERGE_GRACE_MS = 1_000;
 
 export interface GatewayPeer {
 	send(frame: ServerFrame): boolean;
@@ -44,10 +46,17 @@ interface PendingRequest {
 interface Task {
 	target: SessionTarget;
 	streamId: string;
+	/** The conversation that asked; its result replaces this task's status message there. */
+	chat: ChatRef;
 	/** WeCom accepts replies to a callback for 24 hours. */
 	expiresAt: number;
 	/** Set when the status message opened: WeCom ends it 10 minutes later. */
 	deadline?: ReturnType<typeof setTimeout>;
+	/** The "running" status was actually written, so its content can still be replaced. */
+	opened?: boolean;
+	/** Settled, waiting for its result notification to replace the status content. */
+	awaitingResult?: boolean;
+	mergeTimer?: ReturnType<typeof setTimeout>;
 	/** A final state that could not be sent while WeCom was disconnected. */
 	unsent?: ProcessingState;
 	/** pi reported this task as running; the session list shows the session as busy. */
@@ -141,7 +150,7 @@ export class WeComGateway {
 		this.members.clear();
 		for (const request of this.requests.values()) clearTimeout(request.timer);
 		this.requests.clear();
-		for (const task of this.tasks.values()) clearTimeout(task.deadline);
+		for (const task of this.tasks.values()) { clearTimeout(task.deadline); clearTimeout(task.mergeTimer); }
 		this.tasks.clear();
 		this.watches.clear();
 	}
@@ -156,7 +165,19 @@ export class WeComGateway {
 			return false;
 		}
 		task.running = state === "running";
-		if (state === "running") task.deadline ??= setTimeout(() => this.expireStream(taskId), STREAM_DEADLINE_MS);
+		if (state === "running") {
+			task.deadline ??= setTimeout(() => this.expireStream(taskId), STREAM_DEADLINE_MS);
+			return this.stream(taskId, task, state);
+		}
+		if (state === "settled") {
+			// The result follows on the same IPC channel and replaces this message, so do not close it yet.
+			// A scheduled notification may own the delivery instead; then this deadline closes the status.
+			if (!task.awaitingResult) {
+				task.awaitingResult = true;
+				task.mergeTimer = setTimeout(() => this.finishAwaiting(taskId), MERGE_GRACE_MS);
+			}
+			return true;
+		}
 		return this.stream(taskId, task, state);
 	}
 
@@ -168,6 +189,14 @@ export class WeComGateway {
 		const content = renderNotification(notification.source, notification.text, {
 			kind: notification.kind, excerpt: notification.excerpt, aborted: notification.aborted,
 		});
+		// A task's own result replaces its status message: one message, tied to the person who asked.
+		// Only a text result can ride the stream; an image stays a separate message.
+		const awaiting = notification.kind === "reply" ? this.awaitingTask(member, chat) : undefined;
+		if (awaiting && !notification.image) {
+			const outcome = await this.finishWithResult(awaiting.taskId, awaiting.task, content);
+			if (outcome === "delivered" || outcome === "unknown") return;
+			// A rejected or unsent finish falls back to the push below; the status closes first.
+		}
 		if (notification.image) {
 			const image = readImage(notification.image.path);
 			let failure = image.reason;
@@ -205,11 +234,53 @@ export class WeComGateway {
 		const sent = this.client?.respondMsg(taskId, { msgtype: "stream", stream: {
 			id: task.streamId, finish: final, content: formatProcessingStatus(task.target.sessionId, state),
 		} }) ?? false;
+		if (state === "running" && sent) task.opened = true;
 		if (final) {
 			if (sent) this.closeTask(taskId);
 			else task.unsent = state;
 		}
 		return sent;
+	}
+
+	/** The settled task of this pi and conversation, still open for its result. At most one per pi session. */
+	private awaitingTask(member: Member, chat: ChatRef): { taskId: string; task: Task } | undefined {
+		for (const [taskId, task] of this.tasks) {
+			if (!task.awaitingResult || !task.opened) continue;
+			if (!sameTarget(task.target, sessionTarget(member))) continue;
+			if (task.chat.chatId !== chat.chatId || task.chat.chatType !== chat.chatType) continue;
+			return { taskId, task };
+		}
+		return undefined;
+	}
+
+	/** Replace the status content with the result and wait for WeCom's acknowledgement. */
+	private async finishWithResult(taskId: string, task: Task, content: string): Promise<"delivered" | "not_sent" | "rejected" | "unknown"> {
+		clearTimeout(task.mergeTimer);
+		task.mergeTimer = undefined;
+		task.awaitingResult = false;
+		try {
+			await this.client!.respondMsgAck(taskId, { msgtype: "stream", stream: { id: task.streamId, finish: true, content } });
+			this.closeTask(taskId);
+			return "delivered";
+		} catch (error) {
+			const outcome = deliveryFailure(error);
+			this.log(`结果并入状态消息失败（${outcome}）：${errorMessage(error)}`);
+			// Close the receipt instead of leaving "执行中…" until WeCom ends it; the result is pushed below.
+			if (outcome !== "unknown") this.stream(taskId, task, "settled");
+			else this.closeTask(taskId);
+			return outcome;
+		}
+	}
+
+	/** No result notification arrived: close the status the way it used to. */
+	private finishAwaiting(taskId: string): void {
+		const task = this.tasks.get(taskId);
+		if (!task) return;
+		task.mergeTimer = undefined;
+		if (!task.awaitingResult) return;
+		task.awaitingResult = false;
+		if (!task.opened) { this.closeTask(taskId); return; }
+		this.stream(taskId, task, "settled");
 	}
 
 	/** WeCom would end the status message on its own; end it first and point at the coming notification. */
@@ -238,6 +309,7 @@ export class WeComGateway {
 		const task = this.tasks.get(taskId);
 		if (!task) return;
 		clearTimeout(task.deadline);
+		clearTimeout(task.mergeTimer);
 		this.tasks.delete(taskId);
 	}
 
@@ -381,7 +453,7 @@ export class WeComGateway {
 
 	private deliver(target: Member, taskId: string, message: InboundMessage): boolean {
 		const targetId = sessionTarget(target);
-		this.track(taskId, { target: targetId, streamId: `pi-${randomUUID()}`, expiresAt: Date.now() + WECOM_REPLY_WINDOW_MS });
+		this.track(taskId, { target: targetId, streamId: `pi-${randomUUID()}`, chat: { ...message.chat }, expiresAt: Date.now() + WECOM_REPLY_WINDOW_MS });
 		if (target.peer.send({ type: "task", target: targetId, task: { id: taskId, message } })) return true;
 		this.closeTask(taskId);
 		this.unregister(target.instanceId, target.peer);

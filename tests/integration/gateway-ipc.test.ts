@@ -55,7 +55,7 @@ function source(id: string): NotificationSource { return { sessionId: `session-$
 async function startServer(idleTimeoutMs = 1000) {
   server = await startGatewayServer({ endpoint: gatewayEndpoint(config.botId), credentials: config, idleTimeoutMs, createWebSocket(url) {
     const socket = new FakeWebSocket(url);
-    socket.onSend = (frame) => { if (["aibot_subscribe", "ping"].includes(frame.cmd) || (autoAcknowledge && frame.cmd === "aibot_send_msg")) socket.acknowledge(frame); };
+    socket.onSend = (frame) => { if (["aibot_subscribe", "ping", "aibot_respond_msg"].includes(frame.cmd) || (autoAcknowledge && frame.cmd === "aibot_send_msg")) socket.acknowledge(frame); };
     queueMicrotask(() => socket.open());
     return socket;
   } });
