@@ -2,8 +2,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import { downloadAndDecrypt, saveMedia } from "./media.ts";
 import type { Attachment, InboundMessage } from "../../shared/wecom-protocol.ts";
+import { downloadAndDecrypt, saveMedia } from "./media.ts";
 
 function errMsg(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -13,7 +13,9 @@ function errMsg(err: unknown): string {
 async function mediaDirectory(cwd: string): Promise<string> {
 	const dir = join(cwd, ".pi-wecom-aibot-files");
 	await mkdir(dir, { recursive: true });
-	await writeFile(join(dir, ".gitignore"), "# Saved by pi-wecom-aibot from WeCom messages.\n*\n", { flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
+	await writeFile(join(dir, ".gitignore"), "# Saved by pi-wecom-aibot from WeCom messages.\n*\n", {
+		flag: "wx",
+	}).catch((error: NodeJS.ErrnoException) => {
 		if (error.code !== "EEXIST") throw error;
 	});
 	return dir;
@@ -46,20 +48,27 @@ export class InboundContentPreparer {
 		const hasMedia = message.attachments.length > 0;
 		if (hasMedia) await this.acquire(signal);
 		let imageBytes = 0;
-		const release = () => { this.imageBytes -= imageBytes; imageBytes = 0; };
+		const release = () => {
+			this.imageBytes -= imageBytes;
+			imageBytes = 0;
+		};
 		const reserveImage = (bytes: number) => {
-			if (this.imageBytes + bytes > this.maxImageBytes) throw new Error("待处理图片总量已达资源上限，请稍后重发这张图片");
+			if (this.imageBytes + bytes > this.maxImageBytes)
+				throw new Error("待处理图片总量已达资源上限，请稍后重发这张图片");
 			this.imageBytes += bytes;
 			imageBytes += bytes;
 		};
 		try {
-			return { ...await buildUserContent(cwd, message, signal, reserveImage), release };
+			return { ...(await buildUserContent(cwd, message, signal, reserveImage)), release };
 		} catch (error) {
 			release();
 			throw error;
 		} finally {
 			// Cover download, decrypt, conversion AND disk writes: a slow disk cannot accumulate unbounded buffers.
-			if (hasMedia) { this.preparing--; this.waiting.shift()?.(); }
+			if (hasMedia) {
+				this.preparing--;
+				this.waiting.shift()?.();
+			}
 		}
 	}
 
@@ -101,7 +110,8 @@ async function buildUserContent(
 	const addImage = async (attachment: Attachment): Promise<void> => {
 		try {
 			const media = await downloadAndDecrypt(attachment.url, attachment.aeskey, { signal });
-			if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(media.mimeType)) throw new Error("不支持的图片格式");
+			if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(media.mimeType))
+				throw new Error("不支持的图片格式");
 			reserveImage(4 * Math.ceil(media.buffer.byteLength / 3));
 			images.push({
 				type: "image",

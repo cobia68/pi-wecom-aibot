@@ -21,7 +21,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { DeliveryError } from "../shared/delivery.ts";
-import { WECOM_ACK_TIMEOUT_MS, WECOM_IMAGE_MAX_BYTES, WECOM_IMAGE_MIN_BYTES, type WeComState } from "../shared/wecom-protocol.ts";
+import {
+	record,
+	WECOM_ACK_TIMEOUT_MS,
+	WECOM_IMAGE_MAX_BYTES,
+	WECOM_IMAGE_MIN_BYTES,
+	type WeComState,
+} from "../shared/wecom-protocol.ts";
 
 export interface WeComResponse {
 	errcode: number;
@@ -32,8 +38,8 @@ export interface WeComResponse {
 export interface WeComInbound {
 	/** req_id from the callback headers; pass it back when replying. */
 	reqId: string;
-	/** The callback body, already parsed by the bot document's shape. */
-	body: any;
+	/** The callback body as JSON; parseInbound() validates it at this boundary. */
+	body: unknown;
 }
 
 export interface WeComClientOptions {
@@ -46,13 +52,22 @@ export interface WeComClientOptions {
 	createWebSocket?: (url: string) => WeComSocket;
 }
 
+/** The fields this client reads from a transport event; the ws package's events are wider. */
+export interface WeComSocketEvent {
+	readonly data?: unknown;
+	readonly message?: unknown;
+	readonly code?: unknown;
+	readonly reason?: unknown;
+	readonly wasClean?: unknown;
+}
+
 /** Small transport boundary, also used by the offline protocol tests. */
 export interface WeComSocket {
 	readonly readyState: number;
-	onopen?: ((event: any) => void) | null;
-	onmessage?: ((event: any) => void) | null;
-	onerror?: ((event: any) => void) | null;
-	onclose?: ((event: any) => void) | null;
+	onopen?(event: WeComSocketEvent): void;
+	onmessage?(event: WeComSocketEvent): void;
+	onerror?(event: WeComSocketEvent): void;
+	onclose?(event: WeComSocketEvent): void;
 	send(data: string): void;
 	close(): void;
 }
@@ -92,7 +107,9 @@ export class WeComClient {
 
 	private readonly options: WeComClientOptions;
 
-	constructor(options: WeComClientOptions) { this.options = options; }
+	constructor(options: WeComClientOptions) {
+		this.options = options;
+	}
 
 	getState(): WeComState {
 		return this.state;
@@ -146,7 +163,8 @@ export class WeComClient {
 		this.setState("connecting");
 		let ws: WeComSocket;
 		try {
-			ws = this.options.createWebSocket?.(WS_URL) ?? new WebSocket(WS_URL);
+			// ws's DOM-style events are wider than the fields read here; this is the transport boundary.
+			ws = this.options.createWebSocket?.(WS_URL) ?? (new WebSocket(WS_URL) as WeComSocket);
 		} catch (err) {
 			this.options.log?.(`connect failed: ${String(err)}`);
 			this.disconnect("connection failed");
@@ -166,17 +184,25 @@ export class WeComClient {
 			this.handleData(ev?.data);
 		};
 		ws.onerror = (event) => {
-			if (this.ws === ws) this.disconnect(`WebSocket error${event?.message ? `: ${event.message}` : ""}`);
+			const message = event?.message === undefined ? "" : String(event.message);
+			if (this.ws === ws) this.disconnect(`WebSocket error${message ? `: ${message}` : ""}`);
 		};
 		ws.onclose = (ev) => {
 			if (this.ws !== ws) return;
-			const code = Number.isInteger(ev?.code) ? ev.code : "unknown";
+			const code = typeof ev?.code === "number" && Number.isInteger(ev.code) ? ev.code : "unknown";
 			const uptime = this.openedAt === undefined ? undefined : Math.max(0, Date.now() - this.openedAt);
 			const clean = typeof ev?.wasClean === "boolean" ? ev.wasClean : "unknown";
-			const reason = String(ev?.reason ?? "").split(this.options.secret || "\0").join("****")
-				.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 256);
-			this.options.log?.(`WebSocket closed: code=${code} uptime=${uptime === undefined ? "unknown" : `${uptime}ms`} clean=${clean} reason=${reason || "(empty)"}`);
-			this.disconnect(`${reason || "connection closed"} (code=${code}, uptime=${uptime === undefined ? "unknown" : `${Math.round(uptime / 1000)}s`})`);
+			const reason = String(ev?.reason ?? "")
+				.split(this.options.secret || "\0")
+				.join("****")
+				.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+				.slice(0, 256);
+			this.options.log?.(
+				`WebSocket closed: code=${code} uptime=${uptime === undefined ? "unknown" : `${uptime}ms`} clean=${clean} reason=${reason || "(empty)"}`,
+			);
+			this.disconnect(
+				`${reason || "connection closed"} (code=${code}, uptime=${uptime === undefined ? "unknown" : `${Math.round(uptime / 1000)}s`})`,
+			);
 		};
 	}
 
@@ -236,55 +262,66 @@ export class WeComClient {
 
 	// ------------------------------------------------------------------ inbound
 
-	private handleData(data: any): void {
-		const text = typeof data === "string" ? data : data?.toString?.() ?? "";
+	private handleData(data: unknown): void {
+		const text = typeof data === "string" ? data : data === undefined || data === null ? "" : String(data);
 		if (!text) return;
-		let msg: any;
+		let parsed: unknown;
 		try {
-			msg = JSON.parse(text);
+			parsed = JSON.parse(text);
 		} catch {
 			this.options.log?.("ignoring non-JSON frame");
 			return;
 		}
-		if (!msg || typeof msg !== "object" || Array.isArray(msg)) return;
+		const msg = record(parsed);
+		if (!msg) return;
 
-		const reqId = typeof msg.headers?.req_id === "string" ? msg.headers.req_id : undefined;
+		const headers = record(msg.headers);
+		const reqId = typeof headers?.req_id === "string" ? headers.req_id : undefined;
 
-		if (msg?.cmd === "aibot_msg_callback") {
+		if (msg.cmd === "aibot_msg_callback") {
 			if (reqId && this.isReady()) this.options.onMessage?.({ reqId, body: msg.body ?? {} });
 			return;
 		}
-		if (msg?.cmd === "aibot_event_callback") {
+		if (msg.cmd === "aibot_event_callback") {
 			if (reqId && this.isReady()) this.options.onEvent?.({ reqId, body: msg.body ?? {} });
 			return;
 		}
 
 		// command response
-		if (reqId && this.pending.has(reqId)) {
-			const p = this.pending.get(reqId)!;
+		const errcode = typeof msg.errcode === "number" ? msg.errcode : undefined;
+		const errmsg = typeof msg.errmsg === "string" ? msg.errmsg : undefined;
+		const pending = reqId === undefined ? undefined : this.pending.get(reqId);
+		if (reqId && pending) {
+			const p = pending;
 			this.pending.delete(reqId);
 			clearTimeout(p.timer);
-			if (msg.errcode === 0) p.resolve(msg);
-			else p.reject(new DeliveryError(`WeCom ${msg.errcode ?? "?"}: ${msg.errmsg ?? "invalid response"}`, typeof msg.errcode === "number" ? "rejected" : "unknown"));
+			if (errcode === 0) p.resolve({ errcode, ...(errmsg === undefined ? {} : { errmsg }), ...msg });
+			else
+				p.reject(
+					new DeliveryError(
+						`WeCom ${errcode ?? "?"}: ${errmsg ?? "invalid response"}`,
+						errcode === undefined ? "unknown" : "rejected",
+					),
+				);
 			return;
 		}
 		if (reqId && reqId === this.subscribeReqId) {
 			this.subscribeReqId = undefined;
 			clearTimeout(this.connectionTimer);
 			this.connectionTimer = undefined;
-			if (msg?.errcode === 0) {
+			if (errcode === 0) {
 				this.attempts = 0;
 				this.subscribeFailures = 0;
 				this.startPing();
 				this.setState("subscribed");
 			} else {
-				const reason = `subscribe failed: ${msg?.errcode ?? "?"} ${msg?.errmsg ?? ""}`.trim();
+				const reason = `subscribe failed: ${errcode ?? "?"} ${errmsg ?? ""}`.trim();
 				// Credentials stay wrong: stop after a few backed-off attempts instead of hammering the server.
 				if (++this.subscribeFailures >= MAX_SUBSCRIBE_FAILURES) this.stop(reason);
 				else this.disconnect(reason);
 			}
-		} else if (typeof msg.errcode === "number" && msg.errcode !== 0) {
-			this.options.log?.(`reply rejected: ${msg.errcode} ${msg.errmsg ?? ""}`);
+		} else if (errcode !== undefined && errcode !== 0) {
+			this.options.log?.(`reply rejected: ${errcode} ${errmsg ?? ""}`);
 		}
 	}
 
@@ -297,9 +334,9 @@ export class WeComClient {
 	// ----------------------------------------------------------------- outbound
 
 	/** Sends one frame; undefined when written, otherwise why it could not be written. */
-	private send(payload: any): string | undefined {
+	private send(payload: object): string | undefined {
 		const ws = this.ws;
-		if (!ws || ws.readyState !== 1 /* OPEN */) return "WebSocket is not connected";
+		if (ws?.readyState !== 1 /* OPEN */) return "WebSocket is not connected";
 		try {
 			ws.send(JSON.stringify(payload));
 			return undefined;
@@ -312,10 +349,10 @@ export class WeComClient {
 	}
 
 	/** Resolve only after a successful acknowledgement; reject on timeout or disconnect. */
-	sendCommand(cmd: string, body: any | undefined, reqId = genReqId()): Promise<WeComResponse> {
+	sendCommand(cmd: string, body: unknown, reqId = genReqId()): Promise<WeComResponse> {
 		if (!this.isReady()) return Promise.reject(new DeliveryError("WebSocket is not subscribed", "not_sent"));
 		if (this.pending.has(reqId)) return Promise.reject(new DeliveryError("Request is already pending", "rejected"));
-		const payload: any = { cmd, headers: { req_id: reqId } };
+		const payload: { cmd: string; headers: { req_id: string }; body?: unknown } = { cmd, headers: { req_id: reqId } };
 		if (body !== undefined) payload.body = body;
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -333,16 +370,14 @@ export class WeComClient {
 	}
 
 	/** aibot_respond_msg — reply to a message callback. */
-	respondMsg(reqId: string, body: any): boolean {
+	respondMsg(reqId: string, body: unknown): boolean {
 		return this.isReady() && this.send({ cmd: "aibot_respond_msg", headers: { req_id: reqId }, body }) === undefined;
 	}
 
 	/** The same reply, but resolve only after WeCom acknowledged it (used when the reply carries a result). */
-	respondMsgAck(reqId: string, body: any): Promise<WeComResponse> {
+	respondMsgAck(reqId: string, body: unknown): Promise<WeComResponse> {
 		return this.sendCommand("aibot_respond_msg", body, reqId);
 	}
-
-
 
 	/**
 	 * Upload a PNG as temporary media and return its media_id. init → chunk × N → finish;
@@ -350,14 +385,21 @@ export class WeComClient {
 	 */
 	async uploadImage(data: Buffer, filename = "pi-notification.png"): Promise<string> {
 		if (data.byteLength < WECOM_IMAGE_MIN_BYTES || data.byteLength > WECOM_IMAGE_MAX_BYTES) {
-			throw new DeliveryError(`图片大小必须在 ${WECOM_IMAGE_MIN_BYTES} 字节到 ${WECOM_IMAGE_MAX_BYTES / 1024 / 1024}MB 之间`, "rejected");
+			throw new DeliveryError(
+				`图片大小必须在 ${WECOM_IMAGE_MIN_BYTES} 字节到 ${WECOM_IMAGE_MAX_BYTES / 1024 / 1024}MB 之间`,
+				"rejected",
+			);
 		}
 		const name = filename.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 200) || "pi-notification.png";
 		const CHUNK = 512 * 1024;
 		const totalChunks = Math.ceil(data.byteLength / CHUNK);
 		const md5 = createHash("md5").update(data).digest("hex");
 		const init = await this.sendCommand("aibot_upload_media_init", {
-			type: "image", filename: name, total_size: data.byteLength, total_chunks: totalChunks, md5,
+			type: "image",
+			filename: name,
+			total_size: data.byteLength,
+			total_chunks: totalChunks,
+			md5,
 		});
 		const uploadId = bodyField(init, "upload_id");
 		if (!uploadId) throw new DeliveryError("上传初始化没有返回 upload_id", "rejected");
@@ -366,14 +408,18 @@ export class WeComClient {
 			for (let attempt = 0; ; attempt++) {
 				try {
 					await this.sendCommand("aibot_upload_media_chunk", {
-						upload_id: uploadId, chunk_index: index, base64_data: chunk.toString("base64"),
+						upload_id: uploadId,
+						chunk_index: index,
+						base64_data: chunk.toString("base64"),
 					});
 					break;
 				} catch (error) {
 					// Chunks are idempotent server-side, so one retry is safe whatever the outcome; the
 					// first reason still reaches the log instead of being hidden by the retry.
 					if (attempt >= 1) throw error;
-					this.options.log?.(`upload chunk ${index} failed, retrying once: ${error instanceof Error ? error.message : String(error)}`);
+					this.options.log?.(
+						`upload chunk ${index} failed, retrying once: ${error instanceof Error ? error.message : String(error)}`,
+					);
 				}
 			}
 		}
@@ -397,11 +443,8 @@ export class WeComClient {
 }
 
 function bodyField(response: WeComResponse, key: string): string | undefined {
-	const body = response.body;
-	if (body && typeof body === "object") {
-		const value = (body as Record<string, unknown>)[key];
-		if (typeof value === "string" && value) return value;
-	}
+	const value = record(response.body)?.[key];
+	if (typeof value === "string" && value) return value;
 	const direct = response[key];
 	return typeof direct === "string" && direct ? direct : undefined;
 }

@@ -16,14 +16,18 @@ interface SourceContext {
 
 /** Resolve provider and model together so identical model IDs at different providers stay distinct. */
 export function captureModelIdentity(
-	ctx: Pick<SourceContext, "model" | "modelRegistry">, reply?: ReplyModel,
+	ctx: Pick<SourceContext, "model" | "modelRegistry">,
+	reply?: ReplyModel,
 ): Pick<NotificationSource, "provider" | "modelName"> {
 	const provider = reply?.provider || (reply?.model ? undefined : ctx.model?.provider);
 	let model = ctx.model;
 	if (reply?.model) {
-		model = model?.id === reply.model && model.provider === provider
-			? model
-			: provider ? ctx.modelRegistry?.find(provider, reply.model) : undefined;
+		model =
+			model?.id === reply.model && model.provider === provider
+				? model
+				: provider
+					? ctx.modelRegistry?.find(provider, reply.model)
+					: undefined;
 	} else if (provider && model?.provider !== provider) {
 		model = undefined;
 	}
@@ -47,7 +51,11 @@ export function captureNotificationSource(ctx: SourceContext, reply?: ReplyModel
 
 /** Copy visible output and any recorded error verbatim, without inferring task success. */
 export function assistantReplyText(message: Pick<AssistantMessage, "content" | "stopReason" | "errorMessage">): string {
-	const text = message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n\n").trim();
+	const text = message.content
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n\n")
+		.trim();
 	if (message.stopReason !== "error") return text;
 	const error = message.errorMessage?.trim();
 	return [text, error ? `错误信息：${error}` : ""].filter(Boolean).join("\n\n") || NO_REPLY_TEXT;
@@ -55,7 +63,8 @@ export function assistantReplyText(message: Pick<AssistantMessage, "content" | "
 
 /** Read visible text together with its producing model, never tool output or reasoning. */
 export function latestAssistantReply(
-	entries: readonly SessionEntry[], afterEntryId?: string | null,
+	entries: readonly SessionEntry[],
+	afterEntryId?: string | null,
 ): ({ text: string } & ReplyModel) | undefined {
 	let start = 0;
 	if (afterEntryId) {

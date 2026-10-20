@@ -3,16 +3,14 @@
  * directory, so a user finds the credentials, the gateway socket and the routing state together,
  * and `PI_CODING_AGENT_DIR` moves all of them at once.
  */
-import { resolve } from "node:path";
+
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 /** pi's agent directory: `PI_CODING_AGENT_DIR` when set, otherwise `~/.pi/agent`. */
 export function agentDirectory(): string {
 	const configured = process.env.PI_CODING_AGENT_DIR;
-	return configured
-		? resolve(configured.replace(/^~(?=$|[\\/])/, homedir()))
-		: join(homedir(), ".pi", "agent");
+	return configured ? resolve(configured.replace(/^~(?=$|[\\/])/, homedir())) : join(homedir(), ".pi", "agent");
 }
 
 /** The one folder this extension owns: `config.json` and the shared gateway's runtime state. */

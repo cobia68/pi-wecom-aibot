@@ -49,8 +49,11 @@ const systemEnvironment: FontEnvironment = {
 	home: homedir(),
 	exists: existsSync,
 	list(directory) {
-		try { return readdirSync(directory); }
-		catch { return []; }
+		try {
+			return readdirSync(directory);
+		} catch {
+			return [];
+		}
 	},
 	run(command, args) {
 		try {
@@ -64,7 +67,9 @@ const systemEnvironment: FontEnvironment = {
 /** Recent macOS releases may store PingFang in a versioned system font asset. */
 function findPingFangAsset(environment: FontEnvironment): string | undefined {
 	const root = "/System/Library/AssetsV2";
-	for (const directory of (environment.list?.(root) ?? []).filter((name) => /^com_apple_MobileAsset_Font\d+$/.test(name)).sort()) {
+	for (const directory of (environment.list?.(root) ?? [])
+		.filter((name) => /^com_apple_MobileAsset_Font\d+$/.test(name))
+		.sort()) {
 		const fonts = posix.join(root, directory);
 		for (const asset of (environment.list?.(fonts) ?? []).filter((name) => name.endsWith(".asset")).sort()) {
 			const file = posix.join(fonts, asset, "AssetData", "PingFang.ttc");
@@ -75,9 +80,12 @@ function findPingFangAsset(environment: FontEnvironment): string | undefined {
 }
 
 export function missingCjkFontMessage(platform: NodeJS.Platform = process.platform): string {
-	if (platform === "win32") return "没有找到可用的微软雅黑（Microsoft YaHei）中文字体；请在 Windows 字体设置中启用或恢复系统微软雅黑后重试";
-	if (platform === "darwin") return "没有找到可用的苹方（PingFang SC）中文字体；请在 macOS 字体册中启用或恢复系统苹方后重试";
-	if (platform === "linux") return "Linux 没有找到可用的 CJK 中文字体，请安装系统字体后重试。Debian/Ubuntu：sudo apt install fonts-noto-cjk fontconfig；Arch：sudo pacman -S noto-fonts-cjk fontconfig。";
+	if (platform === "win32")
+		return "没有找到可用的微软雅黑（Microsoft YaHei）中文字体；请在 Windows 字体设置中启用或恢复系统微软雅黑后重试";
+	if (platform === "darwin")
+		return "没有找到可用的苹方（PingFang SC）中文字体；请在 macOS 字体册中启用或恢复系统苹方后重试";
+	if (platform === "linux")
+		return "Linux 没有找到可用的 CJK 中文字体，请安装系统字体后重试。Debian/Ubuntu：sudo apt install fonts-noto-cjk fontconfig；Arch：sudo pacman -S noto-fonts-cjk fontconfig。";
 	return "当前系统没有找到可用的 CJK 中文字体；请安装支持中文的系统字体后重试";
 }
 
@@ -85,10 +93,11 @@ export function missingCjkFontMessage(platform: NodeJS.Platform = process.platfo
 export function findFonts(environment: FontEnvironment = systemEnvironment): { mono?: string; cjk?: string } {
 	const { platform, env, home, exists } = environment;
 	const firstIn = (join: (...parts: string[]) => string, dirs: string[], names: string[]) => {
-		for (const name of names) for (const dir of dirs) {
-			const path = join(dir, name);
-			if (exists(path)) return path;
-		}
+		for (const name of names)
+			for (const dir of dirs) {
+				const path = join(dir, name);
+				if (exists(path)) return path;
+			}
 		return undefined;
 	};
 	if (platform === "win32") {
@@ -100,32 +109,54 @@ export function findFonts(environment: FontEnvironment = systemEnvironment): { m
 		};
 	}
 	if (platform === "darwin") {
-		const dirs = ["/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts", posix.join(home, "Library", "Fonts")];
+		const dirs = [
+			"/System/Library/Fonts",
+			"/System/Library/Fonts/Supplemental",
+			"/Library/Fonts",
+			posix.join(home, "Library", "Fonts"),
+		];
 		return {
 			mono: firstIn(posix.join, dirs, ["Menlo.ttc", "Monaco.ttf", "SFNSMono.ttf", "Courier New.ttf"]),
 			cjk: firstIn(posix.join, dirs, ["PingFang.ttc"]) ?? findPingFangAsset(environment),
 		};
 	}
 	const matched = environment.run("fc-match", ["-f", "%{file}", "monospace"])?.trim();
-	const mono = matched && exists(matched) ? matched : [
-		"/usr/share/fonts/TTF/DejaVuSansMono.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-		"/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf", "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
-		"/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
-	].find(exists);
+	const mono =
+		matched && exists(matched)
+			? matched
+			: [
+					"/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+					"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+					"/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
+					"/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
+					"/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
+				].find(exists);
 	const listed = (environment.run("fc-list", [":lang=zh", "file"]) ?? "")
-		.split("\n").map((line) => line.trim().replace(/:\s*$/, "")).filter((path) => path && exists(path));
+		.split("\n")
+		.map((line) => line.trim().replace(/:\s*$/, ""))
+		.filter((path) => path && exists(path));
 	const rank = (path: string) => {
 		const name = posix.basename(path).toLowerCase();
-		const family = [/notosanscjk|notosanssc|noto.*cjk/, /sourcehansans/, /wqy-microhei/, /wqy-zenhei/, /droidsansfallback/].findIndex((pattern) => pattern.test(name));
+		const family = [
+			/notosanscjk|notosanssc|noto.*cjk/,
+			/sourcehansans/,
+			/wqy-microhei/,
+			/wqy-zenhei/,
+			/droidsansfallback/,
+		].findIndex((pattern) => pattern.test(name));
 		// The regular sans face first: other weights (Arch ships DemiLight beside Regular), then serif and monospace variants.
 		const variant = /serif|mono/.test(name) ? 2 : /thin|light|medium|bold|black|heavy/.test(name) ? 1 : 0;
 		return (family === -1 ? 9 : family) * 3 + variant;
 	};
-	const cjk = listed.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))[0] ?? [
-		"/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-		"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-		"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-	].find(exists);
+	const cjk =
+		listed.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))[0] ??
+		[
+			"/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+			"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+			"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+		].find(exists);
 	return { mono, cjk };
 }
 
@@ -134,10 +165,11 @@ export function findEmojiFont(environment: FontEnvironment = systemEnvironment):
 	const { platform, env, home, exists } = environment;
 	const names = ["NotoEmoji-Regular.ttf", "NotoEmoji.ttf"];
 	const firstIn = (join: (...parts: string[]) => string, dirs: string[]) => {
-		for (const name of names) for (const dir of dirs) {
-			const path = join(dir, name);
-			if (exists(path)) return path;
-		}
+		for (const name of names)
+			for (const dir of dirs) {
+				const path = join(dir, name);
+				if (exists(path)) return path;
+			}
 		return undefined;
 	};
 	if (platform === "win32") {
@@ -145,13 +177,19 @@ export function findEmojiFont(environment: FontEnvironment = systemEnvironment):
 		if (env.LOCALAPPDATA) dirs.push(win32.join(env.LOCALAPPDATA, "Microsoft", "Windows", "Fonts"));
 		// Windows ships only the color Segoe UI Emoji; a manually installed Noto Emoji may use the
 		// variable-font file name, so look at what is actually in the font directories.
-		const listed = dirs.flatMap((dir) => (environment.list?.(dir) ?? [])
-			.filter((name) => /^NotoEmoji.*\.(?:ttf|otf)$/i.test(name))
-			.map((name) => win32.join(dir, name)));
+		const listed = dirs.flatMap((dir) =>
+			(environment.list?.(dir) ?? [])
+				.filter((name) => /^NotoEmoji.*\.(?:ttf|otf)$/i.test(name))
+				.map((name) => win32.join(dir, name)),
+		);
 		return firstIn(win32.join, dirs) ?? listed[0];
 	}
 	if (platform === "darwin") {
-		return firstIn(posix.join, ["/Library/Fonts", posix.join(home, "Library/Fonts"), "/System/Library/Fonts/Supplemental"]);
+		return firstIn(posix.join, [
+			"/Library/Fonts",
+			posix.join(home, "Library/Fonts"),
+			"/System/Library/Fonts/Supplemental",
+		]);
 	}
 	const known = [
 		posix.join(home, ".local/share/fonts/noto-emoji/NotoEmoji.ttf"),
@@ -163,12 +201,17 @@ export function findEmojiFont(environment: FontEnvironment = systemEnvironment):
 	].find(exists);
 	if (known) return known;
 	const listed = (environment.run("fc-list", [":family=Noto Emoji", "file"]) ?? "")
-		.split("\n").map((line) => line.trim().replace(/:\s*$/, "")).filter((path) => path && exists(path));
+		.split("\n")
+		.map((line) => line.trim().replace(/:\s*$/, ""))
+		.filter((path) => path && exists(path));
 	return listed.find((path) => !/color.*emoji|emoji.*color|seguiemj|apple color emoji/i.test(path));
 }
 
 /** Read the fonts discovered on this system, skipping any that do not parse as a font. */
-export function loadFonts(environment: FontEnvironment = systemEnvironment, read: (path: string) => Uint8Array = readFileSync): FontSet {
+export function loadFonts(
+	environment: FontEnvironment = systemEnvironment,
+	read: (path: string) => Uint8Array = readFileSync,
+): FontSet {
 	const found = findFonts(environment);
 	const buffers: Uint8Array[] = [];
 	const families: string[] = [];
@@ -197,22 +240,31 @@ export function loadFonts(environment: FontEnvironment = systemEnvironment, read
 		hasCjk ||= info.hasCjk;
 		if (emoji) emojiAdvance = info.metrics?.advance;
 	};
-	if (found.mono) {
-		add(found.mono);
+	const mono = found.mono;
+	if (mono) {
+		add(mono);
 		// resvg needs actual bold/italic faces; it does not synthesize every missing style.
-		const variants = /consola\.ttf$/i.test(found.mono)
-			? ["consolab.ttf", "consolai.ttf", "consolaz.ttf"].map((name) => pathApi.join(pathApi.dirname(found.mono!), name))
-			: ["Bold", "Italic", "BoldItalic", "Oblique", "BoldOblique"].map((style) => found.mono!.replace(/(?:-Regular)?\.ttf$/i, `-${style}.ttf`));
-		for (const path of variants) if (path !== found.mono && environment.exists(path)) add(path);
+		const variants = /consola\.ttf$/i.test(mono)
+			? ["consolab.ttf", "consolai.ttf", "consolaz.ttf"].map((name) => pathApi.join(pathApi.dirname(mono), name))
+			: ["Bold", "Italic", "BoldItalic", "Oblique", "BoldOblique"].map((style) =>
+					mono.replace(/(?:-Regular)?\.ttf$/i, `-${style}.ttf`),
+				);
+		for (const path of variants) if (path !== mono && environment.exists(path)) add(path);
 	}
 	if (found.cjk) {
-		const preferred = environment.platform === "win32" ? ["Microsoft YaHei", "Microsoft YaHei UI"]
-			: environment.platform === "darwin" ? ["PingFang SC"] : ["Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC"];
+		const preferred =
+			environment.platform === "win32"
+				? ["Microsoft YaHei", "Microsoft YaHei UI"]
+				: environment.platform === "darwin"
+					? ["PingFang SC"]
+					: ["Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC"];
 		const before = families.length;
 		add(found.cjk, preferred);
 		// Bold Chinese needs the bold file beside the regular one; PingFang's collection already has its weights.
-		const bold = environment.platform === "win32" ? found.cjk.replace(/msyh\.(ttc|ttf)$/i, "msyhbd.$1")
-			: found.cjk.replace(/-Regular(\.(?:otf|ttf|ttc))$/i, "-Bold$1");
+		const bold =
+			environment.platform === "win32"
+				? found.cjk.replace(/msyh\.(ttc|ttf)$/i, "msyhbd.$1")
+				: found.cjk.replace(/-Regular(\.(?:otf|ttf|ttc))$/i, "-Bold$1");
 		if (bold !== found.cjk && environment.exists(bold)) add(bold, preferred);
 		sansFamilies = families.slice(before);
 	}
@@ -247,9 +299,12 @@ export function readFontInfo(data: Uint8Array): { families: string[]; metrics?: 
 	let metrics: FontMetrics | undefined;
 	let hasCjk = false;
 	try {
-		const faces = view.getUint32(0) === 0x74746366
-			? Array.from({ length: Math.min(view.getUint32(8), MAX_FONT_FACES) }, (_, index) => view.getUint32(12 + index * 4))
-			: [0];
+		const faces =
+			view.getUint32(0) === 0x74746366
+				? Array.from({ length: Math.min(view.getUint32(8), MAX_FONT_FACES) }, (_, index) =>
+						view.getUint32(12 + index * 4),
+					)
+				: [0];
 		for (const face of faces) {
 			const tables = new Map<string, number>();
 			const count = view.getUint16(face + 4);
@@ -284,7 +339,8 @@ function cmapHasGlyph(view: DataView, table: number, code: number): boolean {
 			for (let j = 0; j < count; j++) {
 				const group = at + 16 + j * 12;
 				const start = view.getUint32(group);
-				if (code >= start && code <= view.getUint32(group + 4) && view.getUint32(group + 8) + code - start !== 0) return true;
+				if (code >= start && code <= view.getUint32(group + 4) && view.getUint32(group + 8) + code - start !== 0)
+					return true;
 			}
 		} else if (format === 4) {
 			const count = view.getUint16(at + 6) / 2;
@@ -314,7 +370,10 @@ function nameRecords(view: DataView, data: Uint8Array, table: number): string[] 
 		const language = view.getUint16(at + 4);
 		const nameId = view.getUint16(at + 6);
 		if (nameId !== 1 && nameId !== 16) continue;
-		const bytes = data.subarray(strings + view.getUint16(at + 10), strings + view.getUint16(at + 10) + view.getUint16(at + 8));
+		const bytes = data.subarray(
+			strings + view.getUint16(at + 10),
+			strings + view.getUint16(at + 10) + view.getUint16(at + 8),
+		);
 		let text: string;
 		if (platform === 3 || platform === 0) {
 			text = "";
@@ -347,4 +406,3 @@ function faceMetrics(view: DataView, tables: Map<string, number>): FontMetrics |
 }
 
 // ---------------------------------------------------------------- PNG
-

@@ -42,16 +42,24 @@ export interface InboundMessage {
 	attachments: Attachment[];
 }
 
+/** A JSON object from the platform; undefined for anything else. The one narrowing used at this boundary. */
+export function record(value: unknown): Record<string, unknown> | undefined {
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
 /** The sender, checked against allowlists before anything else is parsed. */
-export function senderOf(body: any): string | undefined {
-	const userid = body?.from?.userid;
+export function senderOf(value: unknown): string | undefined {
+	const userid = record(record(value)?.from)?.userid;
 	return typeof userid === "string" && userid ? userid : undefined;
 }
 
 /** undefined when the callback has no usable sender, conversation or text. */
-export function parseInbound(body: any): InboundMessage | undefined {
+export function parseInbound(value: unknown): InboundMessage | undefined {
+	const body = record(value);
 	const userid = senderOf(body);
-	if (!userid) return undefined;
+	if (!body || !userid) return undefined;
 	const group = body.chattype === "group";
 	const rawChatId = group ? body.chatid : userid;
 	const chatId = typeof rawChatId === "string" ? rawChatId.trim() : "";
@@ -72,26 +80,35 @@ export function parseInbound(body: any): InboundMessage | undefined {
 }
 
 /** Plain text of a message or quote; images and files become placeholders. undefined when malformed. */
-export function messageText(node: any): string | undefined {
+export function messageText(value: unknown): string | undefined {
+	const node = record(value);
 	switch (node?.msgtype) {
-		case "text": return stringOrUndefined(node.text?.content);
-		case "markdown": return stringOrUndefined(node.markdown?.content);
-		case "voice": return stringOrUndefined(node.voice?.content);
+		case "text":
+			return stringOrUndefined(record(node.text)?.content);
+		case "markdown":
+			return stringOrUndefined(record(node.markdown)?.content);
+		case "voice":
+			return stringOrUndefined(record(node.voice)?.content);
 		case "mixed": {
-			const items: unknown = node.mixed?.msg_item;
+			const items = record(node.mixed)?.msg_item;
 			if (!Array.isArray(items)) return "";
 			const parts: string[] = [];
 			for (const item of items) {
-				const part = item?.msgtype === "text" ? stringOrUndefined(item.text?.content) : "[图片]";
+				const entry = record(item);
+				const part = entry?.msgtype === "text" ? stringOrUndefined(record(entry.text)?.content) : "[图片]";
 				if (part === undefined) return undefined;
 				parts.push(part);
 			}
 			return parts.join("\n");
 		}
-		case "image": return "[图片]";
-		case "file": return "[文件]";
-		case "video": return "[视频]";
-		default: return typeof node?.msgtype === "string" && node.msgtype ? `[${node.msgtype}]` : "";
+		case "image":
+			return "[图片]";
+		case "file":
+			return "[文件]";
+		case "video":
+			return "[视频]";
+		default:
+			return typeof node?.msgtype === "string" && node.msgtype ? `[${node.msgtype}]` : "";
 	}
 }
 
@@ -99,17 +116,26 @@ function stringOrUndefined(value: unknown): string | undefined {
 	return value === undefined ? "" : typeof value === "string" ? value : undefined;
 }
 
-function attachments(body: any): Attachment[] {
+function attachments(body: Record<string, unknown>): Attachment[] {
 	const result: Attachment[] = [];
-	const add = (kind: Attachment["kind"], node: any) => {
+	const add = (kind: Attachment["kind"], value: unknown) => {
+		const node = record(value);
 		if (typeof node?.url !== "string" || !node.url) return;
-		result.push({ kind, url: node.url, ...(typeof node.aeskey === "string" && node.aeskey ? { aeskey: node.aeskey } : {}) });
+		result.push({
+			kind,
+			url: node.url,
+			...(typeof node.aeskey === "string" && node.aeskey ? { aeskey: node.aeskey } : {}),
+		});
 	};
 	if (body.msgtype === "image") add("image", body.image);
 	if (body.msgtype === "file") add("file", body.file);
 	if (body.msgtype === "video") add("video", body.video);
-	if (body.msgtype === "mixed" && Array.isArray(body.mixed?.msg_item)) {
-		for (const item of body.mixed.msg_item) if (item?.msgtype === "image") add("image", item.image);
+	const mixed = record(body.mixed)?.msg_item;
+	if (body.msgtype === "mixed" && Array.isArray(mixed)) {
+		for (const item of mixed) {
+			const entry = record(item);
+			if (entry?.msgtype === "image") add("image", entry.image);
+		}
 	}
 	return result;
 }

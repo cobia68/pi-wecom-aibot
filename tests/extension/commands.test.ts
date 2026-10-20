@@ -32,11 +32,15 @@ function sectionRows(help: string, title: string): string[] {
 
 test("the total help lists its sections in a fixed order and never leaves trailing whitespace", () => {
 	const help = wecomHelpText();
-	const headers = help.split("\n").filter((line) => line && !line.startsWith(" ")).slice(2);
+	const headers = help
+		.split("\n")
+		.filter((line) => line && !line.startsWith(" "))
+		.slice(2);
 	assert.deepEqual(headers, ["说明", "子命令", "通用选项", "推送目标", "配置", "生命周期"]);
 	// The subject is the 智能机器人, not 企业微信 as a whole: this plugin only speaks the bot long connection.
 	assert.match(help.split("\n")[0], /^企业微信智能机器人 — /);
-	for (const line of help.split("\n")) assert.equal(line, line.trimEnd(), `trailing whitespace: ${JSON.stringify(line)}`);
+	for (const line of help.split("\n"))
+		assert.equal(line, line.trimEnd(), `trailing whitespace: ${JSON.stringify(line)}`);
 	assert.doesNotMatch(help, /--help, -h/, "the help option reads -h, --help");
 });
 
@@ -64,7 +68,7 @@ test("the total help describes the commands it lists, and a topic help never rep
 	const commands = sectionRows(wecomHelpText(), "子命令");
 	assert.equal(commands.length, 8);
 	// `help` is not an action: only `--help` opens help, so it must not appear among the subcommands.
-	assert.doesNotMatch(wecomHelpText(), /^  help  /m);
+	assert.doesNotMatch(wecomHelpText(), /^ {2}help {2}/m);
 	for (const row of commands) assert.ok(descriptionColumn(row), row);
 	// Usage and options live under the command itself, not in the total help.
 	assert.doesNotMatch(wecomHelpText(), /\/wecom-aibot setup \[whoami\]/);
@@ -74,11 +78,20 @@ test("the total help describes the commands it lists, and a topic help never rep
 test("setup help documents manual per-session connection and no removed settings", () => {
 	const help = topicHelp("setup --help");
 	assert.match(help, /每个 session.*手动.*\/wecom-aibot connect/);
-	assert.doesNotMatch(help, /enabled|"enabled"\s*:|screenMode|imageHosts|fontFiles|\/wecom-aibot screen/, "no retired field or command is still documented");
+	assert.doesNotMatch(
+		help,
+		/enabled|"enabled"\s*:|screenMode|imageHosts|fontFiles|\/wecom-aibot screen/,
+		"no retired field or command is still documented",
+	);
 });
 
 test("connection help never promises persisted consent or recommends the old start action", () => {
-	for (const help of [wecomHelpText(), topicHelp("setup --help"), topicHelp("connect --help"), topicHelp("disconnect --help")]) {
+	for (const help of [
+		wecomHelpText(),
+		topicHelp("setup --help"),
+		topicHelp("connect --help"),
+		topicHelp("disconnect --help"),
+	]) {
 		assert.match(help, /当前 (?:pi|session)/);
 		assert.match(help, /每个 session.*手动.*\/wecom-aibot connect/);
 		assert.doesNotMatch(help, /enabled 设为|开启自动接入|会打开|\bstart\b/);
@@ -95,6 +108,9 @@ test("a bare action documents no options and offers no --help, while a parameter
 	for (const name of ["setup", "whoami", "test"]) {
 		assert.match(topicHelp(`${name} --help`), /^选项$/m, name);
 		assert.match(topicHelp(`${name} --help`), /-h, --help/, name);
-		assert.ok(completeWecom(`${name} -`)?.some((item) => item.value.endsWith("--help")), name);
+		assert.ok(
+			completeWecom(`${name} -`)?.some((item) => item.value.endsWith("--help")),
+			name,
+		);
 	}
 });

@@ -15,15 +15,15 @@ process.env.HOME = sandboxHome;
 process.env.USERPROFILE = sandboxHome;
 
 after(() => {
-  for (const [key, value] of Object.entries(previous)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-  assert.equal(dirname(sandboxHome), tmpdir());
-  rmSync(sandboxHome, { recursive: true, force: true });
+	for (const [key, value] of Object.entries(previous)) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+	assert.equal(dirname(sandboxHome), tmpdir());
+	rmSync(sandboxHome, { recursive: true, force: true });
 });
 
 /** A fake gateway listening on a real endpoint needs the private directory the real one creates. */
 export function socketDirectory(endpoint: string): void {
-  if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true, mode: 0o700 });
+	if (process.platform !== "win32") mkdirSync(dirname(endpoint), { recursive: true, mode: 0o700 });
 }

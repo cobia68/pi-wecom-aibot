@@ -12,8 +12,8 @@ import { deliveryFailure } from "../shared/delivery.ts";
 import { NO_REPLY_TEXT, notificationPayload, notificationProblem } from "../shared/notification.ts";
 import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
-import { captureModelIdentity, latestAssistantReply } from "./notification-source.ts";
 import type { WeComConfig } from "./config.ts";
+import { captureModelIdentity, latestAssistantReply } from "./notification-source.ts";
 
 const MAX_QUEUE_SIZE = 50;
 
@@ -40,7 +40,11 @@ export interface OutboxHost {
 	sendMode(): WeComConfig["sendMode"];
 	context(): ExtensionContext | undefined;
 	/** Render this notification as a screen image; failures return the Markdown fallback. */
-	prepareImage(notification: GatewayNotification, ctx: ExtensionContext, signal: AbortSignal): Promise<GatewayNotification>;
+	prepareImage(
+		notification: GatewayNotification,
+		ctx: ExtensionContext,
+		signal: AbortSignal,
+	): Promise<GatewayNotification>;
 	send(chat: ChatRef, notification: GatewayNotification): Promise<void>;
 	log(line: string): void;
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -73,7 +77,9 @@ export class NotificationOutbox {
 
 	constructor(private readonly host: OutboxHost) {}
 
-	get size(): number { return this.waiting.size + this.handedOver.size; }
+	get size(): number {
+		return this.waiting.size + this.handedOver.size;
+	}
 
 	/** Send when the run ends; the latest call for the same conversation wins. */
 	schedule(request: CompletionRequest): void {
@@ -98,18 +104,29 @@ export class NotificationOutbox {
 		const images: Promise<void>[] = [];
 		for (const [key, entry] of this.waiting) {
 			if (entry.phase.kind === "ready") continue;
-			if (entry.phase.kind === "preparing") { images.push(entry.phase.promise); continue; }
+			if (entry.phase.kind === "preparing") {
+				images.push(entry.phase.promise);
+				continue;
+			}
 			try {
 				const request = entry.request;
-				if (request.source.sessionId !== ctx.sessionManager.getSessionId()) throw new Error("pi session_id 已改变，已取消通知");
-				const answer = request.content === undefined && request.result === undefined
-					? latestAssistantReply(ctx.sessionManager.getBranch(), request.afterEntryId) : undefined;
+				if (request.source.sessionId !== ctx.sessionManager.getSessionId())
+					throw new Error("pi session_id 已改变，已取消通知");
+				const answer =
+					request.content === undefined && request.result === undefined
+						? latestAssistantReply(ctx.sessionManager.getBranch(), request.afterEntryId)
+						: undefined;
 				if (answer) request.source = { ...request.source, ...captureModelIdentity(ctx, answer) };
 				// Autonomous replies keep the tail like a normal reply; scheduled excerpts use completion rules.
-				const ready = notificationPayload(request.result !== undefined ? "reply" : "completion", request.source,
-					request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT, {
-						tailParagraphs: request.tailParagraphs, aborted: request.aborted ?? aborted,
-					});
+				const ready = notificationPayload(
+					request.result !== undefined ? "reply" : "completion",
+					request.source,
+					request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT,
+					{
+						tailParagraphs: request.tailParagraphs,
+						aborted: request.aborted ?? aborted,
+					},
+				);
 				// Validate the Markdown fallback before any image side effects; the gateway renders it once.
 				const problem = notificationProblem(ready.source, ready.text, ready);
 				if (problem) throw new Error(problem);
@@ -118,10 +135,16 @@ export class NotificationOutbox {
 					entry.phase = { kind: "ready", notification: ready };
 					continue;
 				}
-				const prepare = this.host.prepareImage(ready, ctx, this.host.signal).then((prepared) => {
-					if (this.disposed || this.waiting.get(key) !== entry) { this.removeImage(prepared); return; }
-					entry.phase = { kind: "ready", notification: prepared };
-				}).catch((error: unknown) => this.cancel(key, entry, error));
+				const prepare = this.host
+					.prepareImage(ready, ctx, this.host.signal)
+					.then((prepared) => {
+						if (this.disposed || this.waiting.get(key) !== entry) {
+							this.removeImage(prepared);
+							return;
+						}
+						entry.phase = { kind: "ready", notification: prepared };
+					})
+					.catch((error: unknown) => this.cancel(key, entry, error));
 				entry.phase = { kind: "preparing", promise: prepare };
 				images.push(prepare);
 			} catch (error) {
@@ -139,41 +162,58 @@ export class NotificationOutbox {
 		if (this.disposed) return;
 		// Transfer only at a ready connection: queueResult first needs to see any completion prepared
 		// while offline, so it does not create an extra automatic reply for that same run.
-		if (this.host.isReady()) for (const [key, entry] of this.waiting) {
-			if (entry.phase.kind !== "ready") continue;
-			this.waiting.delete(key);
-			this.handedOver.add(entry);
-		}
+		if (this.host.isReady())
+			for (const [key, entry] of this.waiting) {
+				if (entry.phase.kind !== "ready") continue;
+				this.waiting.delete(key);
+				this.handedOver.add(entry);
+			}
 		const attempts: Promise<void>[] = [];
 		for (const entry of this.handedOver) {
-			if (entry.phase.kind === "delivering") { attempts.push(entry.phase.promise); continue; }
+			if (entry.phase.kind === "delivering") {
+				attempts.push(entry.phase.promise);
+				continue;
+			}
 			if (!this.host.isReady() || entry.phase.kind !== "ready") continue;
 			// Content stays frozen through the ACK; a newer run has an independent entry.
 			const notification = entry.phase.notification;
 			const subscription = this.host.subscription();
 			let retained = false;
-			const attempt = this.host.send({ chatId: entry.request.chatId, chatType: entry.request.chatType }, notification).then(() => {
-				this.handedOver.delete(entry);
-				this.removeImage(notification);
-				if (!this.disposed) this.host.log(`notification delivered for session ${entry.request.source.sessionId}`);
-			}).catch((error: unknown) => {
-				if (this.disposed) return;
-				const outcome = deliveryFailure(error);
-				if (outcome === "not_sent") {
-					retained = this.handedOver.has(entry);
-					if (retained) this.host.log(`notification not sent; retained for reconnect: ${errMsg(error)}`);
-					return;
-				}
-				this.handedOver.delete(entry);
-				this.removeImage(notification);
-				// A rejection needs user action; an unknown ACK outcome must never trigger an automatic duplicate.
-				this.host.log(`notification failed (${outcome}): ${errMsg(error)}`);
-				this.host.notify(`企微通知${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errMsg(error)}`, "warning");
-			}).finally(() => {
-				if (this.handedOver.has(entry) && entry.phase.kind === "delivering") entry.phase = { kind: "ready", notification };
-				// The subscribed event may have already visited this in-flight attempt. Do not miss that recovery.
-				if (retained && !this.disposed && this.host.subscription() !== subscription && this.host.isReady()) void this.flush();
-			});
+			const attempt = this.host
+				.send({ chatId: entry.request.chatId, chatType: entry.request.chatType }, notification)
+				.then(() => {
+					this.handedOver.delete(entry);
+					this.removeImage(notification);
+					if (!this.disposed)
+						this.host.log(`notification delivered for session ${entry.request.source.sessionId}`);
+				})
+				.catch((error: unknown) => {
+					if (this.disposed) return;
+					const outcome = deliveryFailure(error);
+					if (outcome === "not_sent") {
+						retained = this.handedOver.has(entry);
+						if (retained) this.host.log(`notification not sent; retained for reconnect: ${errMsg(error)}`);
+						return;
+					}
+					this.handedOver.delete(entry);
+					this.removeImage(notification);
+					// A rejection needs user action; an unknown ACK outcome must never trigger an automatic duplicate.
+					this.host.log(`notification failed (${outcome}): ${errMsg(error)}`);
+					this.host.notify(
+						`企微通知${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errMsg(error)}`,
+						"warning",
+					);
+				})
+				.finally(() => {
+					if (this.handedOver.has(entry) && entry.phase.kind === "delivering")
+						entry.phase = { kind: "ready", notification };
+					// The subscribed event may have already visited this in-flight attempt. Do not miss that recovery.
+					if (retained && !this.disposed && this.host.subscription() !== subscription && this.host.isReady()) {
+						void this.flush().catch((error: unknown) =>
+							this.host.log(`notification retry failed: ${errMsg(error)}`),
+						);
+					}
+				});
 			entry.phase = { kind: "delivering", notification, promise: attempt };
 			attempts.push(attempt);
 		}
@@ -203,7 +243,10 @@ export class NotificationOutbox {
 }
 
 /** Delete a notification's temporary PNG; used for direct sends as well as queued ones. */
-export function removeNotificationImage(notification: GatewayNotification | undefined, log: (line: string) => void): void {
+export function removeNotificationImage(
+	notification: GatewayNotification | undefined,
+	log: (line: string) => void,
+): void {
 	const path = notification?.image?.path;
 	if (!path) return;
 	try {

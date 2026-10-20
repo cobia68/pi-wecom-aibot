@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { loadFonts, missingCjkFontMessage, type FontMetrics, type FontSet } from "./fonts.ts";
+import { type FontMetrics, type FontSet, loadFonts, missingCjkFontMessage } from "./fonts.ts";
 
 export interface CapturedScreen {
 	/** Terminal lines with ANSI styling, top to bottom. */
@@ -37,11 +37,24 @@ export interface Cell {
 }
 
 type Style = Omit<Cell, "text" | "width">;
+/** Every mutable style field, for SGR 0. */
+const STYLE_KEYS = [
+	"fg",
+	"bg",
+	"bold",
+	"dim",
+	"italic",
+	"underline",
+	"strike",
+	"inverse",
+	"hidden",
+] as const satisfies readonly (keyof Style)[];
 
 // ---------------------------------------------------------------- ANSI → cells
 
 /** CSI (SGR and the rest), OSC, string sequences such as APC (pi's cursor markers, image protocols), other escapes. */
-const ESCAPE = /\x1b\[([\x30-\x3f]*)([\x20-\x2f]*)([\x40-\x7e])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[P_^X][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[\x20-\x2f]*[\x30-\x7e]?/y;
+const ESCAPE =
+	/\x1b\[([\x30-\x3f]*)([\x20-\x2f]*)([\x40-\x7e])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[P_^X][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[\x20-\x2f]*[\x30-\x7e]?/y;
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 export function parseAnsiLine(line: string): Cell[] {
@@ -64,7 +77,10 @@ export function parseAnsiLine(line: string): Cell[] {
 			flush();
 			ESCAPE.lastIndex = i;
 			const match = ESCAPE.exec(line);
-			if (!match || match[0].length === 0) { i++; continue; }
+			if (!match || match[0].length === 0) {
+				i++;
+				continue;
+			}
 			if (match[3] === "m" && !match[2] && !/[<=>?]/.test(match[1] ?? "")) applySgr(style, match[1] ?? "");
 			i += match[0].length;
 			continue;
@@ -78,8 +94,22 @@ export function parseAnsiLine(line: string): Cell[] {
 }
 
 const BASE16 = [
-	"#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
-	"#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff",
+	"#000000",
+	"#cd3131",
+	"#0dbc79",
+	"#e5e510",
+	"#2472c8",
+	"#bc3fbc",
+	"#11a8cd",
+	"#e5e5e5",
+	"#666666",
+	"#f14c4c",
+	"#23d18b",
+	"#f5f543",
+	"#3b8eea",
+	"#d670d6",
+	"#29b8db",
+	"#ffffff",
 ];
 
 function hex(r: number, g: number, b: number): string {
@@ -103,7 +133,9 @@ function color256(n: number): string | undefined {
 }
 
 function applySgr(style: Style, params: string): void {
-	const groups = (params === "" ? "0" : params).split(";").map((group) => group.split(":").map((part) => part === "" ? 0 : Number(part)));
+	const groups = (params === "" ? "0" : params)
+		.split(";")
+		.map((group) => group.split(":").map((part) => (part === "" ? 0 : Number(part))));
 	for (let i = 0; i < groups.length; i++) {
 		const sub = groups[i];
 		const code = sub[0];
@@ -124,11 +156,13 @@ function applySgr(style: Style, params: string): void {
 			else if (color && code === 48) style.bg = color;
 			continue;
 		}
-		if (code === 0) for (const key of Object.keys(style) as (keyof Style)[]) delete style[key];
+		if (code === 0) for (const key of STYLE_KEYS) delete style[key];
 		else if (code === 1) style.bold = true;
 		else if (code === 2) style.dim = true;
-		else if (code === 22) { style.bold = false; style.dim = false; }
-		else if (code === 3) style.italic = true;
+		else if (code === 22) {
+			style.bold = false;
+			style.dim = false;
+		} else if (code === 3) style.italic = true;
 		else if (code === 23) style.italic = false;
 		else if (code === 4) style.underline = sub[1] !== 0;
 		else if (code === 21) style.underline = true;
@@ -158,32 +192,39 @@ export function maskSecrets(rows: Cell[][], secrets: readonly string[]): Cell[][
 	for (const secret of secrets) {
 		if (!secret) continue;
 		const forms = [secret, JSON.stringify(secret).slice(1, -1)];
-		try { forms.push(encodeURIComponent(secret)); } catch { /* raw form remains available */ }
+		try {
+			forms.push(encodeURIComponent(secret));
+		} catch {
+			/* raw form remains available */
+		}
 		for (const form of forms) if (form.replace(/\s/g, "")) needles.add(form.replace(/\s/g, ""));
 	}
 	if (!needles.size) return rows;
 	let joined = "";
 	const positions: { row: number; cell: number }[] = [];
-	rows.forEach((cells, row) => cells.forEach((cell, index) => {
-		const text = cell.text.replace(/\s/g, "");
-		joined += text;
-		for (let i = 0; i < text.length; i++) positions.push({ row, cell: index });
-	}));
+	rows.forEach((cells, row) => {
+		cells.forEach((cell, index) => {
+			const text = cell.text.replace(/\s/g, "");
+			joined += text;
+			for (let i = 0; i < text.length; i++) positions.push({ row, cell: index });
+		});
+	});
 	const masked = rows.map(() => new Set<number>());
 	for (const needle of needles) {
 		for (let at = joined.indexOf(needle); at !== -1; at = joined.indexOf(needle, at + 1)) {
 			for (let i = at; i < at + needle.length; i++) masked[positions[i].row].add(positions[i].cell);
 		}
 	}
-	return rows.map((cells, row) => cells.flatMap((cell, index) => {
-		if (!masked[row].has(index)) return [cell];
-		const star = { ...cell, text: "*", width: 1 as const };
-		return cell.width === 2 ? [star, { ...star }] : [star];
-	}));
+	return rows.map((cells, row) =>
+		cells.flatMap((cell, index) => {
+			if (!masked[row].has(index)) return [cell];
+			const star = { ...cell, text: "*", width: 1 as const };
+			return cell.width === 2 ? [star, { ...star }] : [star];
+		}),
+	);
 }
 
 // ---------------------------------------------------------------- cells → SVG
-
 
 /** Theme colours as #rrggbb; the capture reads all of them from pi's theme. */
 export interface ScreenPalette {
@@ -246,7 +287,12 @@ export function cellMetrics(metrics: FontMetrics, fontSize = FONT_SIZE, lineHeig
 	return { width, height, baseline };
 }
 
-interface Placed { c: Cell; col: number; fg: string; bg?: string }
+interface Placed {
+	c: Cell;
+	col: number;
+	fg: string;
+	bg?: string;
+}
 
 export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions): string {
 	const fontSize = options.fontSize ?? FONT_SIZE;
@@ -261,7 +307,12 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 	const placed = rows.map((cells) => {
 		let col = 0;
 		return cells.map((c): Placed => {
-			const at = { c, col, fg: (c.inverse ? c.bg : c.fg) ?? (c.inverse ? options.background : options.foreground), bg: c.inverse ? (c.fg ?? options.foreground) : c.bg };
+			const at = {
+				c,
+				col,
+				fg: (c.inverse ? c.bg : c.fg) ?? (c.inverse ? options.background : options.foreground),
+				bg: c.inverse ? (c.fg ?? options.foreground) : c.bg,
+			};
 			col += c.width;
 			return at;
 		});
@@ -270,7 +321,9 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 	const blockColor = placed.map((cells) => {
 		const first = cells[0];
 		const last = cells.at(-1);
-		return first?.bg && last && last.col + last.c.width === used && last.bg === first.bg && cells.every((p) => p.bg) ? first.bg : undefined;
+		return first?.bg && last && last.col + last.c.width === used && last.bg === first.bg && cells.every((p) => p.bg)
+			? first.bg
+			: undefined;
 	});
 	const out: string[] = [
 		`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
@@ -278,22 +331,27 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 		...(header ? [header.svg] : []),
 	];
 	// Consecutive block rows of one colour become one rounded rectangle.
-	for (let row = 0; row < rows.length;) {
+	for (let row = 0; row < rows.length; ) {
 		const color = blockColor[row];
 		let end = row + 1;
 		while (color && end < rows.length && blockColor[end] === color) end++;
-		if (color) out.push(`<rect x="${x(0)}" y="${y(row)}" width="${round(used * cell.width)}" height="${round((end - row) * cell.height)}" rx="${BLOCK_RADIUS}" fill="${color}"/>`);
+		if (color)
+			out.push(
+				`<rect x="${x(0)}" y="${y(row)}" width="${round(used * cell.width)}" height="${round((end - row) * cell.height)}" rx="${BLOCK_RADIUS}" fill="${color}"/>`,
+			);
 		row = end;
 	}
 	// Other backgrounds, merged per colour within a row.
 	placed.forEach((cells, row) => {
-		for (let i = 0; i < cells.length;) {
+		for (let i = 0; i < cells.length; ) {
 			const bg = cells[i].bg;
 			let j = i + 1;
 			while (j < cells.length && cells[j].bg === bg) j++;
 			if (bg && bg !== blockColor[row]) {
 				const end = cells[j - 1].col + cells[j - 1].c.width;
-				out.push(`<rect x="${x(cells[i].col)}" y="${y(row)}" width="${round((end - cells[i].col) * cell.width)}" height="${cell.height}" fill="${bg}"/>`);
+				out.push(
+					`<rect x="${x(cells[i].col)}" y="${y(row)}" width="${round((end - cells[i].col) * cell.width)}" height="${cell.height}" fill="${bg}"/>`,
+				);
 			}
 			i = j;
 		}
@@ -308,28 +366,48 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 		// Underline and strike-through as thin bars.
 		for (const p of cells) {
 			if (p.c.hidden) continue;
-			if (p.c.underline) out.push(`<rect x="${x(p.col)}" y="${round(baseline + fontSize * 0.12)}" width="${round(p.c.width * cell.width)}" height="1" fill="${p.fg}"/>`);
-			if (p.c.strike) out.push(`<rect x="${x(p.col)}" y="${round(baseline - fontSize * 0.3)}" width="${round(p.c.width * cell.width)}" height="1" fill="${p.fg}"/>`);
+			if (p.c.underline)
+				out.push(
+					`<rect x="${x(p.col)}" y="${round(baseline + fontSize * 0.12)}" width="${round(p.c.width * cell.width)}" height="1" fill="${p.fg}"/>`,
+				);
+			if (p.c.strike)
+				out.push(
+					`<rect x="${x(p.col)}" y="${round(baseline - fontSize * 0.3)}" width="${round(p.c.width * cell.width)}" height="1" fill="${p.fg}"/>`,
+				);
 		}
 		// Text: narrow single-unit characters share one element with explicit positions; others stand alone, centred.
-		for (let i = 0; i < cells.length;) {
+		for (let i = 0; i < cells.length; ) {
 			const p = cells[i];
-			if (p.c.hidden || p.c.text.trim() === "") { i++; continue; }
+			if (p.c.hidden || p.c.text.trim() === "") {
+				i++;
+				continue;
+			}
 			const attrs = textAttributes(p.fg, p.c);
 			if (p.c.width === 1 && p.c.text.length === 1) {
 				const run = [p];
 				let j = i + 1;
 				while (j < cells.length) {
 					const q = cells[j];
-					if (q.c.width !== 1 || q.c.text.length !== 1 || q.c.hidden || q.c.text === " " || textAttributes(q.fg, q.c) !== attrs) break;
+					if (
+						q.c.width !== 1 ||
+						q.c.text.length !== 1 ||
+						q.c.hidden ||
+						q.c.text === " " ||
+						textAttributes(q.fg, q.c) !== attrs
+					)
+						break;
 					run.push(q);
 					j++;
 				}
-				out.push(`<text x="${run.map((r) => x(r.col)).join(" ")}" y="${baseline}"${attrs}>${escapeXml(run.map((r) => r.c.text).join(""))}</text>`);
+				out.push(
+					`<text x="${run.map((r) => x(r.col)).join(" ")}" y="${baseline}"${attrs}>${escapeXml(run.map((r) => r.c.text).join(""))}</text>`,
+				);
 				i = j;
 			} else {
 				const wideGlyph = p.c.width === 2;
-				out.push(`<text x="${round(PADDING_X + (p.col + p.c.width / 2) * cell.width)}" y="${wideGlyph ? round(baseline + wideShift) : baseline}" text-anchor="middle"${wideGlyph ? wideAttrs : ""}${attrs}>${escapeXml(p.c.text)}</text>`);
+				out.push(
+					`<text x="${round(PADDING_X + (p.col + p.c.width / 2) * cell.width)}" y="${wideGlyph ? round(baseline + wideShift) : baseline}" text-anchor="middle"${wideGlyph ? wideAttrs : ""}${attrs}>${escapeXml(p.c.text)}</text>`,
+				);
 				i++;
 			}
 		}
@@ -339,7 +417,17 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 }
 
 /** Header sizes in SVG units, before the PNG zoom. */
-const HEADER = { top: 16, bottom: 14, tile: 36, gap: 12, title: 17, subtitle: 12.5, caption: 11.5, badge: 11.5, pill: 20 } as const;
+const HEADER = {
+	top: 16,
+	bottom: 14,
+	tile: 36,
+	gap: 12,
+	title: 17,
+	subtitle: 12.5,
+	caption: 11.5,
+	badge: 11.5,
+	pill: 20,
+} as const;
 /** Pi's mark (pi.dev/logo-auto.svg), in its three brand colours. */
 const PI_LOGO = [
 	'<path fill="#F09082" d="M165.29 165.29H517.36V400H400V282.65H165.29Z"/>',
@@ -377,14 +465,26 @@ function headerSvg(header: ScreenHeader, width: number, options: SvgOptions): { 
 	// (stock Windows/macOS ship only color emoji) the icon is dropped rather than drawn as a box.
 	const emojiStack = options.emojiFamilies?.length ? escapeXml(fontFamilyList(options.emojiFamilies)) : undefined;
 	const emojiAdvance = options.emojiAdvance ?? 1.1;
-	const line = (text: string, size: number, top: number, box: number, limit: number, family: string, measure: Measure, fill: string, weight = ""): string => {
+	const line = (
+		text: string,
+		size: number,
+		top: number,
+		box: number,
+		limit: number,
+		family: string,
+		measure: Measure,
+		fill: string,
+		weight = "",
+	): string => {
 		const match = /^(\p{Extended_Pictographic}\uFE0F?)\s+(.*)$/u.exec(text);
-		const icon = emojiStack ? match?.[1] ?? "" : "";
+		const icon = emojiStack ? (match?.[1] ?? "") : "";
 		const rest = match ? match[2] : text;
 		const offset = icon ? size * (emojiAdvance + 0.3) : 0;
 		const y = baseline(top, box, size);
-		const iconSvg = icon ? `<text x="${textX}" y="${y}" font-family="${emojiStack}" font-size="${size}" fill="${fill}">${escapeXml(icon)}</text>` : "";
-		return iconSvg + `<text x="${round(textX + offset)}" y="${y}" font-family="${family}" font-size="${size}"${weight} fill="${fill}">${escapeXml(fitText(rest, Math.max(0, limit - offset), measure))}</text>`;
+		const iconSvg = icon
+			? `<text x="${textX}" y="${y}" font-family="${emojiStack}" font-size="${size}" fill="${fill}">${escapeXml(icon)}</text>`
+			: "";
+		return `${iconSvg}<text x="${round(textX + offset)}" y="${y}" font-family="${family}" font-size="${size}"${weight} fill="${fill}">${escapeXml(fitText(rest, Math.max(0, limit - offset), measure))}</text>`;
 	};
 	const svg = [
 		`<rect width="${width}" height="${height}" fill="${colors.surface}"/>`,
@@ -394,9 +494,37 @@ function headerSvg(header: ScreenHeader, width: number, options: SvgOptions): { 
 		`<rect x="${pillX}" y="${pillTop}" width="${pillWidth}" height="${HEADER.pill}" rx="${HEADER.pill / 2}" fill="${tone}" fill-opacity="0.16"/>`,
 		`<text x="${round(pillX + pillWidth / 2)}" y="${baseline(pillTop, HEADER.pill, HEADER.badge)}" text-anchor="middle" font-family="${sans}" font-size="${HEADER.badge}" fill="${tone}">${escapeXml(header.badge)}</text>`,
 		// The title is estimated and shortened with an ellipsis; there is no second clip behind it.
-		line(header.title, HEADER.title, titleTop, 24, titleWidth, sans, sansMeasure(HEADER.title), colors.title, ' font-weight="600"'),
-		line(header.subtitle, HEADER.subtitle, subtitleTop, 18, right - textX, sans, sansMeasure(HEADER.subtitle), colors.muted),
-		line(header.caption, HEADER.caption, captionTop, 18, right - textX, mono, (s) => HEADER.caption * advance * Math.max(1, visibleWidth(s)), colors.dim),
+		line(
+			header.title,
+			HEADER.title,
+			titleTop,
+			24,
+			titleWidth,
+			sans,
+			sansMeasure(HEADER.title),
+			colors.title,
+			' font-weight="600"',
+		),
+		line(
+			header.subtitle,
+			HEADER.subtitle,
+			subtitleTop,
+			18,
+			right - textX,
+			sans,
+			sansMeasure(HEADER.subtitle),
+			colors.muted,
+		),
+		line(
+			header.caption,
+			HEADER.caption,
+			captionTop,
+			18,
+			right - textX,
+			mono,
+			(s) => HEADER.caption * advance * Math.max(1, visibleWidth(s)),
+			colors.dim,
+		),
 	].join("");
 	return { svg, height: height + 1 };
 }
@@ -427,7 +555,7 @@ function rgbOf(color: string): [number, number, number] {
 function mix(a: string, b: string, weight: number): string {
 	const x = rgbOf(a);
 	const y = rgbOf(b);
-	return hex(...x.map((v, i) => Math.round(v * weight + y[i] * (1 - weight))) as [number, number, number]);
+	return hex(...(x.map((v, i) => Math.round(v * weight + y[i] * (1 - weight))) as [number, number, number]));
 }
 
 function isDark(color: string): boolean {
@@ -439,7 +567,8 @@ type Measure = (segment: string) => number;
 
 /** An estimate for proportional text: wide glyphs (and the ellipsis, full-width in CJK fonts) one em, others about half. */
 function sansMeasure(size: number): Measure {
-	return (segment) => size * (visibleWidth(segment) >= 2 || segment === "…" ? 1 : /[A-Z0-9mw]/.test(segment) ? 0.68 : 0.55);
+	return (segment) =>
+		size * (visibleWidth(segment) >= 2 || segment === "…" ? 1 : /[A-Z0-9mw]/.test(segment) ? 0.68 : 0.55);
 }
 
 function fitWidth(text: string, measure: Measure): number {
@@ -474,11 +603,14 @@ function escapeXml(text: string): string {
 	return text
 		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffe\uffff]/g, "")
 		.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "")
-		.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;");
 }
 
 function fontFamilyList(families: readonly string[]): string {
-	return families.map((family) => family === "monospace" ? family : `'${family.replace(/['\\]/g, "")}'`).join(", ");
+	return families.map((family) => (family === "monospace" ? family : `'${family.replace(/['\\]/g, "")}'`)).join(", ");
 }
 
 // ---------------------------------------------------------------- fonts
@@ -506,7 +638,9 @@ function loadResvg(): Promise<ResvgModule> {
 		return module;
 	})().catch((error: unknown) => {
 		resvg = undefined;
-		throw new Error(`无法加载图片渲染组件 @resvg/resvg-wasm（${error instanceof Error ? error.message : String(error)}）；请在插件目录运行 npm install`);
+		throw new Error(
+			`无法加载图片渲染组件 @resvg/resvg-wasm（${error instanceof Error ? error.message : String(error)}）；请在插件目录运行 npm install`,
+		);
 	});
 	return resvg;
 }
@@ -534,10 +668,17 @@ export async function renderScreenPng(screen: CapturedScreen, options: RenderOpt
 		throw new Error(missingCjkFontMessage(fonts.platform));
 	}
 	const svg = cellsToSvg(rows, screen.columns, {
-		families: fonts.families, sansFamilies: fonts.sansFamilies, metrics: fonts.metrics,
-		foreground: screen.foreground, background: screen.background, palette: screen.palette,
-		emojiFamilies: fonts.emojiFamilies, emojiAdvance: fonts.emojiAdvance,
-		header, fontSize: options.fontSize, lineHeight: options.lineHeight,
+		families: fonts.families,
+		sansFamilies: fonts.sansFamilies,
+		metrics: fonts.metrics,
+		foreground: screen.foreground,
+		background: screen.background,
+		palette: screen.palette,
+		emojiFamilies: fonts.emojiFamilies,
+		emojiAdvance: fonts.emojiAdvance,
+		header,
+		fontSize: options.fontSize,
+		lineHeight: options.lineHeight,
 	});
 	const width = Number(/width="(\d+)"/.exec(svg)?.[1] ?? 1);
 	const { Resvg } = await loadResvg();
@@ -559,8 +700,17 @@ export async function renderScreenPng(screen: CapturedScreen, options: RenderOpt
 
 /** Header text is masked like the screen: plain text through the same cell parser. */
 function maskHeader(header: ScreenHeader, secrets: readonly string[]): ScreenHeader {
-	const mask = (text: string) => maskSecrets([parseAnsiLine(text)], secrets)[0].map((cell) => cell.text).join("");
-	return { ...header, title: mask(header.title), badge: mask(header.badge), subtitle: mask(header.subtitle), caption: mask(header.caption) };
+	const mask = (text: string) =>
+		maskSecrets([parseAnsiLine(text)], secrets)[0]
+			.map((cell) => cell.text)
+			.join("");
+	return {
+		...header,
+		title: mask(header.title),
+		badge: mask(header.badge),
+		subtitle: mask(header.subtitle),
+		caption: mask(header.caption),
+	};
 }
 
 /** Blank lines at the top and bottom carry nothing. */

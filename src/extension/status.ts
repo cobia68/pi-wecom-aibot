@@ -26,7 +26,10 @@ export class WeComStatus {
 
 	update(ctx: StatusContext | undefined, connection: BridgeConnectionStatus | undefined): void {
 		const target = ctx?.mode === "tui" && ctx.hasUI ? ctx.ui : undefined;
-		if (!target || connection === undefined) { this.clear(); return; }
+		if (!target || connection === undefined) {
+			this.clear();
+			return;
+		}
 		let binding = this.binding;
 		if (!binding || binding.ui !== target) {
 			this.clear();
@@ -62,7 +65,10 @@ export class WeComStatus {
 		const binding = this.binding;
 		this.binding = undefined;
 		if (!binding) return;
-		try { binding.ui.setStatus(WECOM_STATUS_KEY, undefined); }
-		finally { binding.ui.setWidget(THEME_WIDGET_KEY, undefined); }
+		try {
+			binding.ui.setStatus(WECOM_STATUS_KEY, undefined);
+		} finally {
+			binding.ui.setWidget(THEME_WIDGET_KEY, undefined);
+		}
 	}
 }

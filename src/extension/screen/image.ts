@@ -3,9 +3,9 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GatewayNotification } from "../../shared/notification-types.ts";
 import { NOTIFICATION_ICONS, notificationHeader } from "../../shared/notification.ts";
-import { renderScreenPng, type CapturedScreen, type ScreenHeader } from "./render.ts";
+import type { GatewayNotification } from "../../shared/notification-types.ts";
+import { type CapturedScreen, renderScreenPng, type ScreenHeader } from "./render.ts";
 
 export interface ScreenImageOptions {
 	signal?: AbortSignal;
@@ -49,7 +49,10 @@ export async function prepareScreenImage(
 	try {
 		const screen = capture();
 		const png = await (options.render ?? renderScreenPng)(screen, {
-			secrets: options.secrets, header: screenImageHeader(notification), fontSize: 15, lineHeight: 1.45,
+			secrets: options.secrets,
+			header: screenImageHeader(notification),
+			fontSize: 15,
+			lineHeight: 1.45,
 		});
 		signal?.throwIfAborted();
 		const directory = options.directory ?? join(tmpdir(), "pi-wecom-aibot-images");
@@ -60,7 +63,8 @@ export async function prepareScreenImage(
 	} catch (error) {
 		signal?.throwIfAborted();
 		const reason = (error instanceof Error ? error.message : String(error))
-			.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 600);
+			.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+			.slice(0, 600);
 		options.warn?.(`图片生成失败：${reason}；已改发文字`);
 		return notification;
 	}

@@ -1,16 +1,39 @@
 /** One WeCom connection, with routing and membership independent of any pi process. */
 import { randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { formatProcessingStatus, MAX_NOTIFICATION_BYTES, quotedSessions, renderNotification, type ProcessingState } from "../shared/notification.ts";
-import type { GatewayImage, GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
-import { WeComClient, type WeComClientOptions, type WeComInbound } from "./wecom-client.ts";
 import { deliveryFailure } from "../shared/delivery.ts";
-import { parseInbound, senderOf, WECOM_IMAGE_MAX_BYTES, WECOM_IMAGE_MIN_BYTES, WECOM_REPLY_WINDOW_MS, WECOM_STREAM_LIFETIME_MS, type ChatRef, type InboundMessage } from "../shared/wecom-protocol.ts";
 import {
-	sameTarget, sessionTarget,
-	type BridgeResponse, type ChatIdentity, type GatewayCredentials, type GatewayRegistration, type GatewayStatus,
-	type ServerFrame, type SessionTarget, type TaskState,
+	type BridgeResponse,
+	type ChatIdentity,
+	type GatewayCredentials,
+	type GatewayRegistration,
+	type GatewayStatus,
+	type ServerFrame,
+	type SessionTarget,
+	sameTarget,
+	sessionTarget,
+	type TaskState,
 } from "../shared/gateway-protocol.ts";
+import {
+	formatProcessingStatus,
+	MAX_NOTIFICATION_BYTES,
+	type ProcessingState,
+	quotedSessions,
+	renderNotification,
+} from "../shared/notification.ts";
+import type { GatewayImage, GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
+import {
+	type ChatRef,
+	type InboundMessage,
+	parseInbound,
+	record,
+	senderOf,
+	WECOM_IMAGE_MAX_BYTES,
+	WECOM_IMAGE_MIN_BYTES,
+	WECOM_REPLY_WINDOW_MS,
+	WECOM_STREAM_LIFETIME_MS,
+} from "../shared/wecom-protocol.ts";
+import { WeComClient, type WeComClientOptions, type WeComInbound } from "./wecom-client.ts";
 
 const MAX_SESSIONS = 100;
 const MAX_TASKS = 10_000;
@@ -80,16 +103,27 @@ export class WeComGateway {
 		this.membershipChanged = membershipChanged;
 	}
 
-	get size(): number { return this.members.size; }
-	owns(instanceId: string, peer: GatewayPeer): boolean { return this.members.get(instanceId)?.peer === peer; }
+	get size(): number {
+		return this.members.size;
+	}
+	owns(instanceId: string, peer: GatewayPeer): boolean {
+		return this.members.get(instanceId)?.peer === peer;
+	}
 	/** Gateway-side diagnostics for pi's log; used when an IPC frame cannot be handled at all. */
-	log(message: string): void { this.broadcast({ type: "log", message }); }
+	log(message: string): void {
+		this.broadcast({ type: "log", message });
+	}
 
 	register(registration: GatewayRegistration, peer: GatewayPeer, resume = false): void {
-		if (registration.config.botId !== this.options.botId) throw new Error("共享网关的 BotID 与本 pi 不一致，请核对配置。");
-		const collision = [...this.members.values()].find((member) => member.source.sessionId === registration.source.sessionId && member.instanceId !== registration.instanceId);
+		if (registration.config.botId !== this.options.botId)
+			throw new Error("共享网关的 BotID 与本 pi 不一致，请核对配置。");
+		const collision = [...this.members.values()].find(
+			(member) =>
+				member.source.sessionId === registration.source.sessionId && member.instanceId !== registration.instanceId,
+		);
 		if (collision) throw new Error("该完整 session ID 已由另一个 pi 注册，请在当前窗口新建或切换会话。");
-		if (!this.members.has(registration.instanceId) && this.size >= MAX_SESSIONS) throw new Error("共享网关的在线会话已达上限。");
+		if (!this.members.has(registration.instanceId) && this.size >= MAX_SESSIONS)
+			throw new Error("共享网关的在线会话已达上限。");
 		const previous = this.members.get(registration.instanceId);
 		this.members.set(registration.instanceId, { ...registration, source: { ...registration.source }, peer });
 		// A whoami belongs to the connection that asked; the replaced one has already failed it.
@@ -101,7 +135,9 @@ export class WeComGateway {
 		if (!this.client) {
 			const { botId, secret, createWebSocket } = this.options;
 			this.client = new WeComClient({
-				botId, secret, createWebSocket,
+				botId,
+				secret,
+				createWebSocket,
 				onState: (state, detail) => {
 					this.status = { state, detail, sessions: this.size, ...(this.client?.stopped ? { stopped: true } : {}) };
 					if (state === "subscribed") this.flushUnsent();
@@ -132,7 +168,9 @@ export class WeComGateway {
 		member.source = { ...source };
 	}
 
-	resume(): void { this.client?.start(); }
+	resume(): void {
+		this.client?.start();
+	}
 
 	/** The next message this pi may receive reports its conversation instead of becoming a task. */
 	watch(instanceId: string, id: string, timeoutMs: number): void {
@@ -150,7 +188,10 @@ export class WeComGateway {
 		this.members.clear();
 		for (const request of this.requests.values()) clearTimeout(request.timer);
 		this.requests.clear();
-		for (const task of this.tasks.values()) { clearTimeout(task.deadline); clearTimeout(task.mergeTimer); }
+		for (const task of this.tasks.values()) {
+			clearTimeout(task.deadline);
+			clearTimeout(task.mergeTimer);
+		}
 		this.tasks.clear();
 		this.watches.clear();
 	}
@@ -185,15 +226,18 @@ export class WeComGateway {
 	async notify(instanceId: string, chat: ChatRef, notification: GatewayNotification): Promise<void> {
 		const member = this.members.get(instanceId);
 		if (!member || !this.client) throw new Error("pi 尚未注册");
-		if (notification.source.sessionId !== member.source.sessionId) throw new Error("通知的 session 与发送 pi 不匹配，已拒绝发送");
+		if (notification.source.sessionId !== member.source.sessionId)
+			throw new Error("通知的 session 与发送 pi 不匹配，已拒绝发送");
 		const content = renderNotification(notification.source, notification.text, {
-			kind: notification.kind, excerpt: notification.excerpt, aborted: notification.aborted,
+			kind: notification.kind,
+			excerpt: notification.excerpt,
+			aborted: notification.aborted,
 		});
 		// A task's own result replaces its status message: one message, tied to the person who asked.
 		// Only a text result can ride the stream; an image stays a separate message.
 		const awaiting = notification.kind === "reply" ? this.awaitingTask(member, chat) : undefined;
 		if (awaiting && !notification.image) {
-			const outcome = await this.finishWithResult(awaiting.taskId, awaiting.task, content);
+			const outcome = await this.finishWithResult(this.client, awaiting.taskId, awaiting.task, content);
 			if (outcome === "delivered" || outcome === "unknown") return;
 			// A rejected or unsent finish falls back to the push below; the status closes first.
 		}
@@ -210,7 +254,10 @@ export class WeComGateway {
 			}
 			if (mediaId) {
 				try {
-					await this.client.sendMsg(chat.chatId, chat.chatType, { msgtype: "image", image: { media_id: mediaId } });
+					await this.client.sendMsg(chat.chatId, chat.chatType, {
+						msgtype: "image",
+						image: { media_id: mediaId },
+					});
 					return;
 				} catch (error) {
 					// A rejection definitely did not deliver the image; an unknown ACK must not be duplicated.
@@ -222,8 +269,14 @@ export class WeComGateway {
 			const reason = failure?.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 200);
 			this.log(`图片通知改发文字：${reason ?? "未知原因"}`);
 			const note = `\n\n（图片发送失败${reason ? `：${reason}` : ""}，已改发文字）`;
-			const fallback = Buffer.byteLength(content, "utf8") + Buffer.byteLength(note, "utf8") <= MAX_NOTIFICATION_BYTES ? content + note : content;
-			await this.client.sendMsg(chat.chatId, chat.chatType, { msgtype: "markdown", markdown: { content: fallback } });
+			const fallback =
+				Buffer.byteLength(content, "utf8") + Buffer.byteLength(note, "utf8") <= MAX_NOTIFICATION_BYTES
+					? content + note
+					: content;
+			await this.client.sendMsg(chat.chatId, chat.chatType, {
+				msgtype: "markdown",
+				markdown: { content: fallback },
+			});
 			return;
 		}
 		await this.client.sendMsg(chat.chatId, chat.chatType, { msgtype: "markdown", markdown: { content } });
@@ -231,9 +284,15 @@ export class WeComGateway {
 
 	private stream(taskId: string, task: Task, state: ProcessingState): boolean {
 		const final = state !== "running";
-		const sent = this.client?.respondMsg(taskId, { msgtype: "stream", stream: {
-			id: task.streamId, finish: final, content: formatProcessingStatus(task.target.sessionId, state),
-		} }) ?? false;
+		const sent =
+			this.client?.respondMsg(taskId, {
+				msgtype: "stream",
+				stream: {
+					id: task.streamId,
+					finish: final,
+					content: formatProcessingStatus(task.target.sessionId, state),
+				},
+			}) ?? false;
 		if (state === "running" && sent) task.opened = true;
 		if (final) {
 			if (sent) this.closeTask(taskId);
@@ -254,12 +313,20 @@ export class WeComGateway {
 	}
 
 	/** Replace the status content with the result and wait for WeCom's acknowledgement. */
-	private async finishWithResult(taskId: string, task: Task, content: string): Promise<"delivered" | "not_sent" | "rejected" | "unknown"> {
+	private async finishWithResult(
+		client: WeComClient,
+		taskId: string,
+		task: Task,
+		content: string,
+	): Promise<"delivered" | "not_sent" | "rejected" | "unknown"> {
 		clearTimeout(task.mergeTimer);
 		task.mergeTimer = undefined;
 		task.awaitingResult = false;
 		try {
-			await this.client!.respondMsgAck(taskId, { msgtype: "stream", stream: { id: task.streamId, finish: true, content } });
+			await client.respondMsgAck(taskId, {
+				msgtype: "stream",
+				stream: { id: task.streamId, finish: true, content },
+			});
 			this.closeTask(taskId);
 			return "delivered";
 		} catch (error) {
@@ -279,7 +346,10 @@ export class WeComGateway {
 		task.mergeTimer = undefined;
 		if (!task.awaitingResult) return;
 		task.awaitingResult = false;
-		if (!task.opened) { this.closeTask(taskId); return; }
+		if (!task.opened) {
+			this.closeTask(taskId);
+			return;
+		}
 		this.stream(taskId, task, "settled");
 	}
 
@@ -289,9 +359,14 @@ export class WeComGateway {
 		if (!task) return;
 		task.deadline = undefined;
 		const state = task.unsent ?? "waiting";
-		this.client?.respondMsg(taskId, { msgtype: "stream", stream: {
-			id: task.streamId, finish: true, content: formatProcessingStatus(task.target.sessionId, state),
-		} });
+		this.client?.respondMsg(taskId, {
+			msgtype: "stream",
+			stream: {
+				id: task.streamId,
+				finish: true,
+				content: formatProcessingStatus(task.target.sessionId, state),
+			},
+		});
 		this.closeTask(taskId);
 	}
 
@@ -302,7 +377,8 @@ export class WeComGateway {
 	private track(taskId: string, task: Task): void {
 		this.closeTask(taskId);
 		this.tasks.set(taskId, task);
-		if (this.tasks.size > MAX_TASKS) this.closeTask(this.tasks.keys().next().value!);
+		const oldest = this.tasks.keys().next().value;
+		if (this.tasks.size > MAX_TASKS && oldest !== undefined) this.closeTask(oldest);
 	}
 
 	private closeTask(taskId: string): void {
@@ -318,8 +394,11 @@ export class WeComGateway {
 	}
 
 	private receive(action: () => void): void {
-		try { action(); }
-		catch (error) { this.log(`gateway inbound failed: ${errorMessage(error)}`); }
+		try {
+			action();
+		} catch (error) {
+			this.log(`gateway inbound failed: ${errorMessage(error)}`);
+		}
 	}
 
 	private broadcastStatus(): void {
@@ -328,7 +407,9 @@ export class WeComGateway {
 	}
 
 	private eligible(userid: string): Member[] {
-		return [...this.members.values()].filter((member) => !member.config.allowedUserIds?.length || member.config.allowedUserIds.includes(userid));
+		return [...this.members.values()].filter(
+			(member) => !member.config.allowedUserIds?.length || member.config.allowedUserIds.includes(userid),
+		);
 	}
 
 	private route(inbound: WeComInbound): void {
@@ -340,7 +421,8 @@ export class WeComGateway {
 		const id = message?.msgId || inbound.reqId;
 		if (this.seen.has(id)) return;
 		this.seen.add(id);
-		if (this.seen.size > 1000) this.seen.delete(this.seen.values().next().value!);
+		const oldest = this.seen.values().next().value;
+		if (this.seen.size > 1000 && oldest !== undefined) this.seen.delete(oldest);
 		if (!message) {
 			this.reply(inbound.reqId, "无法识别这条消息，请重新发送。");
 			return;
@@ -364,18 +446,31 @@ export class WeComGateway {
 			return;
 		}
 		if (target) {
-			if (!this.deliver(target, inbound.reqId, message)) this.reply(inbound.reqId, `${TARGET_GONE}\n\n${sessionsText(eligible, this.tasks)}`);
+			if (!this.deliver(target, inbound.reqId, message))
+				this.reply(inbound.reqId, `${TARGET_GONE}\n\n${sessionsText(eligible, this.tasks)}`);
 			return;
 		}
 		this.reply(inbound.reqId, GUIDANCE);
 	}
 
-	private command(command: Exclude<WeComCommand, { kind: "none" }>, reqId: string, message: InboundMessage, eligible: Member[]): void {
+	private command(
+		command: Exclude<WeComCommand, { kind: "none" }>,
+		reqId: string,
+		message: InboundMessage,
+		eligible: Member[],
+	): void {
 		switch (command.kind) {
-			case "help": this.reply(reqId, helpText(command.topic)); return;
-			case "error": this.reply(reqId, command.message); return;
-			case "sessions": this.reply(reqId, sessionsText(eligible, this.tasks)); return;
-			default: break;
+			case "help":
+				this.reply(reqId, helpText(command.topic));
+				return;
+			case "error":
+				this.reply(reqId, command.message);
+				return;
+			case "sessions":
+				this.reply(reqId, sessionsText(eligible, this.tasks));
+				return;
+			default:
+				break;
 		}
 		const target = eligible.find((member) => member.source.sessionId === command.sessionId);
 		if (!target) {
@@ -383,7 +478,8 @@ export class WeComGateway {
 			return;
 		}
 		if (command.kind === "send") {
-			if (!this.deliver(target, reqId, { ...message, text: command.prompt })) this.reply(reqId, `${TARGET_GONE}\n\n${sessionsText(eligible, this.tasks)}`);
+			if (!this.deliver(target, reqId, { ...message, text: command.prompt }))
+				this.reply(reqId, `${TARGET_GONE}\n\n${sessionsText(eligible, this.tasks)}`);
 			return;
 		}
 		this.request(command.kind, target, reqId, message.chat);
@@ -394,7 +490,10 @@ export class WeComGateway {
 		const id = randomUUID();
 		const timer = setTimeout(() => {
 			if (!this.requests.delete(id)) return;
-			this.reply(reqId, `目标会话未在 ${REQUEST_TIMEOUT_MS / 1000} 秒内响应，可用 /wecom-aibot sessions 确认它仍在线。`);
+			this.reply(
+				reqId,
+				`目标会话未在 ${REQUEST_TIMEOUT_MS / 1000} 秒内响应，可用 /wecom-aibot sessions 确认它仍在线。`,
+			);
 		}, REQUEST_TIMEOUT_MS);
 		this.requests.set(id, { reqId, chat, instanceId: target.instanceId, action, timer });
 		if (target.peer.send({ type: "request", id, request: { action, target: sessionTarget(target) } })) return;
@@ -410,7 +509,10 @@ export class WeComGateway {
 		clearTimeout(pending.timer);
 		this.requests.delete(id);
 		if (!response.ok) {
-			this.reply(pending.reqId, `${pending.action === "screen" ? "截图失败" : "中止请求未送达"}：${response.error ?? "未知原因"}`);
+			this.reply(
+				pending.reqId,
+				`${pending.action === "screen" ? "截图失败" : "中止请求未送达"}：${response.error ?? "未知原因"}`,
+			);
 			return;
 		}
 		if (pending.action === "cancel") {
@@ -421,20 +523,23 @@ export class WeComGateway {
 			this.reply(pending.reqId, "截图失败：目标会话没有返回图片。");
 			return;
 		}
-		void this.sendImage(pending.chat, response.image).then((sent) => {
-			if (!sent) this.reply(pending.reqId, "截图已生成，但图片发送失败；详情见 /wecom-aibot log。");
-		});
+		void this.sendImage(pending.chat, response.image)
+			.then((sent) => {
+				if (!sent) this.reply(pending.reqId, "截图已生成，但图片发送失败；详情见 /wecom-aibot log。");
+			})
+			.catch((error: unknown) => this.log(`截图发送失败：${errorMessage(error)}`));
 	}
 
 	private async sendImage(chat: ChatRef, image: GatewayImage): Promise<boolean> {
+		const client = this.client;
 		const read = readImage(image.path);
-		if (!read.data) {
+		if (!client || !read.data) {
 			this.log(`截图读取失败：${read.reason ?? "未知原因"}`);
 			return false;
 		}
 		try {
-			const mediaId = await this.client!.uploadImage(read.data, image.filename);
-			await this.client!.sendMsg(chat.chatId, chat.chatType, { msgtype: "image", image: { media_id: mediaId } });
+			const mediaId = await client.uploadImage(read.data, image.filename);
+			await client.sendMsg(chat.chatId, chat.chatType, { msgtype: "image", image: { media_id: mediaId } });
 			return true;
 		} catch (error) {
 			this.log(`截图发送失败：${errorMessage(error)}`);
@@ -444,16 +549,21 @@ export class WeComGateway {
 
 	private identify(watchers: Member[], reqId: string, identity: ChatIdentity): void {
 		for (const member of watchers) {
-			const watch = this.watches.get(member.instanceId)!;
+			const watch = this.watches.get(member.instanceId);
 			this.watches.delete(member.instanceId);
-			member.peer.send({ type: "identity", id: watch.id, identity });
+			if (watch) member.peer.send({ type: "identity", id: watch.id, identity });
 		}
 		this.reply(reqId, identityText(identity));
 	}
 
 	private deliver(target: Member, taskId: string, message: InboundMessage): boolean {
 		const targetId = sessionTarget(target);
-		this.track(taskId, { target: targetId, streamId: `pi-${randomUUID()}`, chat: { ...message.chat }, expiresAt: Date.now() + WECOM_REPLY_WINDOW_MS });
+		this.track(taskId, {
+			target: targetId,
+			streamId: `pi-${randomUUID()}`,
+			chat: { ...message.chat },
+			expiresAt: Date.now() + WECOM_REPLY_WINDOW_MS,
+		});
 		if (target.peer.send({ type: "task", target: targetId, task: { id: taskId, message } })) return true;
 		this.closeTask(taskId);
 		this.unregister(target.instanceId, target.peer);
@@ -462,11 +572,14 @@ export class WeComGateway {
 	}
 
 	private reply(reqId: string, content: string): void {
-		this.client?.respondMsg(reqId, { msgtype: "stream", stream: { id: `gateway-${randomUUID()}`, finish: true, content } });
+		this.client?.respondMsg(reqId, {
+			msgtype: "stream",
+			stream: { id: `gateway-${randomUUID()}`, finish: true, content },
+		});
 	}
 
 	private event(inbound: WeComInbound): void {
-		if (inbound.body?.event?.eventtype !== "disconnected_event") return;
+		if (record(record(inbound.body)?.event)?.eventtype !== "disconnected_event") return;
 		// Retain membership and each pi's queues. Only an explicit /wecom-aibot connect resumes.
 		this.client?.stop("机器人连接已被其他机器或旧客户端接管；可在任一 pi 执行 /wecom-aibot connect 恢复");
 	}
@@ -480,7 +593,7 @@ export class WeComGateway {
 
 const COMMAND_PREFIX = "/wecom-aibot";
 const SUBCOMMANDS = ["sessions", "send", "screen", "cancel"] as const;
-export type Subcommand = typeof SUBCOMMANDS[number];
+export type Subcommand = (typeof SUBCOMMANDS)[number];
 
 export type WeComCommand =
 	| { kind: "none" }
@@ -510,7 +623,8 @@ export function parseWeComCommand(text: string): WeComCommand {
 	const head = rest.split(/\s+/)[0];
 	const name = head.toLowerCase();
 	if (name === "--help") return { kind: "help" };
-	if (name.startsWith("-")) return { kind: "error", message: `未知选项 ${head}。可用子命令：${SUBCOMMANDS.join("、")}。` };
+	if (name.startsWith("-"))
+		return { kind: "error", message: `未知选项 ${head}。可用子命令：${SUBCOMMANDS.join("、")}。` };
 	const sub = SUBCOMMANDS.find((item) => item === name);
 	if (!sub) return { kind: "error", message: `未知子命令 ${head}。可用子命令：${SUBCOMMANDS.join("、")}。` };
 	const after = rest.slice(head.length).replace(/^\s+/, "");
@@ -524,7 +638,10 @@ export function parseWeComCommand(text: string): WeComCommand {
 		prompt = after.slice(cut + "--prompt".length).replace(/^\s+/, "");
 		// Only a real `--sessionid <id>` misplaced after --prompt is an error; prose may mention the option.
 		if (/(^|\s)--sessionid\s+[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?=\s|$)/i.test(prompt)) {
-			return { kind: "error", message: "--sessionid 必须写在 --prompt 之前。例如：/wecom-aibot send --sessionid <id> --prompt 检查构建" };
+			return {
+				kind: "error",
+				message: "--sessionid 必须写在 --prompt 之前。例如：/wecom-aibot send --sessionid <id> --prompt 检查构建",
+			};
 		}
 	}
 	const parsed = parseOptions(sub, optionText);
@@ -537,10 +654,14 @@ export function parseWeComCommand(text: string): WeComCommand {
 	}
 	if (!sessionId) {
 		const example = sub === "send" ? " --prompt 你的任务" : "";
-		return { kind: "error", message: `缺少 --sessionid。先发送 /wecom-aibot sessions 获取完整 session ID，例如：/wecom-aibot ${sub} --sessionid <id>${example}` };
+		return {
+			kind: "error",
+			message: `缺少 --sessionid。先发送 /wecom-aibot sessions 获取完整 session ID，例如：/wecom-aibot ${sub} --sessionid <id>${example}`,
+		};
 	}
 	if (sub === "send") {
-		if (prompt === undefined) return { kind: "error", message: "缺少 --prompt。例如：/wecom-aibot send --sessionid <id> --prompt 检查构建" };
+		if (prompt === undefined)
+			return { kind: "error", message: "缺少 --prompt。例如：/wecom-aibot send --sessionid <id> --prompt 检查构建" };
 		if (!prompt.trim()) return { kind: "error", message: "--prompt 之后要有正文。" };
 		return { kind: "send", sessionId, prompt };
 	}
@@ -662,7 +783,8 @@ function readImage(path: string): { data?: Buffer; reason?: string } {
 	try {
 		const stat = statSync(path);
 		if (!stat.isFile()) return { reason: "不是普通文件" };
-		if (stat.size < WECOM_IMAGE_MIN_BYTES || stat.size > WECOM_IMAGE_MAX_BYTES) return { reason: `文件大小 ${stat.size} 字节超出限制` };
+		if (stat.size < WECOM_IMAGE_MIN_BYTES || stat.size > WECOM_IMAGE_MAX_BYTES)
+			return { reason: `文件大小 ${stat.size} 字节超出限制` };
 		return { data: readFileSync(path) };
 	} catch (error) {
 		return { reason: errorMessage(error) };
@@ -680,5 +802,8 @@ function identityText(identity: ChatIdentity): string {
 }
 
 function display(value: string): string {
-	return [...value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")].slice(0, 60).join("").replace(/[\\`*_#\[\]<>]/g, "\\$&");
+	return [...value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")]
+		.slice(0, 60)
+		.join("")
+		.replace(/[\\`*_#[\]<>]/g, "\\$&");
 }

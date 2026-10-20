@@ -4,18 +4,37 @@ import { createConnection, type Socket } from "node:net";
 import { basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DeliveryError } from "../shared/delivery.ts";
-import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
-import type { WeComConfig } from "./config.ts";
-import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 import {
-	GATEWAY_PROTOCOL_VERSION, GATEWAY_RETRY_MS, IPC_HEARTBEAT_MS, IPC_LEASE_MS, IPC_SEND_TIMEOUT_MS,
-	gatewayEndpoint, gatewayProof, parseServerFrame, readFrames, sameTarget, sessionTarget, verifyProof, writeFrame,
-	type BridgeClient, type BridgeRequest, type BridgeResponse, type ChatIdentity, type GatewayCredentials,
-	type GatewayRegistration, type GatewayStatus, type GatewayTask, type TaskState,
+	type BridgeClient,
+	type BridgeRequest,
+	type BridgeResponse,
+	type ChatIdentity,
+	GATEWAY_PROTOCOL_VERSION,
+	GATEWAY_RETRY_MS,
+	type GatewayCredentials,
+	type GatewayRegistration,
+	type GatewayStatus,
+	type GatewayTask,
+	gatewayEndpoint,
+	gatewayProof,
+	IPC_HEARTBEAT_MS,
+	IPC_LEASE_MS,
+	IPC_SEND_TIMEOUT_MS,
+	parseServerFrame,
+	readFrames,
+	sameTarget,
+	sessionTarget,
+	type TaskState,
+	verifyProof,
+	writeFrame,
 } from "../shared/gateway-protocol.ts";
+import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
+import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
+import type { WeComConfig } from "./config.ts";
 
-const AUTH_FAILED = "共享网关认证失败：本机运行中的网关使用不同的 BotID/Secret 或插件版本。"
-	+ "请在仍用旧配置的 pi 中运行 /wecom-aibot connect 或 /wecom-aibot disconnect，再在这里运行 /wecom-aibot connect。";
+const AUTH_FAILED =
+	"共享网关认证失败：本机运行中的网关使用不同的 BotID/Secret 或插件版本。" +
+	"请在仍用旧配置的 pi 中运行 /wecom-aibot connect 或 /wecom-aibot disconnect，再在这里运行 /wecom-aibot connect。";
 
 export interface GatewayClientOptions {
 	config: WeComConfig;
@@ -52,7 +71,10 @@ export class GatewayClient implements BridgeClient {
 	private lastReceived = 0;
 	/** Since when an incompatible gateway has held the endpoint, and which kind. */
 	private blocked: { since: number; message: string } | undefined;
-	private readonly pending = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+	private readonly pending = new Map<
+		string,
+		{ resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
+	>();
 	private readonly watches = new Map<string, (error?: Error, identity?: ChatIdentity) => void>();
 
 	constructor(options: GatewayClientOptions) {
@@ -61,7 +83,9 @@ export class GatewayClient implements BridgeClient {
 		this.credentials = { botId, secret };
 		this.registration = {
 			config: { botId, ...(allowedUserIds ? { allowedUserIds: [...allowedUserIds] } : {}) },
-			source: { ...options.source }, instanceId: options.instanceId ?? randomUUID(), registrationId: randomUUID(),
+			source: { ...options.source },
+			instanceId: options.instanceId ?? randomUUID(),
+			registrationId: randomUUID(),
 		};
 		this.endpoint = gatewayEndpoint(botId);
 	}
@@ -102,7 +126,16 @@ export class GatewayClient implements BridgeClient {
 		this.setState("disconnected", reason);
 	}
 
-	isReady(): boolean { return this.registered && this.state === "subscribed" && !!this.socket && !this.socket.destroyed && this.socket.writable && !this.socket.writableEnded; }
+	isReady(): boolean {
+		return (
+			this.registered &&
+			this.state === "subscribed" &&
+			!!this.socket &&
+			!this.socket.destroyed &&
+			this.socket.writable &&
+			!this.socket.writableEnded
+		);
+	}
 
 	updateSource(source: NotificationSource): void {
 		if (source.sessionId !== this.registration.source.sessionId) throw new Error("session 已改变，必须重新注册网关");
@@ -124,7 +157,10 @@ export class GatewayClient implements BridgeClient {
 		if (!this.isReady()) return Promise.reject(new DeliveryError("共享网关或企微连接未就绪", "not_sent"));
 		return new Promise((resolve, reject) => {
 			const id = randomUUID();
-			const timer = setTimeout(() => { this.pending.delete(id); reject(new DeliveryError("网关通知确认超时，发送结果未知")); }, IPC_SEND_TIMEOUT_MS);
+			const timer = setTimeout(() => {
+				this.pending.delete(id);
+				reject(new DeliveryError("网关通知确认超时，发送结果未知"));
+			}, IPC_SEND_TIMEOUT_MS);
 			this.pending.set(id, { resolve, reject, timer });
 			if (!writeFrame(this.socket!, { type: "notify", id, chat, notification })) {
 				clearTimeout(timer);
@@ -148,13 +184,19 @@ export class GatewayClient implements BridgeClient {
 					// Release the gateway's hold so a later message is routed normally again.
 					if (this.registered && this.socket) writeFrame(this.socket, { type: "unwatch", id });
 					reject(error);
-				} else resolve(identity!);
+				} else if (identity) resolve(identity);
+				else reject(new Error("网关没有返回会话标识"));
 			};
 			const onAbort = () => finish(named("AbortError", "whoami 已取消"));
-			const timer = setTimeout(() => finish(named("TimeoutError", `${Math.round(timeoutMs / 1000)} 秒内没有收到可识别的消息`)), timeoutMs);
+			const timer = setTimeout(
+				() => finish(named("TimeoutError", `${Math.round(timeoutMs / 1000)} 秒内没有收到可识别的消息`)),
+				timeoutMs,
+			);
 			this.watches.set(id, finish);
 			signal?.addEventListener("abort", onAbort, { once: true });
-			if (!writeFrame(this.socket!, { type: "watch", id, timeoutMs })) finish(new Error("网关连接已断开，whoami 未开始"));
+			const socket = this.socket;
+			if (!socket || !writeFrame(socket, { type: "watch", id, timeoutMs }))
+				finish(new Error("网关连接已断开，whoami 未开始"));
 		});
 	}
 
@@ -183,87 +225,119 @@ export class GatewayClient implements BridgeClient {
 			this.setState("disconnected", rejected ? "共享网关认证失败，等待旧网关退出后重试" : "本机共享网关连接已断开");
 			if (missing && Date.now() >= this.nextLaunchAt) {
 				this.nextLaunchAt = Date.now() + 5000;
-				void this.launch();
+				this.launch();
 			}
 			this.retry();
 		});
 		// The client speaks first; the gateway proves the Secret over this nonce before it learns anything.
 		socket.once("connect", () => writeFrame(socket, { type: "hello", version: GATEWAY_PROTOCOL_VERSION, nonce }));
-		readFrames(socket, (value) => {
-			if (this.socket !== socket || this.stopped) return;
-			this.lastReceived = Date.now();
-			const parsed = parseServerFrame(value);
-			if (!parsed.ok) {
-				this.options.log?.(`共享网关发送了无效数据：${parsed.reason}`);
-				// Before the handshake an unreadable frame means an incompatible gateway; later frames are
-				// independent, so drop only the one that cannot be trusted and keep the connection.
-				if (!handshake) { rejected = true; socket.destroy(); }
-				return;
-			}
-			const frame = parsed.frame;
-			if (!handshake) {
-				if (frame.type !== "hello" || frame.version !== GATEWAY_PROTOCOL_VERSION || frame.endpoint !== this.endpoint
-					|| !verifyProof(frame.proof, gatewayProof(this.credentials.secret, "server", frame.nonce, nonce, this.endpoint))) {
-					// Not final: the close handler retries until the retry window has passed.
-					rejected = true;
-					socket.destroy();
+		readFrames(
+			socket,
+			(value) => {
+				if (this.socket !== socket || this.stopped) return;
+				this.lastReceived = Date.now();
+				const parsed = parseServerFrame(value);
+				if (!parsed.ok) {
+					this.options.log?.(`共享网关发送了无效数据：${parsed.reason}`);
+					// Before the handshake an unreadable frame means an incompatible gateway; later frames are
+					// independent, so drop only the one that cannot be trusted and keep the connection.
+					if (!handshake) {
+						rejected = true;
+						socket.destroy();
+					}
 					return;
 				}
-				handshake = true;
-				this.blocked = undefined;
-				// Credentials reach a new daemon only through the private bootstrap pipe.
-				writeFrame(socket, { type: "register", registration: this.registration, resume: this.resumeRequested,
-					proof: gatewayProof(this.credentials.secret, "client", frame.nonce, nonce, this.endpoint) });
-				return;
-			}
-			if (frame.type === "fatal") { this.fail(frame.message); return; }
-			if (frame.type === "registered") {
-				if (this.registered) { this.fail("重复的网关注册响应"); return; }
-				this.registered = true;
-				this.attempts = 0;
-				writeFrame(socket, { type: "source", source: this.registration.source });
-				socket.setTimeout(0);
-				this.heartbeat = setInterval(() => {
-					if (Date.now() - this.lastReceived > IPC_LEASE_MS) socket.destroy();
-					else writeFrame(socket, { type: "ping" });
-				}, IPC_HEARTBEAT_MS);
-				this.heartbeat.unref();
-				this.status(frame.status);
-				return;
-			}
-			if (!this.registered) { this.fail("网关在注册确认前发送了消息"); return; }
-			switch (frame.type) {
-				case "status": this.status(frame.status); return;
-				case "pong": return;
-				case "log": this.options.log?.(frame.message); return;
-				case "request":
-					this.options.onRequest?.(frame.id, frame.request);
-					return;
-				case "task":
-					if (!sameTarget(frame.target, sessionTarget(this.registration))) {
-						this.options.log?.("rejected inbound task for a different pi/session registration");
+				const frame = parsed.frame;
+				if (!handshake) {
+					if (
+						frame.type !== "hello" ||
+						frame.version !== GATEWAY_PROTOCOL_VERSION ||
+						frame.endpoint !== this.endpoint ||
+						!verifyProof(
+							frame.proof,
+							gatewayProof(this.credentials.secret, "server", frame.nonce, nonce, this.endpoint),
+						)
+					) {
+						// Not final: the close handler retries until the retry window has passed.
+						rejected = true;
+						socket.destroy();
 						return;
 					}
-					this.options.onTask?.(frame.task);
-					return;
-				case "result": {
-					const pending = this.pending.get(frame.id);
-					if (!pending) return;
-					this.pending.delete(frame.id);
-					clearTimeout(pending.timer);
-					if (frame.error) pending.reject(new DeliveryError(frame.error, frame.outcome));
-					else pending.resolve();
-					return;
-				}
-				case "identity": {
-					this.watches.get(frame.id)?.(undefined, frame.identity);
+					handshake = true;
+					this.blocked = undefined;
+					// Credentials reach a new daemon only through the private bootstrap pipe.
+					writeFrame(socket, {
+						type: "register",
+						registration: this.registration,
+						resume: this.resumeRequested,
+						proof: gatewayProof(this.credentials.secret, "client", frame.nonce, nonce, this.endpoint),
+					});
 					return;
 				}
-			}
-		}, (error) => {
-			// A handler bug must reach pi's log; otherwise it becomes a silent reconnect loop.
-			this.options.log?.(`共享网关数据未处理：${error instanceof Error ? error.message : String(error)}`);
-		});
+				if (frame.type === "fatal") {
+					this.fail(frame.message);
+					return;
+				}
+				if (frame.type === "registered") {
+					if (this.registered) {
+						this.fail("重复的网关注册响应");
+						return;
+					}
+					this.registered = true;
+					this.attempts = 0;
+					writeFrame(socket, { type: "source", source: this.registration.source });
+					socket.setTimeout(0);
+					this.heartbeat = setInterval(() => {
+						if (Date.now() - this.lastReceived > IPC_LEASE_MS) socket.destroy();
+						else writeFrame(socket, { type: "ping" });
+					}, IPC_HEARTBEAT_MS);
+					this.heartbeat.unref();
+					this.status(frame.status);
+					return;
+				}
+				if (!this.registered) {
+					this.fail("网关在注册确认前发送了消息");
+					return;
+				}
+				switch (frame.type) {
+					case "status":
+						this.status(frame.status);
+						return;
+					case "pong":
+						return;
+					case "log":
+						this.options.log?.(frame.message);
+						return;
+					case "request":
+						this.options.onRequest?.(frame.id, frame.request);
+						return;
+					case "task":
+						if (!sameTarget(frame.target, sessionTarget(this.registration))) {
+							this.options.log?.("rejected inbound task for a different pi/session registration");
+							return;
+						}
+						this.options.onTask?.(frame.task);
+						return;
+					case "result": {
+						const pending = this.pending.get(frame.id);
+						if (!pending) return;
+						this.pending.delete(frame.id);
+						clearTimeout(pending.timer);
+						if (frame.error) pending.reject(new DeliveryError(frame.error, frame.outcome));
+						else pending.resolve();
+						return;
+					}
+					case "identity": {
+						this.watches.get(frame.id)?.(undefined, frame.identity);
+						return;
+					}
+				}
+			},
+			(error) => {
+				// A handler bug must reach pi's log; otherwise it becomes a silent reconnect loop.
+				this.options.log?.(`共享网关数据未处理：${error instanceof Error ? error.message : String(error)}`);
+			},
+		);
 	}
 
 	/**
@@ -280,7 +354,10 @@ export class GatewayClient implements BridgeClient {
 	private retry(): void {
 		if (this.stopped || this.retryTimer) return;
 		const delay = Math.min(2000, 100 * 2 ** Math.min(this.attempts++, 5));
-		this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.connect(); }, delay);
+		this.retryTimer = setTimeout(() => {
+			this.retryTimer = undefined;
+			this.connect();
+		}, delay);
 		this.retryTimer.unref();
 	}
 
@@ -290,7 +367,9 @@ export class GatewayClient implements BridgeClient {
 		try {
 			if (this.options.launch) this.options.launch(this.endpoint, this.credentials);
 			else launchGateway(this.endpoint, this.credentials, this.options.log);
-		} catch (error) { this.options.log?.(`gateway launch failed: ${String(error)}`); }
+		} catch (error) {
+			this.options.log?.(`gateway launch failed: ${String(error)}`);
+		}
 	}
 
 	private status(status: GatewayStatus): void {
@@ -313,7 +392,10 @@ export class GatewayClient implements BridgeClient {
 	}
 
 	private rejectAll(reason: string): void {
-		for (const request of this.pending.values()) { clearTimeout(request.timer); request.reject(new DeliveryError(reason)); }
+		for (const request of this.pending.values()) {
+			clearTimeout(request.timer);
+			request.reject(new DeliveryError(reason));
+		}
 		this.pending.clear();
 		// The gateway forgets a closed connection's whoami, so the local wait ends too.
 		for (const finish of [...this.watches.values()]) finish(new Error(`连接已断开：${reason}`));
@@ -324,23 +406,45 @@ function named(name: "AbortError" | "TimeoutError", message: string): Error {
 	return Object.assign(new Error(message), { name });
 }
 
-export function launchGateway(endpoint: string, credentials: GatewayCredentials, log?: (message: string) => void): void {
+interface Unrefable {
+	unref(): void;
+}
+
+function isUnrefable(value: object): value is object & Unrefable {
+	return "unref" in value && typeof value.unref === "function";
+}
+
+export function launchGateway(
+	endpoint: string,
+	credentials: GatewayCredentials,
+	log?: (message: string) => void,
+): void {
 	const entry = fileURLToPath(new URL("../gateway/main.mjs", import.meta.url));
 	const executable = /^node(?:\.exe)?$/i.test(basename(process.execPath)) ? process.execPath : "node";
-	const child = spawn(executable, [entry], { cwd: dirname(entry), detached: true, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+	const child = spawn(executable, [entry], {
+		cwd: dirname(entry),
+		detached: true,
+		windowsHide: true,
+		stdio: ["pipe", "ignore", "pipe"],
+	});
 	// A failed startup must name its reason: keep the last lines of the daemon's stderr until it exits.
 	let stderr = "";
-	if (child.stderr) {
-		child.stderr.setEncoding("utf8");
-		child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-2_000); });
+	const diagnostic = child.stderr;
+	if (diagnostic) {
+		diagnostic.setEncoding("utf8");
+		diagnostic.on("data", (chunk: string) => {
+			stderr = (stderr + chunk).slice(-2_000);
+		});
 		// The daemon outlives pi: its diagnostic pipe must not hold pi's event loop open.
-		(child.stderr as unknown as { unref(): void }).unref();
+		if (isUnrefable(diagnostic)) diagnostic.unref();
 	}
 	// A short private pipe bootstraps credentials without files, environment variables or argv.
 	child.on("error", (error) => log?.(`gateway launch failed: ${error.message}`));
 	child.on("exit", (code, signal) => {
 		if (!code && !signal) return;
-		log?.(`gateway process exited (${code ?? signal})${stderr.trim() ? `：${stderr.trim()}` : "；check Node.js and runtime dependencies"}`);
+		log?.(
+			`gateway process exited (${code ?? signal})${stderr.trim() ? `：${stderr.trim()}` : "；check Node.js and runtime dependencies"}`,
+		);
 	});
 	child.stdin.on("error", () => {});
 	child.stdin.end(JSON.stringify({ endpoint, credentials: { botId: credentials.botId, secret: credentials.secret } }));

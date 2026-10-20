@@ -46,18 +46,24 @@ export function loadConfig(): WeComConfig | undefined {
  * so a /wecom-aibot logout in another window is not undone. `expected` binds a delayed
  * interaction (e.g. whoami confirmation) to the credentials it started with.
  */
-export function updateConfig(patch: Partial<WeComConfig>, expected?: Pick<WeComConfig, "botId" | "secret">): WeComConfig {
+export function updateConfig(
+	patch: Partial<WeComConfig>,
+	expected?: Pick<WeComConfig, "botId" | "secret">,
+): WeComConfig {
 	let found: { file: string; value: unknown } | undefined;
 	try {
 		found = readConfigFile();
 	} catch (error) {
 		throw new Error(`${errMsg(error)}；请修正或删除该文件后重试。`);
 	}
-	const current = found?.value as Partial<WeComConfig> | undefined;
+	// Compare validated values, and keep unknown fields by spreading the raw object into the write.
+	const current = found ? normalize(found.value, found.file) : undefined;
 	if (expected && (current?.botId !== expected.botId || current?.secret !== expected.secret)) {
-		throw new Error("机器人配置已改变或配置已删除，默认推送目标未保存；请运行 /wecom-aibot connect 后重新 /wecom-aibot whoami。");
+		throw new Error(
+			"机器人配置已改变或配置已删除，默认推送目标未保存；请运行 /wecom-aibot connect 后重新 /wecom-aibot whoami。",
+		);
 	}
-	const next = { ...DEFAULTS, ...current, ...patch };
+	const next = { ...DEFAULTS, ...(found ? objectValue(found.value) : undefined), ...patch };
 	const config = normalize(next, found?.file ?? CONFIG_FILE);
 	if (!config) throw new Error("尚未配置，请先运行 /wecom-aibot setup");
 	writeConfigFile(next);
@@ -79,8 +85,11 @@ function readConfigFile(): { file: string; value: unknown } | undefined {
 	const found = readConfigText();
 	if (!found) return undefined;
 	let value: unknown;
-	try { value = JSON.parse(found.text); }
-	catch (error) { throw new Error(`${found.file} 不是有效的 JSON：${errMsg(error)}`); }
+	try {
+		value = JSON.parse(found.text);
+	} catch (error) {
+		throw new Error(`${found.file} 不是有效的 JSON：${errMsg(error)}`);
+	}
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${found.file} 不是 JSON 对象`);
 	return { file: found.file, value };
 }
@@ -90,7 +99,8 @@ function readConfigText(): { file: string; text: string } | undefined {
 	try {
 		return { file, text: readFileSync(file, "utf8") };
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`无法读取配置文件 ${file}：${errMsg(error)}`);
+		if (!isErrnoException(error) || error.code !== "ENOENT")
+			throw new Error(`无法读取配置文件 ${file}：${errMsg(error)}`);
 		return undefined;
 	}
 }
@@ -101,8 +111,8 @@ function readConfigText(): { file: string; text: string } | undefined {
  */
 function normalize(value: unknown, file: string): WeComConfig | undefined {
 	if (value === undefined) return undefined;
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`配置文件 ${file} 的内容无效：必须是 JSON 对象`);
-	const parsed = value as Record<string, unknown>;
+	const parsed = objectValue(value);
+	if (!parsed) throw new Error(`配置文件 ${file} 的内容无效：必须是 JSON 对象`);
 	const text = (name: string): string | undefined => {
 		const raw = parsed[name];
 		if (raw === undefined) return undefined;
@@ -122,21 +132,35 @@ function normalize(value: unknown, file: string): WeComConfig | undefined {
 		throw new Error(`配置文件 ${file} 的字段 sendMode 无效：必须是 "text" 或 "image"`);
 	}
 	const allowed = parsed.allowedUserIds;
-	if (allowed !== undefined && (!Array.isArray(allowed) || allowed.some((id) => typeof id !== "string" || !id.trim()))) {
+	if (
+		allowed !== undefined &&
+		(!Array.isArray(allowed) || allowed.some((id) => typeof id !== "string" || !id.trim()))
+	) {
 		throw new Error(`配置文件 ${file} 的字段 allowedUserIds 无效：必须是 userid 字符串组成的数组`);
 	}
 	return {
 		botId,
 		secret,
-		allowedUserIds: allowed as string[] | undefined,
+		allowedUserIds: Array.isArray(allowed) ? allowed.filter((id): id is string => typeof id === "string") : undefined,
 		defaultChatId: text("defaultChatId")?.trim() || undefined,
-		defaultChatType: chatType as 1 | 2 | undefined,
-		sendMode: (sendMode as SendMode | undefined) ?? "text",
+		defaultChatType: chatType === 1 || chatType === 2 ? chatType : undefined,
+		sendMode: sendMode === "image" ? "image" : "text",
 	};
 }
 
 function errMsg(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** A JSON object from disk; the shape is validated by normalize(), this only narrows the container. */
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
+	return error instanceof Error && "code" in error;
 }
 
 /** Write a private temporary file and rename it over the target: a reader never sees a partial file. */
@@ -145,7 +169,11 @@ function writeConfigFile(value: object): void {
 	mkdirSync(dirname(CONFIG_FILE), { recursive: true });
 	let target = CONFIG_FILE;
 	// A symlinked configuration stays a symlink: replace the file it points to.
-	try { target = realpathSync(CONFIG_FILE); } catch { /* not created yet */ }
+	try {
+		target = realpathSync(CONFIG_FILE);
+	} catch {
+		/* not created yet */
+	}
 	const temporary = `${target}.${randomUUID()}.tmp`;
 	try {
 		writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });

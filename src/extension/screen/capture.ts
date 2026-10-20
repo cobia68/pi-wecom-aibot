@@ -5,7 +5,7 @@
  * when it changes; never fall back to rendering the whole TUI (which would expose editor drafts).
  */
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { colorToHex, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { type Component, colorToHex, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { CapturedScreen } from "./render.ts";
 
 const WIDGET_KEY = "wecom-screen-capture";
@@ -15,38 +15,71 @@ type ScreenRoot = Pick<TUI, "children" | "terminal" | "hasOverlay">;
 
 function childrenOf(component: Component | undefined): Component[] | undefined {
 	const value = (component as { children?: unknown } | undefined)?.children;
-	return Array.isArray(value) && value.every((child) => child && typeof child.render === "function") ? value : undefined;
+	return Array.isArray(value) && value.every((child) => child && typeof child.render === "function")
+		? value
+		: undefined;
 }
 
 /** Snapshot the latest visible content above the editor, without changing focus or scroll position. */
 export function captureScreen(root: ScreenRoot, marker: Component, theme: Theme): CapturedScreen {
 	const children = root.children;
-	if (!Array.isArray(children) || children.length !== 7 || !children.every((child) => childrenOf(child))
-		|| childrenOf(children[0])?.length !== 3 || !childrenOf(children[3])?.includes(marker)) {
+	if (
+		!Array.isArray(children) ||
+		children.length !== 7 ||
+		!children.every((child) => childrenOf(child)) ||
+		childrenOf(children[0])?.length !== 3 ||
+		!childrenOf(children[3])?.includes(marker)
+	) {
 		throw new Error(LAYOUT_ERROR);
 	}
 	if (root.hasOverlay()) throw new Error("当前有终端弹窗，请关闭弹窗后再发送屏幕图片");
 	const { columns, rows } = root.terminal;
-	if (!Number.isInteger(columns) || columns < 1 || columns > 500 || !Number.isInteger(rows) || rows < 1 || rows > 300) {
+	if (
+		!Number.isInteger(columns) ||
+		columns < 1 ||
+		columns > 500 ||
+		!Number.isInteger(rows) ||
+		rows < 1 ||
+		rows > 300
+	) {
 		throw new Error("终端尺寸不可用或过大（最多 500 列、300 行），请调整窗口后重试");
 	}
 	// Only measure the input/footer area; none of its text enters the snapshot.
 	const excludedRows = children.slice(4).reduce((sum, child) => sum + child.render(columns).length, 0);
 	const available = rows - excludedRows;
 	if (available <= 0) throw new Error("终端太矮，编辑框以上没有可见内容，请增大窗口后重试");
-	const lines = children.slice(0, 4).flatMap((child) => child.render(columns)).slice(-available)
+	const lines = children
+		.slice(0, 4)
+		.flatMap((child) => child.render(columns))
+		.slice(-available)
 		.map((line) => truncateToWidth(line, columns, ""));
 	// For terminal-default tokens, theme.colors resolves the terminal's reported colour (or pi's
 	// own fallback). If every background token is explicit, use the theme's light/dark fallback.
-	const backgroundToken = (["selectedBg", "searchMatchBg", "userMessageBg", "customMessageBg", "toolPendingBg", "toolSuccessBg", "toolErrorBg"] as const)
-		.find((token) => theme.getBgAnsi(token) === "\x1b[49m");
+	const backgroundToken = (
+		[
+			"selectedBg",
+			"searchMatchBg",
+			"userMessageBg",
+			"customMessageBg",
+			"toolPendingBg",
+			"toolSuccessBg",
+			"toolErrorBg",
+		] as const
+	).find((token) => theme.getBgAnsi(token) === "\x1b[49m");
 	return {
-		lines, columns,
+		lines,
+		columns,
 		foreground: colorToHex(theme.colors.text),
-		background: backgroundToken ? colorToHex(theme.colors[backgroundToken]) : theme.appearance === "light" ? "#ffffff" : "#000000",
+		background: backgroundToken
+			? colorToHex(theme.colors[backgroundToken])
+			: theme.appearance === "light"
+				? "#ffffff"
+				: "#000000",
 		palette: {
-			accent: colorToHex(theme.colors.accent), muted: colorToHex(theme.colors.muted),
-			dim: colorToHex(theme.colors.dim), warning: colorToHex(theme.colors.warning),
+			accent: colorToHex(theme.colors.accent),
+			muted: colorToHex(theme.colors.muted),
+			dim: colorToHex(theme.colors.dim),
+			warning: colorToHex(theme.colors.warning),
 		},
 	};
 }
@@ -59,10 +92,12 @@ export class ScreenCapture {
 		this.dispose();
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setWidget(WIDGET_KEY, (root) => {
-			const marker = {
-				render: () => [] as string[],
+			const marker: Component & { dispose(): void } = {
+				render: (): string[] => [],
 				invalidate() {},
-				dispose: () => { if (this.binding?.marker === marker) this.binding = undefined; },
+				dispose: () => {
+					if (this.binding?.marker === marker) this.binding = undefined;
+				},
 			};
 			this.binding = { root, marker, ctx, sessionId: ctx.sessionManager.getSessionId() };
 			return marker;

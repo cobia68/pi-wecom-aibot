@@ -4,24 +4,37 @@
  * ignores everything that arrives late; nothing of it can reach the next one.
  */
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import type { ExtensionContext, MessageEndEvent, MessageStartEvent, MessageUpdateEvent } from "@earendil-works/pi-coding-agent";
-import { NotificationOutbox, removeNotificationImage, type CompletionRequest } from "./notification-outbox.ts";
-import type { WeComConfig } from "./config.ts";
-import type { GatewayClientOptions } from "./gateway-client.ts";
-import type { BridgeClient, BridgeRequest as GatewayRequest, BridgeResponse, ChatIdentity, GatewayTask, TaskState } from "../shared/gateway-protocol.ts";
-import { InboundContentPreparer, type PreparedInboundContent } from "./inbound/content.ts";
-import { ConnectionNotices, type BridgeConnectionStatus } from "./connection-notices.ts";
-import { assistantReplyText, captureModelIdentity, captureNotificationSource } from "./notification-source.ts";
+import type {
+	ExtensionContext,
+	MessageEndEvent,
+	MessageStartEvent,
+	MessageUpdateEvent,
+} from "@earendil-works/pi-coding-agent";
+import type {
+	BridgeClient,
+	BridgeResponse,
+	ChatIdentity,
+	BridgeRequest as GatewayRequest,
+	GatewayTask,
+	TaskState,
+} from "../shared/gateway-protocol.ts";
 import { NO_REPLY_TEXT } from "../shared/notification.ts";
 import type { GatewayImage, GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
+import type { WeComConfig } from "./config.ts";
+import { type BridgeConnectionStatus, ConnectionNotices } from "./connection-notices.ts";
+import type { GatewayClientOptions } from "./gateway-client.ts";
+import { InboundContentPreparer, type PreparedInboundContent } from "./inbound/content.ts";
+import { type CompletionRequest, NotificationOutbox, removeNotificationImage } from "./notification-outbox.ts";
+import { assistantReplyText, captureModelIdentity, captureNotificationSource } from "./notification-source.ts";
 
 /** WeCom messages accepted but not yet handed to pi: a bounded FIFO. */
 const MAX_QUEUE_SIZE = 50;
 const CONNECT_WAIT_MS = 30_000;
 /** pi refuses a prompt without telling extensions; only an idle session proves no run is coming. */
 const DISPATCH_CHECK_MS = 5_000;
-const DISPATCH_REJECTED = "pi 没有接受这条企微任务（可能未选择模型、缺少 API key、登录已过期或正在压缩），请在 pi 中处理后重新发送。";
+const DISPATCH_REJECTED =
+	"pi 没有接受这条企微任务（可能未选择模型、缺少 API key、登录已过期或正在压缩），请在 pi 中处理后重新发送。";
 
 /** A WeCom message accepted by this pi; its status message belongs to the gateway. */
 interface BridgeRequest {
@@ -53,7 +66,11 @@ export interface BridgeHost {
 	/** The owner may update its display; late updates must not affect a replacement session. */
 	connectionChanged?(session: BridgeSession): void;
 	/** Render this notification as a screen image; failures return the Markdown fallback. */
-	prepareImage(notification: GatewayNotification, ctx: ExtensionContext, signal: AbortSignal): Promise<GatewayNotification>;
+	prepareImage(
+		notification: GatewayNotification,
+		ctx: ExtensionContext,
+		signal: AbortSignal,
+	): Promise<GatewayNotification>;
 	/** A screen request: capture now, without starting a turn. */
 	captureScreen(ctx: ExtensionContext, signal: AbortSignal): Promise<GatewayImage | undefined>;
 	/** Abort the agent operation currently running in this session. */
@@ -96,7 +113,13 @@ export class BridgeSession {
 	private subscription = 0;
 	private readonly notices: ConnectionNotices;
 
-	constructor(host: BridgeHost, config: WeComConfig, ctx: ExtensionContext, createClient: (options: GatewayClientOptions) => BridgeClient, instanceId: string) {
+	constructor(
+		host: BridgeHost,
+		config: WeComConfig,
+		ctx: ExtensionContext,
+		createClient: (options: GatewayClientOptions) => BridgeClient,
+		instanceId: string,
+	) {
 		this.host = host;
 		this.config = config;
 		this.notices = new ConnectionNotices((message, type) => host.notify(message, type));
@@ -137,13 +160,25 @@ export class BridgeSession {
 		});
 	}
 
-	start(): void { this.client.start(); }
+	start(): void {
+		this.client.start();
+	}
 
-	get ready(): boolean { return !this.disposed && this.state === "subscribed" && this.client.isReady(); }
-	get connectionStatus(): BridgeConnectionStatus | undefined { return this.notices.connectionStatus; }
-	get queued(): number { return this.queue.length; }
-	get running(): boolean { return !!this.active; }
-	get pendingNotifications(): number { return this.outbox.size; }
+	get ready(): boolean {
+		return !this.disposed && this.state === "subscribed" && this.client.isReady();
+	}
+	get connectionStatus(): BridgeConnectionStatus | undefined {
+		return this.notices.connectionStatus;
+	}
+	get queued(): number {
+		return this.queue.length;
+	}
+	get running(): boolean {
+		return !!this.active;
+	}
+	get pendingNotifications(): number {
+		return this.outbox.size;
+	}
 
 	dispose(reason: string): void {
 		if (this.disposed) return;
@@ -157,7 +192,8 @@ export class BridgeSession {
 		this.activeRun = undefined;
 		this.notices.dispose();
 		if (this.active) this.report(this.active, "stopped");
-		if (this.active || this.queue.length) this.host.log(`cleared active request and ${this.queue.length} queued requests: ${reason}`);
+		if (this.active || this.queue.length)
+			this.host.log(`cleared active request and ${this.queue.length} queued requests: ${reason}`);
 		this.active?.prepared?.release();
 		for (const request of this.queue) request.prepared?.release();
 		this.active = undefined;
@@ -169,14 +205,20 @@ export class BridgeSession {
 	}
 
 	updateSource(ctx: ExtensionContext): void {
-		if (!this.disposed && ctx.sessionManager.getSessionId() === this.sessionId) this.client.updateSource(captureNotificationSource(ctx));
+		if (!this.disposed && ctx.sessionManager.getSessionId() === this.sessionId)
+			this.client.updateSource(captureNotificationSource(ctx));
 	}
 
 	/** A gateway request is read-only with respect to the conversation: no turn is started. */
 	private request(id: string, request: GatewayRequest): void {
 		const ctx = this.host.context();
-		const answer = (response: BridgeResponse) => { if (!this.disposed) this.client.respond(id, response); };
-		if (this.disposed || !ctx) { answer({ ok: false, error: "pi 会话已停止" }); return; }
+		const answer = (response: BridgeResponse) => {
+			if (!this.disposed) this.client.respond(id, response);
+		};
+		if (this.disposed || !ctx) {
+			answer({ ok: false, error: "pi 会话已停止" });
+			return;
+		}
 		if (ctx.sessionManager.getSessionId() !== this.sessionId || request.target.sessionId !== this.sessionId) {
 			answer({ ok: false, error: "请求的 session 与当前 pi 不匹配" });
 			return;
@@ -186,16 +228,22 @@ export class BridgeSession {
 			answer({ ok: true });
 			return;
 		}
-		void this.host.captureScreen(ctx, this.mediaAbort.signal)
+		void this.host
+			.captureScreen(ctx, this.mediaAbort.signal)
 			.then((image) => answer(image ? { ok: true, image } : { ok: false, error: "没有返回图片" }))
 			.catch((error: unknown) => answer({ ok: false, error: errMsg(error) }));
 	}
 
-	resume(): void { this.client.resume(); }
+	resume(): void {
+		this.client.resume();
+	}
 
 	// ---------------------------------------------------------------- the pi run of the active task
 	messageStart(event: MessageStartEvent, ctx: ExtensionContext): void {
-		if (this.active && this.active.source.sessionId !== ctx.sessionManager.getSessionId()) { this.host.stop("target session changed"); return; }
+		if (this.active && this.active.source.sessionId !== ctx.sessionManager.getSessionId()) {
+			this.host.stop("target session changed");
+			return;
+		}
 		if (this.active && this.active.result === undefined && event.message.role === "assistant") {
 			this.active.source = { ...this.active.source, ...captureModelIdentity(ctx, event.message) };
 			this.streamText = this.finalText = "";
@@ -209,7 +257,10 @@ export class BridgeSession {
 	}
 
 	messageEnd(event: MessageEndEvent, ctx: ExtensionContext): void {
-		if (this.active && this.active.source.sessionId !== ctx.sessionManager.getSessionId()) { this.host.stop("target session changed"); return; }
+		if (this.active && this.active.source.sessionId !== ctx.sessionManager.getSessionId()) {
+			this.host.stop("target session changed");
+			return;
+		}
 		if (!this.active || this.active.result !== undefined) return;
 		if (event.message?.role !== "assistant") return;
 		this.active.source = { ...this.active.source, ...captureModelIdentity(ctx, event.message) };
@@ -254,16 +305,24 @@ export class BridgeSession {
 
 	// ---------------------------------------------------------------- wecom_send
 	/** Send when the run ends; the latest call for the same conversation wins. */
-	schedule(request: CompletionRequest): void { this.outbox.schedule(request); }
+	schedule(request: CompletionRequest): void {
+		this.outbox.schedule(request);
+	}
 
-	async notify(chat: ChatRef, notification: GatewayNotification, options: { ctx?: ExtensionContext; signal?: AbortSignal; image?: boolean } = {}): Promise<void> {
+	async notify(
+		chat: ChatRef,
+		notification: GatewayNotification,
+		options: { ctx?: ExtensionContext; signal?: AbortSignal; image?: boolean } = {},
+	): Promise<void> {
 		const signal = options.signal ?? this.mediaAbort.signal;
 		signal.throwIfAborted();
 		const ctx = options.ctx ?? this.host.context();
-		if (!ctx || ctx.sessionManager.getSessionId() !== this.sessionId) throw new Error("pi session_id 已改变，已取消通知");
+		if (!ctx || ctx.sessionManager.getSessionId() !== this.sessionId)
+			throw new Error("pi session_id 已改变，已取消通知");
 		if (options.image) notification = await this.host.prepareImage(notification, ctx, signal);
 		signal.throwIfAborted();
-		if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId) throw new Error("pi 会话已停止或切换，已取消通知");
+		if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId)
+			throw new Error("pi 会话已停止或切换，已取消通知");
 		try {
 			await this.client.notify(chat, notification);
 		} finally {
@@ -285,9 +344,15 @@ export class BridgeSession {
 				else resolve();
 			};
 			const onAbort = () => finish(signal.reason instanceof Error ? signal.reason : abortError());
-			const timer = setTimeout(() => finish(new Error(
-				`${CONNECT_WAIT_MS / 1000} 秒内未连上企业微信（${this.state}${this.detail ? `：${this.detail}` : ""}）；可用 /wecom-aibot status 和 /wecom-aibot log 查看原因`,
-			)), CONNECT_WAIT_MS);
+			const timer = setTimeout(
+				() =>
+					finish(
+						new Error(
+							`${CONNECT_WAIT_MS / 1000} 秒内未连上企业微信（${this.state}${this.detail ? `：${this.detail}` : ""}）；可用 /wecom-aibot status 和 /wecom-aibot log 查看原因`,
+						),
+					),
+				CONNECT_WAIT_MS,
+			);
 			this.readyWaiters.add(finish);
 			signal.addEventListener("abort", onAbort, { once: true });
 			if (signal.aborted) onAbort();
@@ -306,7 +371,9 @@ export class BridgeSession {
 		this.detail = detail;
 		const ready = this.ready;
 		const { becameReady, becameStopped } = this.notices.update({
-			ready, stopped: this.upstreamStopped && next === "disconnected", detail,
+			ready,
+			stopped: this.upstreamStopped && next === "disconnected",
+			detail,
 		});
 		if (ready) {
 			for (const wake of [...this.readyWaiters]) wake();
@@ -314,8 +381,14 @@ export class BridgeSession {
 				this.subscription++;
 				if (this.active?.result !== undefined) this.finishActive();
 				const ctx = this.host.context();
-				if (ctx) void this.outbox.prepare(ctx, false);
-				else void this.outbox.flush();
+				if (ctx)
+					void this.outbox
+						.prepare(ctx, false)
+						.catch((err: unknown) => this.host.log(`notification preparation failed: ${errMsg(err)}`));
+				else
+					void this.outbox
+						.flush()
+						.catch((err: unknown) => this.host.log(`notification flush failed: ${errMsg(err)}`));
 				this.scheduleDrain();
 			}
 		}
@@ -358,7 +431,10 @@ export class BridgeSession {
 		const signal = this.mediaAbort.signal;
 		try {
 			const prepared = await this.contentPreparer.prepare(ctx.cwd, message, signal);
-			if (this.disposed || signal.aborted) { prepared.release(); return; }
+			if (this.disposed || signal.aborted) {
+				prepared.release();
+				return;
+			}
 			request.prepared = prepared;
 			request.label = prepared.label;
 			this.host.log(`queued ${request.label} (queue=${this.queue.length})`);
@@ -383,7 +459,8 @@ export class BridgeSession {
 				this.scheduleDrain(250);
 				return;
 			}
-			this.run(this.queue.shift()!);
+			const next = this.queue.shift();
+			if (next) this.run(next);
 		}, delay);
 	}
 
@@ -396,7 +473,10 @@ export class BridgeSession {
 		const prepared = request.prepared;
 		if (!prepared) return;
 		const ctx = this.host.context();
-		if (request.source.sessionId !== this.sessionId || request.source.sessionId !== ctx?.sessionManager.getSessionId()) {
+		if (
+			request.source.sessionId !== this.sessionId ||
+			request.source.sessionId !== ctx?.sessionManager.getSessionId()
+		) {
 			prepared.release();
 			request.prepared = undefined;
 			this.host.log("cancelled queued message: target pi session changed before delivery");
@@ -442,7 +522,10 @@ export class BridgeSession {
 			const dispatched = this.dispatched;
 			const ctx = this.host.context();
 			if (!dispatched || this.disposed || !ctx) return;
-			if (!ctx.isIdle()) { this.armDispatchCheck(); return; }
+			if (!ctx.isIdle()) {
+				this.armDispatchCheck();
+				return;
+			}
 			this.dispatched = undefined;
 			this.failTask(dispatched.request, DISPATCH_REJECTED);
 		}, DISPATCH_CHECK_MS);
@@ -457,8 +540,11 @@ export class BridgeSession {
 		request.aborted = false;
 		this.finishActive(true);
 		const ctx = this.host.context();
-		if (ctx) void this.outbox.prepare(ctx, false);
-		else void this.outbox.flush();
+		if (ctx)
+			void this.outbox
+				.prepare(ctx, false)
+				.catch((err: unknown) => this.host.log(`notification preparation failed: ${errMsg(err)}`));
+		else void this.outbox.flush().catch((err: unknown) => this.host.log(`notification flush failed: ${errMsg(err)}`));
 	}
 
 	private finishActive(textOnly = false): void {
@@ -467,15 +553,19 @@ export class BridgeSession {
 		// Not handed to the gateway (disconnected): the next subscription finishes it.
 		if (!this.report(active, "settled")) return;
 		this.outbox.queueResult({
-			chatId: active.chatId, chatType: active.chatType, source: active.source, afterEntryId: null,
-			result: active.result, aborted: active.aborted, textOnly,
+			chatId: active.chatId,
+			chatType: active.chatType,
+			source: active.source,
+			afterEntryId: null,
+			result: active.result,
+			aborted: active.aborted,
+			textOnly,
 		});
 		this.host.log(`final notification queued for ${active.label} (${active.result.length} chars)`);
 		this.active = undefined;
 		this.streamText = this.finalText = "";
 		this.scheduleDrain();
 	}
-
 }
 
 /** Credentials or permissions require a new registration; presentation updates retain pending session work. */
@@ -487,12 +577,13 @@ export function abortError(): Error {
 	return Object.assign(new Error("whoami 已取消"), { name: "AbortError" });
 }
 
-
-
 /** What before_agent_start reports for the prompt built here: pi's own text/image normalization. */
 function promptOf(content: (TextContent | ImageContent)[]): { text: string; images: number } {
 	return {
-		text: content.filter((part): part is TextContent => part.type === "text").map((part) => part.text).join("\n"),
+		text: content
+			.filter((part): part is TextContent => part.type === "text")
+			.map((part) => part.text)
+			.join("\n"),
 		images: content.filter((part) => part.type === "image").length,
 	};
 }

@@ -24,7 +24,10 @@ export interface NotificationOptions {
 }
 
 const TITLES: Record<NotificationKind, string> = {
-	notification: "会话通知", completion: "会话通知", reply: "会话通知", test: "部署测试",
+	notification: "会话通知",
+	completion: "会话通知",
+	reply: "会话通知",
+	test: "部署测试",
 };
 /** Header line icons. They lead each line in Markdown and in the rendered image. */
 export const NOTIFICATION_ICONS = { title: "🔔", model: "🏷️", session: "🆔" } as const;
@@ -93,11 +96,13 @@ function truncateContent(text: string, maxBytes: number, keepTail: boolean): str
 function metadataValue(value: string, plain: boolean): string {
 	const line = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").trim();
 	if (plain) return line;
-	return line.replace(/[\\`*_#\[\]<>]/g, "\\$&");
+	return line.replace(/[\\`*_#[\]<>]/g, "\\$&");
 }
 
 function sessionIdProblem(sessionId: string): string | undefined {
-	return !sessionId || sessionId.length > 256 || /[\u0000-\u0020\u007f`]/.test(sessionId) ? "无效的 pi session_id" : undefined;
+	return !sessionId || sessionId.length > 256 || /[\u0000-\u0020\u007f`]/.test(sessionId)
+		? "无效的 pi session_id"
+		: undefined;
 }
 
 function validateSessionId(sessionId: string): void {
@@ -118,9 +123,13 @@ export function formatNotification(
 	options: NotificationOptions = {},
 ): string {
 	if (!text.trim()) throw new Error("当前 pi 会话没有可发送的文本回复");
-	const excerpt = options.tailParagraphs !== undefined;
-	const body = excerpt ? lastParagraphs(text, options.tailParagraphs!) : text;
-	return renderNotification(source, body, { kind: options.kind, excerpt, aborted: options.aborted });
+	const count = options.tailParagraphs;
+	const body = count === undefined ? text : lastParagraphs(text, count);
+	return renderNotification(source, body, {
+		kind: options.kind,
+		excerpt: count !== undefined,
+		aborted: options.aborted,
+	});
 }
 
 /**
@@ -146,12 +155,16 @@ export function notificationProblem(
 	text: string,
 	options: NotificationOptions = {},
 ): string | undefined {
-	const excerpt = options.tailParagraphs !== undefined;
-	if (excerpt && (!Number.isInteger(options.tailParagraphs) || options.tailParagraphs! < 1 || options.tailParagraphs! > 20)) {
+	const count = options.tailParagraphs;
+	if (count !== undefined && (!Number.isInteger(count) || count < 1 || count > 20)) {
 		return "tail_paragraphs 必须是 1 到 20 的整数";
 	}
-	const body = excerpt ? lastParagraphs(text, options.tailParagraphs!) : text;
-	const layout = layoutNotification(source, body, { kind: options.kind, excerpt, aborted: options.aborted });
+	const body = count === undefined ? text : lastParagraphs(text, count);
+	const layout = layoutNotification(source, body, {
+		kind: options.kind,
+		excerpt: count !== undefined,
+		aborted: options.aborted,
+	});
 	return "reason" in layout ? layout.reason : undefined;
 }
 
@@ -165,11 +178,11 @@ function layoutNotification(
 	if (!body.trim()) return { reason: "当前 pi 会话没有可发送的文本回复" };
 	const kind = options.kind ?? "notification";
 	const title = `${NOTIFICATION_ICONS.title} ${metadataValue(source.directoryName, false)} · ${TITLES[kind]}`;
-	const header = [
+	const header = `${[
 		title,
 		`${NOTIFICATION_ICONS.model} ${metadataValue(source.provider, false)} · ${metadataValue(source.modelName, false)}`,
 		`${NOTIFICATION_ICONS.session} session: ${metadataValue(source.sessionId, false)}`,
-	].join("  \n") + "\n\n";
+	].join("  \n")}\n\n`;
 	const suffix = options.aborted ? "\n\n（本轮任务已中止）" : "";
 	const limit = MAX_NOTIFICATION_BYTES;
 	const budget = limit - Buffer.byteLength(header + suffix, "utf8");
@@ -179,7 +192,10 @@ function layoutNotification(
 		content = truncateContent(content, budget, !!options.excerpt);
 	}
 	if (Buffer.byteLength(content, "utf8") > budget) {
-		return { reason: "通知内容（含 session_id、供应商、模型、工作目录）不能超过 20480 个 UTF-8 字节；可设置 tail_paragraphs 截取末尾" };
+		return {
+			reason:
+				"通知内容（含 session_id、供应商、模型、工作目录）不能超过 20480 个 UTF-8 字节；可设置 tail_paragraphs 截取末尾",
+		};
 	}
 	return { text: header + content + suffix };
 }
@@ -195,11 +211,20 @@ export function notificationPayload(
 	options: { tailParagraphs?: number; aborted?: boolean } = {},
 ): GatewayNotification {
 	const excerpt = options.tailParagraphs !== undefined;
-	const body = excerpt ? lastParagraphs(text, options.tailParagraphs!) : text;
+	const count = options.tailParagraphs;
+	const body = count === undefined ? text : lastParagraphs(text, count);
 	// A longer body could never be sent whole; keep the part the gateway would keep.
-	const bounded = Buffer.byteLength(body, "utf8") <= MAX_NOTIFICATION_BODY_BYTES ? body
-		: sliceUtf8(body, MAX_NOTIFICATION_BODY_BYTES, excerpt);
-	return { kind, source: { ...source }, text: bounded, ...(excerpt ? { excerpt } : {}), ...(options.aborted ? { aborted: true } : {}) };
+	const bounded =
+		Buffer.byteLength(body, "utf8") <= MAX_NOTIFICATION_BODY_BYTES
+			? body
+			: sliceUtf8(body, MAX_NOTIFICATION_BODY_BYTES, excerpt);
+	return {
+		kind,
+		source: { ...source },
+		text: bounded,
+		...(excerpt ? { excerpt } : {}),
+		...(options.aborted ? { aborted: true } : {}),
+	};
 }
 
 /**
@@ -207,7 +232,10 @@ export function notificationPayload(
  * authoritative; a damaged header yields "", which never matches, so routing asks instead of guessing.
  */
 export function quotedSessions(text: string): string[] {
-	const lines = text.trimStart().split(/\r?\n/).map((line) => line.replace(/^>\s?/, "").trimEnd());
+	const lines = text
+		.trimStart()
+		.split(/\r?\n/)
+		.map((line) => line.replace(/^>\s?/, "").trimEnd());
 	if (TITLE_LINE.test(lines[0])) return [sessionInLine(lines[2]) ?? ""];
 	if (STATUS_LINES.has(lines[1] ?? "")) return [sessionInLine(lines[0]) ?? ""];
 	const matches = [...text.matchAll(/^\s*(?:>\s*)?(?:🆔 )?session: ([^\s]+)[ \t]*$/gm)];
@@ -229,7 +257,7 @@ function sessionInLine(line: string | undefined): string | undefined {
 }
 
 function unescapeMetadata(value: string): string {
-	return value.replace(/\\([\\`*_#\[\]<>])/g, "$1");
+	return value.replace(/\\([\\`*_#[\]<>])/g, "$1");
 }
 
 function sliceUtf8(text: string, maxBytes: number, keepTail: boolean): string {

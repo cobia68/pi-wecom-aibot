@@ -9,13 +9,13 @@
  * task states and notification snapshots, and receives parsed messages.
  */
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import type { Socket } from "node:net";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import type { Socket } from "node:net";
+import { agentDirectory, gatewayDirectory } from "./agent-path.ts";
 import type { DeliveryFailure } from "./delivery.ts";
 import type { GatewayImage, GatewayNotification, NotificationSource } from "./notification-types.ts";
-import { WECOM_ACK_TIMEOUT_MS, type ChatRef, type InboundMessage, type WeComState } from "./wecom-protocol.ts";
-import { agentDirectory, gatewayDirectory } from "./agent-path.ts";
+import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComState } from "./wecom-protocol.ts";
 
 export const GATEWAY_PROTOCOL_VERSION = 4;
 export const IPC_HEARTBEAT_MS = 10_000;
@@ -146,66 +146,123 @@ export function gatewayEndpoint(botId: string): string {
 	if (process.platform === "win32") return `\\\\.\\pipe\\pi-wecom-aibot-${key}`;
 	const preferred = join(gatewayDirectory(), `${key}.sock`);
 	// sun_path holds 104–108 bytes; a long agent directory falls back to a short per-user directory.
-	return Buffer.byteLength(preferred) <= 100 ? preferred : join(tmpdir(), `pi-wecom-aibot-${process.getuid?.() ?? "user"}`, `${key}.sock`);
+	return Buffer.byteLength(preferred) <= 100
+		? preferred
+		: join(tmpdir(), `pi-wecom-aibot-${process.getuid?.() ?? "user"}`, `${key}.sock`);
 }
 
 function endpointKey(botId: string): string {
-	return createHash("sha256").update(`${userInfo().username}\0${homedir()}\0${agentDirectory()}\0${botId}`).digest("hex").slice(0, 32);
+	return createHash("sha256")
+		.update(`${userInfo().username}\0${homedir()}\0${agentDirectory()}\0${botId}`)
+		.digest("hex")
+		.slice(0, 32);
 }
 
 export function validSource(value: unknown): value is NotificationSource {
 	if (!value || typeof value !== "object") return false;
 	const source = value as Record<string, unknown>;
-	return typeof source.sessionId === "string" && source.sessionId.length > 0 && source.sessionId.length <= 256
-		&& !/[\u0000-\u0020\u007f`]/.test(source.sessionId)
-		&& [source.provider, source.modelName, source.directoryName].every((item) => typeof item === "string" && item.length <= 4096);
+	return (
+		typeof source.sessionId === "string" &&
+		source.sessionId.length > 0 &&
+		source.sessionId.length <= 256 &&
+		!/[\u0000-\u0020\u007f`]/.test(source.sessionId) &&
+		[source.provider, source.modelName, source.directoryName].every(
+			(item) => typeof item === "string" && item.length <= 4096,
+		)
+	);
 }
 
 function validImage(value: unknown): value is GatewayImage {
 	const image = value as GatewayImage | undefined;
-	return !!image && typeof image === "object"
-		&& image.mime === "image/png"
-		&& typeof image.filename === "string" && !!image.filename && image.filename.length <= 256 && !/[\u0000-\u001f\u007f]/.test(image.filename)
-		&& typeof image.path === "string" && !!image.path && image.path.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(image.path);
+	return (
+		!!image &&
+		typeof image === "object" &&
+		image.mime === "image/png" &&
+		typeof image.filename === "string" &&
+		!!image.filename &&
+		image.filename.length <= 256 &&
+		!/[\u0000-\u001f\u007f]/.test(image.filename) &&
+		typeof image.path === "string" &&
+		!!image.path &&
+		image.path.length <= 4096 &&
+		!/[\u0000-\u001f\u007f]/.test(image.path)
+	);
 }
 
 export function validRegistration(value: unknown): value is GatewayRegistration {
 	if (!value || typeof value !== "object") return false;
 	const registration = value as GatewayRegistration;
 	const cfg = registration.config;
-	return typeof registration.instanceId === "string" && registration.instanceId.length > 0 && registration.instanceId.length <= 256
-		&& typeof registration.registrationId === "string" && registration.registrationId.length > 0 && registration.registrationId.length <= 256
-		&& validSource(registration.source) && !!cfg && typeof cfg === "object"
-		&& typeof cfg.botId === "string" && !!cfg.botId && cfg.botId.length <= 1024
-		&& (cfg.allowedUserIds === undefined || (Array.isArray(cfg.allowedUserIds) && cfg.allowedUserIds.length <= 1000
-			&& cfg.allowedUserIds.every((id) => typeof id === "string" && id.length <= 1024)));
+	return (
+		typeof registration.instanceId === "string" &&
+		registration.instanceId.length > 0 &&
+		registration.instanceId.length <= 256 &&
+		typeof registration.registrationId === "string" &&
+		registration.registrationId.length > 0 &&
+		registration.registrationId.length <= 256 &&
+		validSource(registration.source) &&
+		!!cfg &&
+		typeof cfg === "object" &&
+		typeof cfg.botId === "string" &&
+		!!cfg.botId &&
+		cfg.botId.length <= 1024 &&
+		(cfg.allowedUserIds === undefined ||
+			(Array.isArray(cfg.allowedUserIds) &&
+				cfg.allowedUserIds.length <= 1000 &&
+				cfg.allowedUserIds.every((id) => typeof id === "string" && id.length <= 1024)))
+	);
 }
 
 export function validNotification(value: unknown): value is GatewayNotification {
 	if (!value || typeof value !== "object") return false;
 	const notification = value as GatewayNotification;
 	const image = notification.image;
-	return ["notification", "completion", "reply", "test"].includes(notification.kind) && validSource(notification.source)
-		&& typeof notification.text === "string" && Buffer.byteLength(notification.text) <= 512 * 1024
-		&& [notification.excerpt, notification.aborted].every((flag) => flag === undefined || typeof flag === "boolean")
-		&& (image === undefined || validImage(image));
+	return (
+		["notification", "completion", "reply", "test"].includes(notification.kind) &&
+		validSource(notification.source) &&
+		typeof notification.text === "string" &&
+		Buffer.byteLength(notification.text) <= 512 * 1024 &&
+		[notification.excerpt, notification.aborted].every((flag) => flag === undefined || typeof flag === "boolean") &&
+		(image === undefined || validImage(image))
+	);
 }
 
 export function validChat(value: unknown): value is ChatRef {
 	const chat = value as ChatRef | undefined;
-	return !!chat && typeof chat.chatId === "string" && !!chat.chatId.trim() && chat.chatId.length <= 1024 && (chat.chatType === 1 || chat.chatType === 2);
+	return (
+		!!chat &&
+		typeof chat.chatId === "string" &&
+		!!chat.chatId.trim() &&
+		chat.chatId.length <= 1024 &&
+		(chat.chatType === 1 || chat.chatType === 2)
+	);
 }
 
 /** pi checks what an authenticated gateway sends, too: a malformed task is dropped, not half-processed. */
 export function validTask(value: unknown): value is GatewayTask {
 	const task = value as GatewayTask | undefined;
 	const message = task?.message;
-	return !!task && typeof task.id === "string" && !!task.id && task.id.length <= 256 && !!message
-		&& typeof message.msgId === "string" && typeof message.msgtype === "string" && validChat(message.chat)
-		&& typeof message.userid === "string" && !!message.userid && typeof message.text === "string"
-		&& (message.quoteText === undefined || typeof message.quoteText === "string")
-		&& Array.isArray(message.attachments) && message.attachments.every((item) => ["image", "file", "video"].includes(item?.kind)
-			&& typeof item.url === "string" && (item.aeskey === undefined || typeof item.aeskey === "string"));
+	return (
+		!!task &&
+		typeof task.id === "string" &&
+		!!task.id &&
+		task.id.length <= 256 &&
+		!!message &&
+		typeof message.msgId === "string" &&
+		typeof message.msgtype === "string" &&
+		validChat(message.chat) &&
+		typeof message.userid === "string" &&
+		!!message.userid &&
+		typeof message.text === "string" &&
+		(message.quoteText === undefined || typeof message.quoteText === "string") &&
+		Array.isArray(message.attachments) &&
+		message.attachments.every(
+			(item) =>
+				["image", "file", "video"].includes(item?.kind) &&
+				typeof item.url === "string" &&
+				(item.aeskey === undefined || typeof item.aeskey === "string"),
+		)
+	);
 }
 
 export function validNonce(value: unknown): value is string {
@@ -213,16 +270,34 @@ export function validNonce(value: unknown): value is string {
 }
 
 export function sessionTarget(registration: GatewayRegistration): SessionTarget {
-	return { instanceId: registration.instanceId, registrationId: registration.registrationId, sessionId: registration.source.sessionId };
+	return {
+		instanceId: registration.instanceId,
+		registrationId: registration.registrationId,
+		sessionId: registration.source.sessionId,
+	};
 }
 
 export function sameTarget(left: SessionTarget | undefined, right: SessionTarget | undefined): boolean {
-	return !!left && !!right && left.instanceId === right.instanceId && left.registrationId === right.registrationId && left.sessionId === right.sessionId;
+	return (
+		!!left &&
+		!!right &&
+		left.instanceId === right.instanceId &&
+		left.registrationId === right.registrationId &&
+		left.sessionId === right.sessionId
+	);
 }
 
 /** Each side proves the Secret over both fresh nonces, bound to the endpoint and the side, so no proof is reusable. */
-export function gatewayProof(secret: string, side: "server" | "client", serverNonce: string, clientNonce: string, endpoint: string): string {
-	return createHmac("sha256", secret).update(JSON.stringify([GATEWAY_PROTOCOL_VERSION, side, serverNonce, clientNonce, endpoint])).digest("hex");
+export function gatewayProof(
+	secret: string,
+	side: "server" | "client",
+	serverNonce: string,
+	clientNonce: string,
+	endpoint: string,
+): string {
+	return createHmac("sha256", secret)
+		.update(JSON.stringify([GATEWAY_PROTOCOL_VERSION, side, serverNonce, clientNonce, endpoint]))
+		.digest("hex");
 }
 
 export function verifyProof(proof: unknown, expected: string): boolean {
@@ -253,14 +328,20 @@ export function parseClientFrame(value: unknown): FrameParse<ClientFrame> {
 			if (!validRegistration(frame.registration)) return reject("无效的 pi 注册信息");
 			if (typeof frame.proof !== "string") return reject("无效的认证证明");
 			if (frame.resume !== undefined && typeof frame.resume !== "boolean") return reject("无效的恢复标记");
-			return accept({ type: "register", registration: frame.registration, proof: frame.proof, ...(frame.resume === true ? { resume: true } : {}) });
+			return accept({
+				type: "register",
+				registration: frame.registration,
+				proof: frame.proof,
+				...(frame.resume === true ? { resume: true } : {}),
+			});
 		case "source":
 			if (!validSource(frame.source)) return reject("无效的会话来源");
 			return accept({ type: "source", source: frame.source });
 		case "response": {
 			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
 			const response = frame.response as BridgeResponse | undefined;
-			if (!response || typeof response !== "object" || typeof response.ok !== "boolean") return reject("无效的请求应答");
+			if (!response || typeof response !== "object" || typeof response.ok !== "boolean")
+				return reject("无效的请求应答");
 			if (response.error !== undefined && typeof response.error !== "string") return reject("无效的错误说明");
 			if (response.image !== undefined && !validImage(response.image)) return reject("无效的图片");
 			return accept({ type: "response", id: frame.id, response });
@@ -276,7 +357,8 @@ export function parseClientFrame(value: unknown): FrameParse<ClientFrame> {
 			return accept({ type: "notify", id: frame.id, chat: frame.chat, notification: frame.notification });
 		case "watch":
 			if (!validRequestId(frame.id)) return reject("无效的 whoami 请求");
-			if (typeof frame.timeoutMs !== "number" || !Number.isFinite(frame.timeoutMs) || frame.timeoutMs <= 0) return reject("无效的 whoami 超时");
+			if (typeof frame.timeoutMs !== "number" || !Number.isFinite(frame.timeoutMs) || frame.timeoutMs <= 0)
+				return reject("无效的 whoami 超时");
 			return accept({ type: "watch", id: frame.id, timeoutMs: frame.timeoutMs });
 		case "unwatch":
 			if (!validRequestId(frame.id)) return reject("无效的 whoami 请求");
@@ -300,7 +382,13 @@ export function parseServerFrame(value: unknown): FrameParse<ServerFrame> {
 			if (typeof frame.endpoint !== "string" || !frame.endpoint) return reject("无效的网关地址");
 			if (!validNonce(frame.nonce)) return reject("无效的握手 nonce");
 			if (typeof frame.proof !== "string") return reject("无效的认证证明");
-			return accept({ type: "hello", version: frame.version, endpoint: frame.endpoint, nonce: frame.nonce, proof: frame.proof });
+			return accept({
+				type: "hello",
+				version: frame.version,
+				endpoint: frame.endpoint,
+				nonce: frame.nonce,
+				proof: frame.proof,
+			});
 		case "registered":
 			if (!validStatus(frame.status)) return reject("无效的注册状态");
 			return accept({ type: "registered", status: frame.status });
@@ -314,16 +402,22 @@ export function parseServerFrame(value: unknown): FrameParse<ServerFrame> {
 		case "request": {
 			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
 			const request = frame.request as BridgeRequest | undefined;
-			if (!request || typeof request !== "object" || (request.action !== "screen" && request.action !== "cancel")) return reject("无效的网关请求");
+			if (!request || typeof request !== "object" || (request.action !== "screen" && request.action !== "cancel"))
+				return reject("无效的网关请求");
 			if (!validTarget(request.target)) return reject("无效的请求目标");
 			return accept({ type: "request", id: frame.id, request });
 		}
 		case "result":
 			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
 			if (frame.error !== undefined && typeof frame.error !== "string") return reject("无效的送达错误");
-			if (frame.outcome !== undefined && !DELIVERY_FAILURES.has(frame.outcome as DeliveryFailure)) return reject("无效的送达结果");
-			return accept({ type: "result", id: frame.id, ...(frame.error !== undefined ? { error: frame.error } : {}),
-				...(frame.outcome !== undefined ? { outcome: frame.outcome as DeliveryFailure } : {}) });
+			if (frame.outcome !== undefined && !DELIVERY_FAILURES.has(frame.outcome as DeliveryFailure))
+				return reject("无效的送达结果");
+			return accept({
+				type: "result",
+				id: frame.id,
+				...(frame.error !== undefined ? { error: frame.error } : {}),
+				...(frame.outcome !== undefined ? { outcome: frame.outcome as DeliveryFailure } : {}),
+			});
 		case "identity":
 			if (!validRequestId(frame.id)) return reject("无效的 whoami 请求");
 			if (!validIdentity(frame.identity)) return reject("无效的会话标识");
@@ -341,8 +435,12 @@ export function parseServerFrame(value: unknown): FrameParse<ServerFrame> {
 	}
 }
 
-function accept<Frame>(frame: Frame): FrameParse<Frame> { return { ok: true, frame }; }
-function reject<Frame>(reason: string): FrameParse<Frame> { return { ok: false, reason }; }
+function accept<Frame>(frame: Frame): FrameParse<Frame> {
+	return { ok: true, frame };
+}
+function reject<Frame>(reason: string): FrameParse<Frame> {
+	return { ok: false, reason };
+}
 
 function validRequestId(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && value.length <= 256;
@@ -350,39 +448,65 @@ function validRequestId(value: unknown): value is string {
 
 function validStatus(value: unknown): value is GatewayStatus {
 	const status = value as GatewayStatus | undefined;
-	return !!status && typeof status === "object" && WE_COM_STATES.has(status.state)
-		&& (status.detail === undefined || typeof status.detail === "string")
-		&& Number.isSafeInteger(status.sessions) && status.sessions >= 0
-		&& (status.stopped === undefined || typeof status.stopped === "boolean");
+	return (
+		!!status &&
+		typeof status === "object" &&
+		WE_COM_STATES.has(status.state) &&
+		(status.detail === undefined || typeof status.detail === "string") &&
+		Number.isSafeInteger(status.sessions) &&
+		status.sessions >= 0 &&
+		(status.stopped === undefined || typeof status.stopped === "boolean")
+	);
 }
 
 function validTarget(value: unknown): value is SessionTarget {
 	const target = value as SessionTarget | undefined;
-	return !!target && [target.instanceId, target.registrationId, target.sessionId].every((item) => typeof item === "string" && !!item && item.length <= 256);
+	return (
+		!!target &&
+		[target.instanceId, target.registrationId, target.sessionId].every(
+			(item) => typeof item === "string" && !!item && item.length <= 256,
+		)
+	);
 }
 
 function validIdentity(value: unknown): value is ChatIdentity {
 	const identity = value as ChatIdentity | undefined;
-	return !!identity && typeof identity.chatId === "string" && !!identity.chatId && identity.chatId.length <= 1024
-		&& (identity.chatType === 1 || identity.chatType === 2) && typeof identity.userid === "string" && !!identity.userid;
+	return (
+		!!identity &&
+		typeof identity.chatId === "string" &&
+		!!identity.chatId &&
+		identity.chatId.length <= 1024 &&
+		(identity.chatType === 1 || identity.chatType === 2) &&
+		typeof identity.userid === "string" &&
+		!!identity.userid
+	);
 }
 
 /** Bounded newline-delimited JSON; a slow or malformed peer only loses its own connection. */
-export function readFrames(socket: Socket, receive: (value: unknown) => void, onError?: (error: unknown) => void): void {
+export function readFrames(
+	socket: Socket,
+	receive: (value: unknown) => void,
+	onError?: (error: unknown) => void,
+): void {
 	socket.setEncoding("utf8");
 	let pending = "";
 	socket.on("data", (chunk: string) => {
 		pending += chunk;
-		let end: number;
-		while ((end = pending.indexOf("\n")) >= 0) {
+		let end = pending.indexOf("\n");
+		while (end >= 0) {
 			const line = pending.slice(0, end);
 			pending = pending.slice(end + 1);
-			if (Buffer.byteLength(line) > IPC_MAX_BYTES) { onError?.(new Error("frame exceeds the IPC size limit")); socket.destroy(); return; }
+			if (Buffer.byteLength(line) > IPC_MAX_BYTES) {
+				onError?.(new Error("frame exceeds the IPC size limit"));
+				socket.destroy();
+				return;
+			}
 			let frame: unknown;
 			// Only a malformed line is expected to throw here: it ends the connection.
 			try {
 				frame = JSON.parse(line);
-				if (!frame || typeof frame !== "object" || Array.isArray(frame)) throw new Error("frame is not a JSON object");
+				if (!frame || typeof frame !== "object" || Array.isArray(frame))
+					throw new Error("frame is not a JSON object");
 			} catch (error) {
 				onError?.(error);
 				socket.destroy();
@@ -397,8 +521,12 @@ export function readFrames(socket: Socket, receive: (value: unknown) => void, on
 				return;
 			}
 			if (socket.destroyed) return;
+			end = pending.indexOf("\n");
 		}
-		if (Buffer.byteLength(pending) > IPC_MAX_BYTES) { onError?.(new Error("frame exceeds the IPC size limit")); socket.destroy(); }
+		if (Buffer.byteLength(pending) > IPC_MAX_BYTES) {
+			onError?.(new Error("frame exceeds the IPC size limit"));
+			socket.destroy();
+		}
 	});
 }
 
