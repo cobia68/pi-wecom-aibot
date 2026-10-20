@@ -3,41 +3,13 @@
  *
  * In long-connection mode, image/file/video callbacks carry
  *   { url, aeskey }
- * where `url` is a short-lived (5 min) download link and the payload is
- * AES-256-CBC encrypted with PKCS#7 padding to 32 bytes; the IV is the first 16 bytes
- * of the AES key.
+ * where `url` is a short-lived (5 min) download link and the payload is encrypted with
+ * that aeskey (see shared/media-crypto.ts).
  */
 
-import { createDecipheriv } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-
-/** The aeskey is Base64 (official SDK: `Buffer.from(aesKey, "base64")`), and must decode to 32 bytes. */
-export function parseAesKey(raw: string): Buffer {
-	const trimmed = raw.trim();
-	if (!trimmed) throw new Error("empty aeskey");
-	const key = Buffer.from(trimmed, "base64");
-	// Buffer.from is lenient about invalid characters; a real 32-byte key round-trips exactly.
-	if (key.length !== 32 || key.toString("base64").replace(/=+$/, "") !== trimmed.replace(/=+$/, "")) {
-		throw new Error("invalid aeskey: expected a Base64-encoded 32-byte key");
-	}
-	return key;
-}
-
-export function decryptAes256Cbc(data: Buffer, key: Buffer): Buffer {
-	if (key.length !== 32) throw new Error("invalid aeskey length");
-	if (!data.length || data.length % 32 !== 0) throw new Error("invalid encrypted media length");
-	const iv = key.subarray(0, 16);
-	const decipher = createDecipheriv("aes-256-cbc", key, iv);
-	// Node's automatic padding uses AES's 16-byte block size. WeCom uses 32.
-	decipher.setAutoPadding(false);
-	const plain = Buffer.concat([decipher.update(data), decipher.final()]);
-	const padding = plain[plain.length - 1];
-	if (padding < 1 || padding > 32 || !plain.subarray(-padding).every((byte) => byte === padding)) {
-		throw new Error("invalid media PKCS#7 padding");
-	}
-	return plain.subarray(0, plain.length - padding);
-}
+import { decryptAes256Cbc, parseAesKey } from "../../shared/media-crypto.ts";
 
 export interface DownloadedMedia {
 	buffer: Buffer;

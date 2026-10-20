@@ -1,37 +1,7 @@
 import assert from "node:assert/strict";
-import { createCipheriv } from "node:crypto";
 import { test } from "node:test";
-import { decryptAes256Cbc, downloadAndDecrypt, parseAesKey } from "../../../src/extension/inbound/media.ts";
-
-const key = Buffer.from(Array.from({ length: 32 }, (_, index) => index + 1));
-
-function encrypt(plain: Buffer): Buffer {
-	const padding = 32 - (plain.length % 32);
-	const cipher = createCipheriv("aes-256-cbc", key, key.subarray(0, 16));
-	cipher.setAutoPadding(false);
-	return Buffer.concat([cipher.update(Buffer.concat([plain, Buffer.alloc(padding, padding)])), cipher.final()]);
-}
-
-test("decrypts WeCom media with every possible 32-byte padding length", () => {
-	for (let length = 0; length < 64; length++) {
-		const plain = Buffer.alloc(length, 0x61);
-		assert.deepEqual(decryptAes256Cbc(encrypt(plain), key), plain, `plaintext length ${length}`);
-	}
-});
-
-test("accepts the official Base64 key, with or without padding", () => {
-	assert.deepEqual(parseAesKey(key.toString("base64")), key);
-	assert.deepEqual(parseAesKey(key.toString("base64").replace(/=+$/, "")), key);
-});
-
-test("rejects the hex and raw spellings the API never sends", () => {
-	assert.throws(() => parseAesKey(key.toString("hex")), /aeskey/i);
-	assert.throws(() => parseAesKey("a".repeat(32)), /aeskey/i);
-});
-
-test("rejects malformed keys instead of silently truncating them", () => {
-	assert.throws(() => parseAesKey(Buffer.alloc(33, 1).toString("base64")), /aeskey/i);
-});
+import { downloadAndDecrypt } from "../../../src/extension/inbound/media.ts";
+import { encryptMedia, MEDIA_KEY } from "../../support/media.ts";
 
 test("detects image type from decrypted bytes when HTTP reports an opaque payload", async (t) => {
 	const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(30, 1)]);
@@ -39,21 +9,13 @@ test("detects image type from decrypted bytes when HTTP reports an opaque payloa
 		globalThis,
 		"fetch",
 		async () =>
-			new Response(new Uint8Array(encrypt(jpeg)), {
+			new Response(new Uint8Array(encryptMedia(jpeg)), {
 				headers: { "content-type": "application/octet-stream" },
 			}),
 	);
-	const media = await downloadAndDecrypt("https://example.invalid/image", key.toString("base64"));
+	const media = await downloadAndDecrypt("https://example.invalid/image", MEDIA_KEY.toString("base64"));
 	assert.equal(media.mimeType, "image/jpeg");
 	assert.deepEqual(media.buffer, jpeg);
-});
-
-test("rejects corrupted padding even when the last padding byte is plausible", () => {
-	const padded = Buffer.alloc(32, 7);
-	padded[31] = 2;
-	const cipher = createCipheriv("aes-256-cbc", key, key.subarray(0, 16));
-	cipher.setAutoPadding(false);
-	assert.throws(() => decryptAes256Cbc(Buffer.concat([cipher.update(padded), cipher.final()]), key), /padding/);
 });
 
 test("limits streaming downloads even without a Content-Length header", async (t) => {
