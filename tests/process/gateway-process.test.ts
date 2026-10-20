@@ -39,7 +39,7 @@ test("real pi processes elect one detached gateway, survive the first pi exit an
   });
   const workers: { child: ChildProcess; frames: any[]; stderr: string; exited: boolean }[] = [];
   const daemonPids = new Set<number>();
-  const config = { botId: `process-test-${randomUUID()}`, secret: "offline-process-secret", enabled: true, welcome: "hello" };
+  const config = { botId: `process-test-${randomUUID()}`, secret: "offline-process-secret", enabled: true };
   t.after(async () => {
     for (const worker of workers) if (!worker.exited) worker.child.kill();
     for (const pid of daemonPids) if (alive(pid)) { try { process.kill(pid); } catch { /* already exited */ } }
@@ -105,7 +105,7 @@ test("the packaged gateway boots under node_modules with runtime dependencies on
   const manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   await Promise.all(["package.json", ...manifest.files].map((file: string) => cp(join(root, file), join(packaged, file), { recursive: true })));
   await cp(dirname(fileURLToPath(import.meta.resolve("ws"))), join(packaged, "node_modules", "ws"), { recursive: true });
-  const config = { botId: `packaged-test-${randomUUID()}`, secret: "private-bootstrap-secret", enabled: true, welcome: "hello" };
+  const config = { botId: `packaged-test-${randomUUID()}`, secret: "private-bootstrap-secret", enabled: true };
   const endpoint = gatewayEndpoint(config.botId);
   const child = spawn(process.execPath, [join(packaged, "src/gateway/main.mjs")], { cwd: sandbox, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
   let exited = false;

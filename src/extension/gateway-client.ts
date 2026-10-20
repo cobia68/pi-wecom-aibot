@@ -9,9 +9,9 @@ import type { WeComConfig } from "./config.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 import {
 	GATEWAY_PROTOCOL_VERSION, GATEWAY_RETRY_MS, IPC_HEARTBEAT_MS, IPC_LEASE_MS, IPC_SEND_TIMEOUT_MS,
-	gatewayEndpoint, gatewayProof, parseServerFrame, readFrames, sameTarget, sessionTarget, validWelcome, verifyProof, writeFrame,
-	type BridgeClient, type ChatIdentity, type GatewayCredentials, type GatewayRegistration,
-	type GatewayStatus, type GatewayTask, type TaskState,
+	gatewayEndpoint, gatewayProof, parseServerFrame, readFrames, sameTarget, sessionTarget, verifyProof, writeFrame,
+	type BridgeClient, type BridgeRequest, type BridgeResponse, type ChatIdentity, type GatewayCredentials,
+	type GatewayRegistration, type GatewayStatus, type GatewayTask, type TaskState,
 } from "../shared/gateway-protocol.ts";
 
 const AUTH_FAILED = "共享网关认证失败：本机运行中的网关使用不同的 BotID/Secret 或插件版本。"
@@ -24,6 +24,8 @@ export interface GatewayClientOptions {
 	onState?: (state: WeComState, detail?: string) => void;
 	onStatus?: (status: GatewayStatus) => void;
 	onTask?: (task: GatewayTask) => void;
+	/** A read-only request from the gateway (screen or cancel). */
+	onRequest?: (id: string, request: BridgeRequest) => void;
 	onError?: (message: string) => void;
 	log?: (message: string) => void;
 	/** Process boundary override for offline tests. */
@@ -55,10 +57,10 @@ export class GatewayClient implements BridgeClient {
 
 	constructor(options: GatewayClientOptions) {
 		this.options = options;
-		const { botId, secret, welcome, allowedUserIds } = options.config;
+		const { botId, secret, allowedUserIds } = options.config;
 		this.credentials = { botId, secret };
 		this.registration = {
-			config: { botId, welcome, ...(allowedUserIds ? { allowedUserIds: [...allowedUserIds] } : {}) },
+			config: { botId, ...(allowedUserIds ? { allowedUserIds: [...allowedUserIds] } : {}) },
 			source: { ...options.source }, instanceId: options.instanceId ?? randomUUID(), registrationId: randomUUID(),
 		};
 		this.endpoint = gatewayEndpoint(botId);
@@ -109,11 +111,8 @@ export class GatewayClient implements BridgeClient {
 		if (this.registered && this.socket) writeFrame(this.socket, { type: "source", source });
 	}
 
-	updateWelcome(welcome: string): void {
-		if (!validWelcome(welcome)) throw new Error("无效的欢迎语：必须是至多 16384 个字符的字符串");
-		if (welcome === this.registration.config.welcome) return;
-		this.registration.config = { ...this.registration.config, welcome };
-		if (this.registered && this.socket) writeFrame(this.socket, { type: "welcome", text: welcome });
+	respond(id: string, response: BridgeResponse): void {
+		if (this.registered && this.socket) writeFrame(this.socket, { type: "response", id, response });
 	}
 
 	taskStatus(taskId: string, state: TaskState): boolean {
@@ -223,8 +222,6 @@ export class GatewayClient implements BridgeClient {
 				this.registered = true;
 				this.attempts = 0;
 				writeFrame(socket, { type: "source", source: this.registration.source });
-				// Include changes made after register was written but before its ACK arrived.
-				writeFrame(socket, { type: "welcome", text: this.registration.config.welcome });
 				socket.setTimeout(0);
 				this.heartbeat = setInterval(() => {
 					if (Date.now() - this.lastReceived > IPC_LEASE_MS) socket.destroy();
@@ -239,6 +236,9 @@ export class GatewayClient implements BridgeClient {
 				case "status": this.status(frame.status); return;
 				case "pong": return;
 				case "log": this.options.log?.(frame.message); return;
+				case "request":
+					this.options.onRequest?.(frame.id, frame.request);
+					return;
 				case "task":
 					if (!sameTarget(frame.target, sessionTarget(this.registration))) {
 						this.options.log?.("rejected inbound task for a different pi/session registration");

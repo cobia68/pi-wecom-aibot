@@ -101,6 +101,16 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 				warn: (message) => { log(message); notify(ctx, message, "warning"); },
 			});
 		},
+		captureScreen: async (ctx, signal) => {
+			if (!cfg) return undefined;
+			const prepared = await prepareScreenImage({ kind: "reply", source: captureNotificationSource(ctx), text: "screen" },
+				() => screenCapture.capture(ctx), {
+					signal, render: options.renderScreen, secrets: [cfg.secret],
+					warn: (message) => { log(message); notify(ctx, message, "warning"); },
+				});
+			return prepared.image;
+		},
+		abort: () => sessionCtx?.abort(),
 		stop: (reason) => stopBridge(reason),
 	};
 
@@ -307,7 +317,6 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 					cfg = current;
 					if (bridge && (bridge.sessionId !== ctx.sessionManager.getSessionId() || bridge.configKey !== connectionConfig(cfg))) stopBridge("session or configuration changed");
 					ensureClient(ctx);
-					bridge?.updateWelcome(cfg.welcome);
 					bridge?.resume();
 					return;
 				}

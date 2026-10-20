@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { WeComGateway, type GatewayPeer } from "../../src/gateway/runtime.ts";
-import type { SelectionStore } from "../../src/gateway/selection-store.ts";
 import { sessionTarget, type GatewayRegistration, type ServerFrame } from "../../src/shared/gateway-protocol.ts";
 import { formatNotification, formatProcessingStatus, notificationPayload } from "../../src/shared/notification.ts";
 import { parseInbound } from "../../src/shared/wecom-protocol.ts";
@@ -13,6 +12,7 @@ import { FakeWebSocket } from "../support/fake-websocket.ts";
 const SESSION_A = "01234567-89ab-4cde-8012-3456789abcde";
 const SESSION_B = "01234567-89ab-4cde-8012-3456789abcdf";
 let gateway: WeComGateway;
+let sandbox: string;
 let sequence = 0;
 
 class Peer implements GatewayPeer {
@@ -27,7 +27,7 @@ function registration(instanceId: string, sessionId = instanceId): GatewayRegist
   return {
     instanceId, registrationId: `registration-${instanceId}`,
     source: { sessionId, provider: `provider-${instanceId}`, modelName: `model-${instanceId}`, directoryName: `project-${instanceId}` },
-    config: { botId: "unit-bot", welcome: "hello" },
+    config: { botId: "unit-bot" },
   };
 }
 
@@ -37,6 +37,11 @@ function add(instanceId: string, sessionId = instanceId, modify?: (value: Gatewa
   const peer = new Peer();
   gateway.register(value, peer);
   const ws = FakeWebSocket.instances.at(-1)!;
+  ws.onSend = (frame) => {
+    if (frame.cmd === "aibot_upload_media_init") ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { upload_id: "upload-1" } });
+    else if (frame.cmd === "aibot_upload_media_chunk") ws.acknowledge(frame);
+    else if (frame.cmd === "aibot_upload_media_finish") ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { media_id: "media-1" } });
+  };
   if (ws.readyState === 0) { ws.open(); ws.acknowledge(); }
   return { value, peer, ws };
 }
@@ -50,15 +55,23 @@ function message(content: string, body: Record<string, unknown> = {}) {
   return frame;
 }
 
+function send(sessionId: string, text: string, body: Record<string, unknown> = {}) {
+  return message(`/wecom-aibot send --sessionid ${sessionId} --prompt ${text}`, body);
+}
+
+function requests(peer: Peer) { return peer.frames.filter((frame) => frame.type === "request"); }
+
 function quote(sessionId: string) { return { msgtype: "text", text: { content: `project · 会话通知\nprovider · model\nsession: ${sessionId}\n\nresult` } }; }
 function prompt(): string { return FakeWebSocket.instances.at(-1)!.sent.at(-1).body.stream.content; }
 
 beforeEach(() => {
+  sandbox = mkdtempSync(join(tmpdir(), "pi-wecom-aibot-runtime-"));
   FakeWebSocket.instances = [];
   sequence = 0;
   gateway = new WeComGateway({ botId: "unit-bot", secret: "unit-secret", createWebSocket: (url) => new FakeWebSocket(url) });
 });
-afterEach(() => gateway.stop());
+afterEach(() => { gateway.stop(); rmSync(sandbox, { recursive: true, force: true }); });
+function dir(): string { return sandbox; }
 
 test("only registered pi instances create and share the single WeCom connection", () => {
   assert.equal(FakeWebSocket.instances.length, 0);
@@ -69,184 +82,196 @@ test("only registered pi instances create and share the single WeCom connection"
   assert.equal(a.ws.sent.filter((frame) => frame.cmd === "aibot_subscribe").length, 1);
   gateway.unregister(a.value.instanceId, a.peer);
   assert.equal(gateway.size, 1);
-  message("still works");
+  send(SESSION_B, "still works");
   assert.equal(b.peer.messages().length, 1);
   assert.equal(a.peer.messages().length, 0);
   assert.equal(a.ws.readyState, 1);
 });
 
-test("a single session receives direct messages with its exact registered identity", () => {
+test("a message without a target never reaches a pi: it teaches the command instead", () => {
   const a = add("A", SESSION_A);
-  message("task");
+  message("just a task");
+  assert.equal(a.peer.messages().length, 0);
+  assert.match(prompt(), /先指定目标会话/);
+  assert.match(prompt(), /\/wecom-aibot sessions/);
+});
+
+test("send names its target, and the target receives exactly the prompt", () => {
+  const a = add("A", SESSION_A);
+  send(SESSION_A, "检查构建");
   assert.deepEqual(a.peer.messages()[0].target, sessionTarget(a.value));
-  assert.equal(a.peer.messages()[0].task.message.text, "task");
+  assert.equal(a.peer.messages()[0].task.message.text, "检查构建");
 });
 
-test("multiple sessions retain the first task until a choice and remember that choice", () => {
+test("an unknown session ID gets an error plus the current list, never a guess", () => {
   const a = add("A", SESSION_A);
   const b = add("B", SESSION_B);
-  const original = message("first task", { msgtype: "image", image: { url: "https://example.invalid/image", aeskey: "key" } });
+  send("01234567-89ab-4cde-8012-000000000000", "task");
   assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
-  assert.match(prompt(), /已暂存/);
-  assert.ok(prompt().includes(SESSION_A) && prompt().includes(SESSION_B));
-  const choice = message("2");
+  assert.match(prompt(), /找不到这个 session ID/);
+  assert.match(prompt(), new RegExp(SESSION_A));
+  assert.match(prompt(), new RegExp(SESSION_B));
+});
+
+test("sessions lists directory, model, state and the full session ID on its own line", () => {
+  const a = add("A", SESSION_A);
+  add("B", SESSION_B);
+  message("/wecom-aibot sessions");
+  const text = prompt();
+  assert.match(text, /当前有 2 个在线会话/);
+  assert.match(text, /project-A · provider-A · model-A · 空闲/);
+  assert.match(text, new RegExp(`session: ${SESSION_A}`));
+  assert.match(text, new RegExp(`session: ${SESSION_B}`));
+  // A running task is visible as busy.
+  send(SESSION_A, "long task");
+  const taskId = a.peer.messages()[0].task.id;
+  gateway.taskStatus("A", taskId, "running");
+  message("/wecom-aibot sessions");
+  assert.match(prompt(), /project-A · provider-A · model-A · 执行中/);
+});
+
+test("a quoted notification routes that one message, without remembering anything", () => {
+  const a = add("A", SESSION_A);
+  const b = add("B", SESSION_B);
+  message("first", { quote: quote(SESSION_B) });
   assert.equal(b.peer.messages().length, 1);
-  assert.deepEqual(b.peer.messages()[0].task.message, parseInbound(original.body));
-  assert.equal(b.peer.messages()[0].task.id, choice.headers.req_id);
-  assert.equal(b.peer.messages()[0].target.sessionId, SESSION_B);
-  message("followup");
-  assert.equal(b.peer.messages()[1].task.message.text, "followup");
   assert.equal(a.peer.messages().length, 0);
+  // The next message has no target of its own, so it must be asked for again.
+  message("second");
+  assert.equal(b.peer.messages().length, 1);
+  assert.match(prompt(), /先指定目标会话/);
 });
 
-test("quoted replies route by the full session ID without changing the direct-message selection", () => {
+test("a quote that names no online session is reported, never redirected to another pi", () => {
+  const a = add("A", SESSION_A);
+  message("orphan", { quote: quote(SESSION_B) });
+  assert.equal(a.peer.messages().length, 0);
+  assert.match(prompt(), /无法定位到一个在线会话/);
+  assert.match(prompt(), new RegExp(SESSION_A));
+});
+
+test("a quote with several session IDs is ambiguous and delivers nothing", () => {
   const a = add("A", SESSION_A);
   const b = add("B", SESSION_B);
-  message(`/wecom-aibot use ${SESSION_A}`);
-  message("reply B", { quote: quote(SESSION_B) });
-  message("direct A");
-  assert.equal(b.peer.messages()[0].task.message.text, "reply B");
-  assert.equal(a.peer.messages()[0].task.message.text, "direct A");
-});
-
-test("an offline, truncated or malformed quoted session never falls back to the only online pi", () => {
-  const a = add("A", SESSION_A);
-  for (const sessionId of [SESSION_A.slice(0, 8), "offline-session", "broken id", ""]) {
-    message("must not be delivered", { quote: quote(sessionId) });
-    assert.match(prompt(), /离线或不可用/);
-  }
-  assert.equal(a.peer.messages().length, 0);
-});
-
-test("ambiguous quoted session IDs require an explicit choice", () => {
-  const a = add("A", SESSION_A);
-  const b = add("B", SESSION_B);
-  message("ambiguous", { quote: { msgtype: "text", text: { content: `session: ${SESSION_A}\nsession: ${SESSION_B}` } } });
-  assert.match(prompt(), /多个 session ID/);
+  const both = { msgtype: "text", text: { content: `session: ${SESSION_A}\nsession: ${SESSION_B}` } };
+  message("which one", { quote: both });
   assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
+  assert.match(prompt(), /无法定位/);
 });
 
-test("a damaged source header cannot redirect a quote through a valid-looking ID in its body", () => {
+test("a command wins over a quote: the named session takes it", () => {
   const a = add("A", SESSION_A);
-  message("damaged quote", { quote: { msgtype: "text", text: { content: `session: damaged id\n\nsession: ${SESSION_A}` } } });
-  assert.equal(a.peer.messages().length, 0);
-  assert.match(prompt(), /多个 session ID/);
-});
-
-test("flattened or truncated notification quotes cannot fall back to the selected pi", () => {
-  const a = add("A", SESSION_A);
-  add("B", SESSION_B);
-  message(`/wecom-aibot use ${SESSION_A}`);
-  for (const content of [`project-B · 会话通知 provider-B · model-B session: ${SESSION_B} result`, "project-B · 会话通知\nprovider-B · model-B"]) {
-    message("quote B", { quote: { msgtype: "text", text: { content } } });
-    assert.match(prompt(), /重新选择/);
-  }
-  assert.equal(a.peer.messages().length, 0);
-});
-
-test("quoted Markdown session IDs round trip the notification's escaping", () => {
-  const a = add("A", "session_with_[brackets]\\suffix");
-  const content = formatNotification(a.value.source, "result");
-  message("reply", { quote: { msgtype: "markdown", markdown: { content } } });
-  assert.equal(a.peer.messages().length, 1);
-  assert.equal(a.peer.messages()[0].target.sessionId, a.value.source.sessionId);
-});
-
-test("a notification's source header owns routing even when its metadata and output mention sessions", async () => {
-  const a = add("A", SESSION_A, (value) => { value.source = { ...value.source, directoryName: "project session: notes", modelName: "model session: custom" }; });
   const b = add("B", SESSION_B);
-  const content = formatNotification(a.value.source, `Output about another session:\nsession: ${SESSION_B}`);
-  const sent = gateway.notify("A", { chatId: "user", chatType: 1 }, notificationPayload("notification", a.value.source, `Output about another session:\nsession: ${SESSION_B}`));
-  assert.equal(a.ws.sent.at(-1).body.markdown.content, content, "the gateway renders exactly what pi would have formatted");
-  a.ws.acknowledge();
-  await sent;
-  message("reply to A", { quote: { msgtype: "markdown", markdown: { content } } });
+  send(SESSION_A, "named", { quote: quote(SESSION_B) });
   assert.equal(a.peer.messages().length, 1);
   assert.equal(b.peer.messages().length, 0);
 });
 
-test("the selected pi exiting requires a new choice even when only one other pi remains", () => {
+test("--prompt keeps spaces, dashes, newlines and command-looking text verbatim", () => {
   const a = add("A", SESSION_A);
-  const b = add("B", SESSION_B);
-  message(`/wecom-aibot use ${SESSION_A}`);
-  gateway.unregister(a.value.instanceId, a.peer);
-  message("next task");
-  assert.equal(b.peer.messages().length, 0);
-  assert.match(prompt(), /已离线/);
-  message("1");
-  assert.equal(b.peer.messages()[0].task.message.text, "next task");
+  message(`/wecom-aibot send --sessionid ${SESSION_A} --prompt 修复 --screen 和 --sessionid 的解析\n第二行`);
+  assert.equal(a.peer.messages()[0].task.message.text, "修复 --screen 和 --sessionid 的解析\n第二行");
 });
 
-test("automatic selection of a singleton is also pinned when a second pi joins", () => {
+test("--sessionid written after --prompt is an order error, not part of the prompt", () => {
   const a = add("A", SESSION_A);
-  message("task A");
-  const b = add("B", SESSION_B);
-  message("still A");
-  assert.equal(a.peer.messages().length, 2);
-  assert.equal(b.peer.messages().length, 0);
+  message(`/wecom-aibot send --prompt 正文 --sessionid ${SESSION_A}`);
+  assert.equal(a.peer.messages().length, 0);
+  assert.match(prompt(), /--sessionid 必须写在 --prompt 之前/);
 });
 
-test("selection numbers cannot shift to a different pi when membership changes", () => {
+test("an equals form is an unknown option, and the error lists what is supported", () => {
   const a = add("A", SESSION_A);
-  const b = add("B", SESSION_B);
-  message("pending");
-  gateway.unregister(a.value.instanceId, a.peer);
-  const replacement = add("new-A", SESSION_A);
-  message("1");
-  assert.match(prompt(), /已离线或选择无效/);
-  assert.equal(b.peer.messages().length + replacement.peer.messages().length, 0);
-  message("2");
-  assert.equal(replacement.peer.messages()[0].task.message.text, "pending");
+  message(`/wecom-aibot send --sessionid=${SESSION_A} --prompt x`);
+  assert.equal(a.peer.messages().length, 0);
+  assert.match(prompt(), /未知选项 --sessionid=/);
+  assert.match(prompt(), /--sessionid/);
+  assert.match(prompt(), /--prompt/);
 });
 
-test("a new pi reopening the same session cannot inherit a previous pi's direct-message selection", () => {
+test("a positional argument is rejected; the prompt belongs after --prompt", () => {
   const a = add("A", SESSION_A);
-  message("first");
-  gateway.unregister(a.value.instanceId, a.peer);
-  const replacement = add("new-A", SESSION_A);
-  message("next");
-  assert.equal(replacement.peer.messages().length, 0);
-  assert.match(prompt(), /已离线/);
+  message(`/wecom-aibot send ${SESSION_A} 正文`);
+  assert.equal(a.peer.messages().length, 0);
+  assert.match(prompt(), /不接受位置参数/);
 });
 
-test("group selections are separate for each sender and for each conversation", () => {
+test("screen asks the named pi and sends the image it returns", async () => {
+  const a = add("A", SESSION_A);
+  message(`/wecom-aibot screen --sessionid ${SESSION_A}`);
+  const request = requests(a.peer)[0];
+  assert.equal(request.type, "request");
+  assert.deepEqual(request.request, { action: "screen", target: sessionTarget(a.value) });
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  const file = join(dir(), "screen.png");
+  writeFileSync(file, png);
+  gateway.response("A", request.id, { ok: true, image: { mime: "image/png", filename: "screen.png", path: file } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const sent = a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
+  assert.equal(sent.body.msgtype, "image");
+  assert.equal(a.ws.sent.some((frame) => frame.cmd === "aibot_upload_media_init"), true);
+});
+
+test("a failed screen request reports the pi's reason", () => {
+  const a = add("A", SESSION_A);
+  message(`/wecom-aibot screen --sessionid ${SESSION_A}`);
+  gateway.response("A", requests(a.peer)[0].id, { ok: false, error: "该会话没有终端界面" });
+  assert.match(prompt(), /截图失败：该会话没有终端界面/);
+});
+
+test("screen is only answered by the pi it was sent to", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const a = add("A", SESSION_A);
   const b = add("B", SESSION_B);
-  const group = { chattype: "group", chatid: "group-1" };
-  message(`@bot /wecom-aibot use ${SESSION_A}`, { ...group, from: { userid: "alice" } });
-  message(`@bot /wecom-aibot use ${SESSION_B}`, { ...group, from: { userid: "bob" } });
-  message("alice task", { ...group, from: { userid: "alice" } });
-  message("bob task", { ...group, from: { userid: "bob" } });
-  message("another chat", { ...group, chatid: "group-2", from: { userid: "alice" } });
+  message(`/wecom-aibot screen --sessionid ${SESSION_A}`);
+  const count = a.ws.sent.length;
+  gateway.response("B", requests(a.peer)[0].id, { ok: true });
+  assert.equal(a.ws.sent.length, count, "another pi's answer is ignored");
+  t.mock.timers.tick(20_000);
+  assert.match(prompt(), /20 秒内响应/);
+});
+
+test("cancel asks the named pi and says only that abort was requested", () => {
+  const a = add("A", SESSION_A);
+  message(`/wecom-aibot cancel --sessionid ${SESSION_A}`);
+  const request = requests(a.peer)[0];
+  assert.deepEqual(request.request, { action: "cancel", target: sessionTarget(a.value) });
+  gateway.response("A", request.id, { ok: true });
+  assert.match(prompt(), /已请求中止/);
+});
+
+test("a request nobody answers times out with the timeout named", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const a = add("A", SESSION_A);
+  message(`/wecom-aibot screen --sessionid ${SESSION_A}`);
+  t.mock.timers.tick(20_000);
+  assert.match(prompt(), /20 秒内响应/);
+});
+
+test("group participants each name their own target; nothing is shared between senders", () => {
+  const a = add("A", SESSION_A);
+  const b = add("B", SESSION_B);
+  send(SESSION_A, "from alice", { from: { userid: "alice" }, chattype: "group", chatid: "group-1" });
+  send(SESSION_B, "from bob", { from: { userid: "bob" }, chattype: "group", chatid: "group-1" });
   assert.equal(a.peer.messages().length, 1);
   assert.equal(b.peer.messages().length, 1);
-  assert.equal(a.peer.messages()[0].task.message.text, "alice task");
-  assert.equal(b.peer.messages()[0].task.message.text, "bob task");
-  assert.match(prompt(), /请选择|回复序号/);
+  assert.equal(a.peer.messages()[0].task.message.text, "from alice");
+  assert.equal(b.peer.messages()[0].task.message.text, "from bob");
 });
 
-test("ordinary messages while choosing cannot overwrite the retained task or become a choice", () => {
+test("entering a chat sends nothing at all", () => {
   const a = add("A", SESSION_A);
   add("B", SESSION_B);
-  message("original");
-  message("another task");
-  assert.match(prompt(), /已保留最初/);
-  message("1");
+  const count = a.ws.sent.length;
+  a.ws.receive({ cmd: "aibot_event_callback", headers: { req_id: "enter" }, body: { from: { userid: "user" }, event: { eventtype: "enter_chat" } } });
+  assert.equal(a.ws.sent.length, count);
+});
+
+test("duplicate callbacks produce one task and one command reply", () => {
+  const a = add("A", SESSION_A);
+  const frame = send(SESSION_A, "once");
+  FakeWebSocket.instances.at(-1)!.receive(frame);
   assert.equal(a.peer.messages().length, 1);
-  assert.equal(a.peer.messages()[0].task.message.text, "original");
-});
-
-test("retained messages expire rather than starting a stale task later", (t) => {
-  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"] });
-  const a = add("A", SESSION_A);
-  add("B", SESSION_B);
-  message("expired task");
-  // Keep the fake upstream responsive while advancing time.
-  a.ws.onSend = (frame) => { if (frame.cmd === "ping") a.ws.acknowledge(frame); };
-  t.mock.timers.tick(301_000);
-  message(`/wecom-aibot use ${SESSION_A}`);
-  assert.equal(a.peer.messages().length, 0);
-  assert.match(prompt(), /请发送任务/);
 });
 
 test("the same full session cannot be registered by two pi instances", () => {
@@ -254,13 +279,13 @@ test("the same full session cannot be registered by two pi instances", () => {
   assert.throws(() => add("B", SESSION_A), /另一个 pi 注册/);
   assert.equal(gateway.size, 1);
   assert.equal(a.peer.closed, false);
-  message("original owner");
+  send(SESSION_A, "original owner");
   assert.equal(a.peer.messages().length, 1);
 });
 
 test("switching sessions invalidates old callbacks and late disconnects cannot remove the new registration", () => {
   const a = add("A", SESSION_A);
-  const inbound = message("task A");
+  const inbound = send(SESSION_A, "task A");
   const next = registration("A", SESSION_B);
   next.registrationId = "new-registration";
   const peer = new Peer();
@@ -271,7 +296,7 @@ test("switching sessions invalidates old callbacks and late disconnects cannot r
   assert.equal(gateway.taskStatus("A", inbound.headers.req_id, "running"), false);
   message("old target", { quote: quote(SESSION_A) });
   assert.equal(peer.messages().length, 0);
-  assert.match(prompt(), /离线/);
+  assert.match(prompt(), /无法定位/);
 });
 
 test("task states and notifications are checked against their owning pi and session", async () => {
@@ -308,17 +333,17 @@ test("concurrent notifications preserve separate source metadata and acknowledge
   await first;
 });
 
-test("allowlists hide and gate sessions, including quoted targets and welcome events", () => {
+test("allowlists hide and gate sessions, including quoted targets, and enter_chat stays silent", () => {
   const a = add("A", SESSION_A, (value) => { value.config.allowedUserIds = ["alice"]; });
   const b = add("B", SESSION_B, (value) => { value.config.allowedUserIds = ["bob"]; });
   message("blocked");
-  message("alice", { from: { userid: "alice" } });
+  send(SESSION_A, "alice", { from: { userid: "alice" } });
   message("cannot reach B", { from: { userid: "alice" }, quote: quote(SESSION_B) });
   assert.equal(a.peer.messages().length, 1);
   assert.equal(b.peer.messages().length, 0);
   assert.equal(prompt().includes(SESSION_B), false);
   const count = a.ws.sent.length;
-  a.ws.receive({ cmd: "aibot_event_callback", headers: { req_id: "welcome" }, body: { from: { userid: "blocked" }, event: { eventtype: "enter_chat" } } });
+  a.ws.receive({ cmd: "aibot_event_callback", headers: { req_id: "enter" }, body: { from: { userid: "blocked" }, event: { eventtype: "enter_chat" } } });
   assert.equal(a.ws.sent.length, count);
 });
 
@@ -347,9 +372,9 @@ test("whoami consumes only the next message for the waiting pi and reports its c
   assert.match(receipt.body.stream.content, /chatid：`group_chat`　chat_type：2　userid：`user_one`/);
   assert.match(receipt.body.stream.content, /不会交给 pi/);
 
-  // The hold is released after one message: the next one is routed as usual (two sessions: choose).
-  message("task", { from: { userid: "user_one" }, chattype: "group", chatid: "group_chat" });
-  assert.match(prompt(), /当前有 2 个可用会话/);
+  // The hold is released after one message: the next one follows the normal command rules.
+  message("/wecom-aibot sessions", { from: { userid: "user_one" }, chattype: "group", chatid: "group_chat" });
+  assert.match(prompt(), /当前有 2 个在线会话/);
   assert.equal(a.peer.frames.filter((item) => item.type === "identity").length, 1);
 });
 
@@ -358,14 +383,14 @@ test("a cancelled or expired whoami stops capturing, and a stale cancel cannot e
   const a = add("A", SESSION_A);
   gateway.watch("A", "watch-1", 60_000);
   gateway.unwatch("A", "watch-1");
-  message("after cancel");
+  send(SESSION_A, "after cancel");
   gateway.watch("A", "watch-2", 1000);
   t.mock.timers.tick(1001);
-  message("after expiry");
+  send(SESSION_A, "after expiry");
   assert.equal(a.peer.messages().length, 2);
   gateway.watch("A", "watch-3", 60_000);
   gateway.unwatch("A", "watch-2");
-  message("identified");
+  send(SESSION_A, "identified");
   const identities = a.peer.frames.filter((item) => item.type === "identity");
   assert.equal(identities.length, 1);
   assert.ok(identities[0].type === "identity" && identities[0].id === "watch-3");
@@ -382,32 +407,14 @@ test("whoami follows the waiting pi's allowlist and belongs to the connection th
 
   const replacement = new Peer();
   gateway.register(registration("A", SESSION_A), replacement);
-  message("alice", { from: { userid: "alice" } });
+  send(SESSION_A, "alice", { from: { userid: "alice" } });
   assert.equal(replacement.messages().length, 1, "a re-registered connection does not inherit the old whoami");
   assert.equal(replacement.frames.some((item) => item.type === "identity"), false);
 });
 
-test("a singleton welcome retains the original plain-text source format", () => {
+test("duplicate callbacks cannot produce a second command reply or pi task", () => {
   const a = add("A", SESSION_A);
-  a.ws.receive({ cmd: "aibot_event_callback", headers: { req_id: "welcome" }, body: { from: { userid: "user" }, event: { eventtype: "enter_chat" } } });
-  const welcome = a.ws.sent.at(-1);
-  assert.equal(welcome.cmd, "aibot_respond_welcome_msg");
-  assert.equal(welcome.body.text.content, `🔔 project-A · 欢迎\n🏷️ provider-A · model-A\n🆔 session: ${SESSION_A}\n\nhello`);
-});
-
-test("a multiple-session welcome is sent once and does not arbitrarily select a pi", () => {
-  const a = add("A", SESSION_A);
-  const b = add("B", SESSION_B);
-  a.ws.receive({ cmd: "aibot_event_callback", headers: { req_id: "welcome" }, body: { from: { userid: "user" }, event: { eventtype: "enter_chat" } } });
-  assert.equal(a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_welcome_msg").length, 1);
-  assert.match(a.ws.sent.at(-1).body.text.content, /2 个在线会话/);
-  message("task");
-  assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
-});
-
-test("duplicate callbacks cannot produce a second choice prompt or pi task", () => {
-  const a = add("A", SESSION_A);
-  const frame = message("once");
+  const frame = send(SESSION_A, "once");
   a.ws.receive(frame);
   assert.equal(a.peer.messages().length, 1);
 });
@@ -433,7 +440,7 @@ test("the gateway ends a task's status message before WeCom's 10-minute limit, a
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const a = add("A", SESSION_A);
   a.ws.onSend = (frame) => { if (frame.cmd === "ping") a.ws.acknowledge(frame); };
-  const task = message("long task");
+  const task = send(SESSION_A, "long task");
   const statuses = () => a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === task.headers.req_id);
   assert.equal(gateway.taskStatus("A", task.headers.req_id, "running"), true);
   t.mock.timers.tick(589_000);
@@ -450,7 +457,7 @@ test("the gateway ends a task's status message before WeCom's 10-minute limit, a
 test("a final state WeCom could not take while disconnected is sent after the reconnect", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const a = add("A", SESSION_A);
-  const task = message("task");
+  const task = send(SESSION_A, "task");
   gateway.taskStatus("A", task.headers.req_id, "running");
   a.ws.close();
   assert.equal(gateway.taskStatus("A", task.headers.req_id, "settled"), false);
@@ -520,19 +527,6 @@ test("a missing image file falls back to the Markdown body with a visible reason
   assert.equal(push.body.msgtype, "markdown");
   assert.match(push.body.markdown.content, /fallback body/);
   assert.match(push.body.markdown.content, /图片发送失败：.*ENOENT.*已改发文字/);
-});
-
-test("a selection that cannot be saved reports the real reason instead of blaming permissions", () => {
-  const failing: SelectionStore = { load: () => ({ entries: [], requireChoice: false }), save: () => { throw new Error("ENOSPC: no space left on device"); }, clear: () => {} };
-  gateway.stop();
-  gateway = new WeComGateway({ botId: "unit-bot", secret: "unit-secret", createWebSocket: (url) => new FakeWebSocket(url) },
-    () => {}, failing);
-  const a = add("A", SESSION_A);
-  const b = add("B", SESSION_B);
-  message("first task");
-  message("2");
-  assert.match(prompt(), /ENOSPC/);
-  assert.equal(a.peer.messages().length + b.peer.messages().length, 0, "an uncommitted choice must not deliver");
 });
 
 test("a rejected media upload falls back to Markdown while a rejected image send also falls back", async () => {

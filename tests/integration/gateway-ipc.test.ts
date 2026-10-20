@@ -78,10 +78,21 @@ function client(id: string, overrides: Partial<WeComConfig> = {}, options: Parti
   return { connection, tasks, states, logs, errors };
 }
 
-function inbound(content: string, extra: Record<string, unknown> = {}) {
+/** A task that names its target; every WeCom task does since routing is explicit. */
+function inbound(content: string, extra: Record<string, unknown> = {}, sessionId = "session-A") {
   const id = randomUUID();
   FakeWebSocket.instances.at(-1)!.receive({ cmd: "aibot_msg_callback", headers: { req_id: id }, body: {
-    msgid: id, from: { userid: "user" }, chattype: "single", msgtype: "text", text: { content }, ...extra,
+    msgid: id, from: { userid: "user" }, chattype: "single", msgtype: "text",
+    text: { content: `/wecom-aibot send --sessionid ${sessionId} --prompt ${content}` }, ...extra,
+  } });
+}
+
+/** A text message from `user`, as the gateway routes it. */
+function messageFor(_id: string, content: string) {
+  const reqId = randomUUID();
+  const ws = FakeWebSocket.instances.at(-1)!;
+  ws.receive({ cmd: "aibot_msg_callback", headers: { req_id: reqId }, body: {
+    msgid: reqId, from: { userid: "user" }, chattype: "single", msgtype: "text", text: { content },
   } });
 }
 
@@ -104,7 +115,7 @@ async function fakeGateway(t: { after(fn: () => Promise<void>): void }, endpoint
 }
 
 beforeEach(() => {
-  config = { botId: `ipc-test-${randomUUID()}`, secret: "offline-test-secret", welcome: "hello" };
+  config = { botId: `ipc-test-${randomUUID()}`, secret: "offline-test-secret" };
   FakeWebSocket.instances = [];
   clients = [];
   autoAcknowledge = true;
@@ -173,23 +184,17 @@ test("a pi cannot send a notification labelled with another pi's session", async
   assert.equal(pushes[1].body.chat_type, 2);
 });
 
-test("IPC welcome updates preserve the registration and its pending identity watch", async () => {
-  const running = await startServer();
-  const a = client("A");
+test("IPC carries a screen request to the pi and returns its answer", async () => {
+  await startServer();
+  const requests: { id: string; request: any }[] = [];
+  const a = client("A", {}, { onRequest: (id, request) => requests.push({ id, request }) });
   a.connection.start();
   await until(() => a.connection.isReady(), "A ready");
-  const identity = a.connection.watchIdentity(1000);
-  a.connection.updateWelcome("UPDATED-WELCOME");
-  // This ACK orders the upstream event after both IPC updates, without inspecting private state.
-  await a.connection.notify(user, notification("A"));
-  const ws = FakeWebSocket.instances[0];
-  ws.receive({ cmd: "aibot_event_callback", headers: { req_id: "welcome" }, body: { from: { userid: "user" }, event: { eventtype: "enter_chat" } } });
-  assert.match(ws.sent.at(-1).body.text.content, /UPDATED-WELCOME/);
-  inbound("identity after welcome update");
-  assert.deepEqual(await identity, { chatId: "user", chatType: 1, userid: "user" });
-  assert.equal(a.tasks.length, 0);
-  assert.equal(running.gateway.size, 1);
-  assert.equal(FakeWebSocket.instances.length, 1);
+  messageFor("A", `/wecom-aibot screen --sessionid session-A`);
+  await until(() => requests.length === 1, "request delivered");
+  assert.equal(requests[0].request.action, "screen");
+  a.connection.respond(requests[0].id, { ok: false, error: "该会话没有终端界面" });
+  await until(() => FakeWebSocket.instances[0].sent.some((frame) => String(frame.body?.stream?.content ?? "").includes("截图失败")), "failure reported");
 });
 
 test("IPC preserves a known-unsent outcome when upstream readiness is stale", async () => {
@@ -309,7 +314,7 @@ test("a gateway that keeps other credentials is reported once after the retry wi
   assert.equal(a.connection.isReady(), true);
 });
 
-test("model metadata updates reach the shared selection list", async () => {
+test("model metadata updates reach the session list", async () => {
   await startServer();
   const a = client("A");
   a.connection.start();
@@ -317,7 +322,7 @@ test("model metadata updates reach the shared selection list", async () => {
   a.connection.updateSource({ ...source("A"), provider: "new-provider", modelName: "new-model", directoryName: "new-directory" });
   // The acknowledged send follows the metadata update in the same ordered IPC channel.
   await a.connection.notify(user, notification("A"));
-  inbound("/wecom-aibot sessions");
+  messageFor("A", "/wecom-aibot sessions");
   const text = FakeWebSocket.instances[0].sent.at(-1).body.stream.content;
   assert.match(text, /new-directory · new-provider · new-model/);
 });
@@ -333,7 +338,7 @@ test("clients re-register the same identity after a gateway crash", async () => 
   await until(() => !a.connection.isReady() && !b.connection.isReady(), "disconnect observed");
   await startServer();
   await until(() => a.connection.isReady() && b.connection.isReady(), "both re-registered");
-  inbound("B only", { quote: { msgtype: "text", text: { content: "session: session-B" } } });
+  inbound("B only", {}, "session-B");
   await until(() => b.tasks.length === 1, "B receives after recovery");
   assert.equal(a.tasks.length, 0);
 });
@@ -376,7 +381,7 @@ test("the server refuses a notification labelled with another session, even on a
   const socket = createConnection(endpoint);
   const frames: ServerFrame[] = [];
   const clientNonce = randomUUID();
-  const registration: GatewayRegistration = { instanceId: "raw", registrationId: "raw-registration", source: source("A"), config: { botId: config.botId, welcome: "hello" } };
+  const registration: GatewayRegistration = { instanceId: "raw", registrationId: "raw-registration", source: source("A"), config: { botId: config.botId } };
   t.after(() => socket.destroy());
   socket.on("error", () => {});
   readServerFrames(socket, (frame) => {

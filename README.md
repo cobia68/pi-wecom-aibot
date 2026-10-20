@@ -111,7 +111,7 @@ pi install .
 | Linux / macOS | `~/.pi/agent/wecom-aibot/config.json`                   |
 | Windows       | `C:\Users\你的用户名\.pi\agent\wecom-aibot\config.json` |
 
-实际位置以 `/wecom-aibot` 显示的为准。同一台电脑、同一系统用户下的 pi 窗口共用这份配置。这个文件夹属于插件自己：`config.json` 是配置，`gateway/` 放共享网关的 socket 和会话选择记录；`PI_CODING_AGENT_DIR` 改变时整个文件夹随之移动。`/wecom-aibot setup` 会写好 BotID、Secret 和默认推送目标，其余选项直接编辑：
+实际位置以 `/wecom-aibot` 显示的为准。同一台电脑、同一系统用户下的 pi 窗口共用这份配置。这个文件夹属于插件自己：`config.json` 是配置，`gateway/` 放共享网关的 socket；`PI_CODING_AGENT_DIR` 改变时整个文件夹随之移动。`/wecom-aibot setup` 会写好 BotID、Secret 和默认推送目标，其余选项直接编辑：
 
 ```json
 {
@@ -120,7 +120,6 @@ pi install .
   "sendMode": "text",
   "defaultChatId": "your-userid",
   "defaultChatType": 1,
-  "welcome": "你好，我是 pi 智能助手。直接把问题或任务发给我即可。",
   "allowedUserIds": ["your-userid"]
 }
 ```
@@ -132,9 +131,8 @@ pi install .
 | `allowedUserIds`   | 允许使用机器人的 userid 名单；不写或留空表示所有人都能用                                  |
 | `defaultChatId`    | 默认推送目标：单聊填 userid，群聊填群 chatid                                              |
 | `defaultChatType`  | 默认推送目标类型：`1` 单聊，`2` 群聊                                                      |
-| `welcome`          | 每天第一次打开单聊时的欢迎语                                                              |
 
-- 改完后在每个正在使用的 pi 窗口执行 `/wecom-aibot connect` 生效。只改欢迎语或默认推送目标不会清掉排队任务和通知；更换 BotID、Secret 或 `allowedUserIds` 会撤销旧注册及其待处理工作。
+- 改完后在每个正在使用的 pi 窗口执行 `/wecom-aibot connect` 生效。只改默认推送目标不会清掉排队任务和通知；更换 BotID、Secret 或 `allowedUserIds` 会撤销旧注册及其待处理工作。
 - 连接状态只属于当前 session，不保存到配置文件。
 - Secret 以明文保存，请勿提交到代码仓库或发给他人。
 
@@ -160,17 +158,28 @@ pi install .
 
 ### 发送任务
 
-单聊直接发消息，群聊先 @机器人。机器人先回一条「执行中…」的状态消息，pi 处理完后改为「本轮已结束」，结果单独发一条会话通知。
+每条任务都要指明目标会话：引用一条通知，或者用命令写出完整 session ID。机器人收到后先回一条「执行中…」的状态消息，pi 处理完后改为「本轮已结束」，结果单独发一条会话通知。
 
-- pi 正忙时新消息排队，按顺序处理。
-- 任务超过约 10 分钟时，状态消息提前改为「任务仍在执行，请等待会话通知。」，完成后照常发结果。
-- 同一个 pi 窗口里，所有企业微信聊天共用一份对话；需要分开时，开不同的 pi 窗口。
+```text
+/wecom-aibot sessions
+/wecom-aibot send   --sessionid <完整 session ID> --prompt <正文>
+/wecom-aibot screen --sessionid <完整 session ID>
+/wecom-aibot cancel --sessionid <完整 session ID>
+/wecom-aibot --help
+```
+
+- `sessions` 列出在线会话：目录、供应商 · 模型、忙闲，以及单独一行的完整 session ID。
+- `send` 的正文从 `--prompt` 之后开始，空格、换行和 `--` 开头的文字都原样保留；`--prompt` 必须放在最后。
+- `screen` 截取该会话当前的终端画面，只读请求，不打断正在运行的任务。
+- `cancel` 请求中止该会话正在运行的一轮；中止是异步生效的。
+- 参数只用空格分隔，不支持 `=`；未知选项会报错并列出可用选项。
+- 没有任何目标的普通消息不会投递，机器人会回一条用法提示。
 
 | 发送的内容 | pi 收到的是                                         |
 | :--------- | :-------------------------------------------------- |
-| 文字       | 直接作为任务                                        |
-| 语音       | 自动转成的文字                                      |
-| 图片       | 图片本身（需要所用模型支持看图）                    |
+| 文字       | `--prompt` 之后的正文                               |
+| 语音       | 自动转成的文字（引用一条通知来指定目标）            |
+| 图片       | 图片本身（需要所用模型支持看图；引用一条通知来指定目标） |
 | 文件、视频 | 保存到项目的 `.pi-wecom-aibot-files/`，并告诉 pi 文件位置 |
 | 引用消息   | 被引用的文字一起带上                                |
 
@@ -180,12 +189,12 @@ pi install .
 
 ### 同时开着多个 pi
 
-- 只有一个 pi 在线时，消息直接交给它。
-- 有多个时，机器人列出每个 pi 的项目文件夹、模型和会话编号，回复序号选择；触发选择的那条消息暂存 5 分钟，选好后自动交给它。
-- 选好后，后续消息都交给同一个 pi；它退出或切换会话后会请你重新选择。群聊里每个人的选择互不影响。
-- 引用某条会话通知回复，消息直接交给发出这条通知的 pi。
+网关不记住任何选择：每条消息自己带目标，所以不会因为切换窗口或成员变化而投到别的 pi。
 
-在企业微信里发 `/wecom-aibot sessions` 重新列出并选择，发 `/wecom-aibot use <会话编号>` 按通知里 `session:` 后的完整编号选择。
+- 只有一个 pi 在线时，同样要先指明目标（`/wecom-aibot sessions` 拿到 ID，或引用一条通知）。
+- 引用某条会话通知回复，这条消息就交给发出该通知的 pi，且不影响其他消息。
+- 群聊里每个人各自指定目标，互不影响。
+- 目标 session 离线或写错时，机器人会回一条错误并附上当前会话列表。
 
 ### 共享网关
 

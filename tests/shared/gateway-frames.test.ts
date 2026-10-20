@@ -51,7 +51,7 @@ test("every client frame the gateway consumes is validated before use", () => {
   assert.equal(parseClientFrame({ type: "notify", id: "1", chat: { chatId: "user", chatType: 1 }, notification: { kind: "test", source, text: "hi" } }).ok, true);
   assert.equal(parseClientFrame({ type: "notify", id: "1", chat: { chatId: "", chatType: 1 }, notification: { kind: "test", source, text: "hi" } }).ok, false);
   assert.equal(parseClientFrame({ type: "watch", id: "1", timeoutMs: Number.NaN }).ok, false);
-  assert.equal(parseClientFrame({ type: "register", registration: { instanceId: "i", registrationId: "r", source, config: { botId: "bot", welcome: "hi", allowedUserIds: "alice" } }, proof: "0" }).ok, false,
+  assert.equal(parseClientFrame({ type: "register", registration: { instanceId: "i", registrationId: "r", source, config: { botId: "bot", allowedUserIds: "alice" } }, proof: "0" }).ok, false,
     "a string allowlist can never reach the gateway and expand into one userid per character");
   assert.equal(parseClientFrame({ type: "nonsense" }).ok, false);
 });

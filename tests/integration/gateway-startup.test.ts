@@ -12,7 +12,7 @@ import { FakeWebSocket } from "../support/fake-websocket.ts";
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test("startup timeout cannot close a gateway registered before socket permissions finish", { timeout: 5000, skip: process.platform === "win32" }, async (t) => {
-  const config = { botId: `startup-${randomUUID()}`, secret: "offline-test-secret", welcome: "hello", enabled: true };
+  const config = { botId: `startup-${randomUUID()}`, secret: "offline-test-secret", enabled: true };
   const original = fs.chmod;
   let release!: () => void;
   let entered!: () => void;

@@ -1,5 +1,5 @@
 /** /wecom-aibot command table, argument parsing, help text and completion: pure functions without pi state. */
-import { CONFIG_FILE, DEFAULT_WELCOME } from "./config.ts";
+import { CONFIG_FILE } from "./config.ts";
 
 export const WHOAMI_WAIT_SECONDS = 120;
 
@@ -261,6 +261,7 @@ export function wecomHelpText(topic?: WeComCommand): string {
 		lines.push(...section("说明", [
 			"  子命令是动作，不带 --（如 connect）；位置参数是命令作用的对象，直接写值。",
 			"  可选设置写成 --选项 值 或 --选项=值；setup 后面可以接 whoami，按顺序执行两个动作：/wecom-aibot setup whoami。",
+			"  企业微信聊天里另有 sessions / send / screen / cancel 四个子命令（用完整 session ID 指定目标），它们只在企微中解析，pi 里没有。",
 		]));
 		lines.push(...section("子命令", [
 			...alignedRows(WECOM_COMMANDS.map((command) => [command.name, command.description])),
@@ -299,14 +300,14 @@ export function wecomHelpText(topic?: WeComCommand): string {
 				["配置文件", `${CONFIG_FILE}\n独立 JSON 文件；同一 pi 用户目录下的多个窗口共用。`],
 				["默认位置", "~/.pi/agent/wecom-aibot/config.json，与其他 pi 配置同在 agent 目录下，但放在插件自己的文件夹里。\n同一文件夹还放着共享网关的 socket 和会话选择记录（gateway/）；PI_CODING_AGENT_DIR 改变时整块随之移动。"],
 				["写入方式", "/wecom-aibot setup 保存 botId、secret 和默认推送目标；其他配置可编辑此 JSON 文件。"],
-				["字段", "botId / secret：机器人凭据；welcome：进入企微聊天时的欢迎语。\ndefaultChatId：默认推送的 userid 或群 chatid；defaultChatType：1 单聊 / 2 群聊。\nallowedUserIds：允许发任务的企微 userid 列表；空列表表示不限制。"],
+				["字段", "botId / secret：机器人凭据。\ndefaultChatId：默认推送的 userid 或群 chatid；defaultChatType：1 单聊 / 2 群聊。\nallowedUserIds：允许发任务的企微 userid 列表；空列表表示不限制。"],
 				["sendMode", "通知模式：text（默认）用 Markdown；image 把自动结果渲染成当前 pi 终端图片（含 session 等三行头部，不含 footer/状态栏），通过原生图片消息发送。wecom_send 的显式 content 和 /wecom-aibot test 始终为 Markdown。"],
 			]),
 			"  配置示例（请替换示例中的 BotID、Secret 和目标 ID）：",
 			...JSON.stringify({
 				botId: "your-bot-id", secret: "your-long-connection-secret", sendMode: "text",
 				defaultChatId: "your-userid", defaultChatType: 1,
-				welcome: DEFAULT_WELCOME, allowedUserIds: [],
+				allowedUserIds: [],
 			}, null, 2).split("\n").map((line) => `  ${line}`),
 			"  修改后，在需要更新的 pi 中执行 /wecom-aibot connect 重新读取配置；只影响当前 session。",
 		]));

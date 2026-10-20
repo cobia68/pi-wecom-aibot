@@ -13,11 +13,11 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import type { Socket } from "node:net";
 import type { DeliveryFailure } from "./delivery.ts";
-import type { GatewayNotification, NotificationSource } from "./notification-types.ts";
+import type { GatewayImage, GatewayNotification, NotificationSource } from "./notification-types.ts";
 import { WECOM_ACK_TIMEOUT_MS, type ChatRef, type InboundMessage, type WeComState } from "./wecom-protocol.ts";
 import { agentDirectory, gatewayDirectory } from "./agent-path.ts";
 
-export const GATEWAY_PROTOCOL_VERSION = 3;
+export const GATEWAY_PROTOCOL_VERSION = 4;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;
 export const IPC_MAX_BYTES = 1_048_576;
@@ -31,7 +31,6 @@ export const GATEWAY_RETRY_MS = 10_000;
 /** What a pi registers: never the Secret, and only the fields the gateway uses. */
 export interface RegistrationConfig {
 	botId: string;
-	welcome: string;
 	allowedUserIds?: string[];
 }
 
@@ -52,6 +51,21 @@ export interface SessionTarget {
 	instanceId: string;
 	registrationId: string;
 	sessionId: string;
+}
+
+/** What the gateway may ask one pi to do. Both are read-only with respect to the conversation. */
+export type BridgeRequestAction = "screen" | "cancel";
+
+export interface BridgeRequest {
+	action: BridgeRequestAction;
+	target: SessionTarget;
+}
+
+/** A pi's answer to one request; `image` is a private PNG only a screen request produces. */
+export interface BridgeResponse {
+	ok: boolean;
+	error?: string;
+	image?: GatewayImage;
 }
 
 /** The conversation of a message, as /wecom-aibot whoami reports it: chatid is the userid in a single chat. */
@@ -85,12 +99,12 @@ export type ClientFrame =
 	| { type: "hello"; version: number; nonce: string }
 	| { type: "register"; registration: GatewayRegistration; proof: string; resume?: boolean }
 	| { type: "source"; source: NotificationSource }
-	| { type: "welcome"; text: string }
 	| { type: "ping" | "resume" | "unregister" }
 	| { type: "status"; taskId: string; state: TaskState }
 	| { type: "notify"; id: string; chat: ChatRef; notification: GatewayNotification }
 	| { type: "watch"; id: string; timeoutMs: number }
-	| { type: "unwatch"; id: string };
+	| { type: "unwatch"; id: string }
+	| { type: "response"; id: string; response: BridgeResponse };
 
 export type ServerFrame =
 	| { type: "hello"; version: number; endpoint: string; nonce: string; proof: string }
@@ -98,6 +112,7 @@ export type ServerFrame =
 	| { type: "status"; status: GatewayStatus }
 	| { type: "pong" }
 	| { type: "task"; target: SessionTarget; task: GatewayTask }
+	| { type: "request"; id: string; request: BridgeRequest }
 	| { type: "result"; id: string; error?: string; outcome?: DeliveryFailure }
 	| { type: "identity"; id: string; identity: ChatIdentity }
 	| { type: "log"; message: string }
@@ -109,8 +124,8 @@ export interface BridgeClient {
 	stop(reason?: string): void;
 	isReady(): boolean;
 	updateSource(source: NotificationSource): void;
-	/** Update presentation only, retaining the registration, tasks and identity watches. */
-	updateWelcome(welcome: string): void;
+	/** Answer a gateway request: the screen image, or the outcome of a cancel. */
+	respond(id: string, response: BridgeResponse): void;
 	/** Restart a stopped upstream connection, e.g. after another client took it over. */
 	resume(): void;
 	/** false when the state could not be handed to the gateway; the gateway ignores tasks it no longer knows. */
@@ -146,8 +161,12 @@ export function validSource(value: unknown): value is NotificationSource {
 		&& [source.provider, source.modelName, source.directoryName].every((item) => typeof item === "string" && item.length <= 4096);
 }
 
-export function validWelcome(value: unknown): value is string {
-	return typeof value === "string" && value.length <= 16_384;
+function validImage(value: unknown): value is GatewayImage {
+	const image = value as GatewayImage | undefined;
+	return !!image && typeof image === "object"
+		&& image.mime === "image/png"
+		&& typeof image.filename === "string" && !!image.filename && image.filename.length <= 256 && !/[\u0000-\u001f\u007f]/.test(image.filename)
+		&& typeof image.path === "string" && !!image.path && image.path.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(image.path);
 }
 
 export function validRegistration(value: unknown): value is GatewayRegistration {
@@ -158,7 +177,6 @@ export function validRegistration(value: unknown): value is GatewayRegistration 
 		&& typeof registration.registrationId === "string" && registration.registrationId.length > 0 && registration.registrationId.length <= 256
 		&& validSource(registration.source) && !!cfg && typeof cfg === "object"
 		&& typeof cfg.botId === "string" && !!cfg.botId && cfg.botId.length <= 1024
-		&& validWelcome(cfg.welcome)
 		&& (cfg.allowedUserIds === undefined || (Array.isArray(cfg.allowedUserIds) && cfg.allowedUserIds.length <= 1000
 			&& cfg.allowedUserIds.every((id) => typeof id === "string" && id.length <= 1024)));
 }
@@ -170,10 +188,7 @@ export function validNotification(value: unknown): value is GatewayNotification 
 	return ["notification", "completion", "reply", "test"].includes(notification.kind) && validSource(notification.source)
 		&& typeof notification.text === "string" && Buffer.byteLength(notification.text) <= 512 * 1024
 		&& [notification.excerpt, notification.aborted].every((flag) => flag === undefined || typeof flag === "boolean")
-		&& (image === undefined || (!!image && typeof image === "object"
-			&& image.mime === "image/png"
-			&& typeof image.filename === "string" && !!image.filename && image.filename.length <= 256 && !/[\u0000-\u001f\u007f]/.test(image.filename)
-			&& typeof image.path === "string" && !!image.path && image.path.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(image.path)));
+		&& (image === undefined || validImage(image));
 }
 
 export function validChat(value: unknown): value is ChatRef {
@@ -242,9 +257,14 @@ export function parseClientFrame(value: unknown): FrameParse<ClientFrame> {
 		case "source":
 			if (!validSource(frame.source)) return reject("无效的会话来源");
 			return accept({ type: "source", source: frame.source });
-		case "welcome":
-			if (!validWelcome(frame.text)) return reject("无效的欢迎语");
-			return accept({ type: "welcome", text: frame.text });
+		case "response": {
+			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
+			const response = frame.response as BridgeResponse | undefined;
+			if (!response || typeof response !== "object" || typeof response.ok !== "boolean") return reject("无效的请求应答");
+			if (response.error !== undefined && typeof response.error !== "string") return reject("无效的错误说明");
+			if (response.image !== undefined && !validImage(response.image)) return reject("无效的图片");
+			return accept({ type: "response", id: frame.id, response });
+		}
 		case "status":
 			if (!validRequestId(frame.taskId)) return reject("无效的任务 ID");
 			if (!isTaskState(frame.state)) return reject("无效的任务状态");
@@ -291,6 +311,13 @@ export function parseServerFrame(value: unknown): FrameParse<ServerFrame> {
 			if (!validTask(frame.task)) return reject("无效的任务");
 			if (!validTarget(frame.target)) return reject("无效的任务目标");
 			return accept({ type: "task", target: frame.target, task: frame.task });
+		case "request": {
+			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
+			const request = frame.request as BridgeRequest | undefined;
+			if (!request || typeof request !== "object" || (request.action !== "screen" && request.action !== "cancel")) return reject("无效的网关请求");
+			if (!validTarget(request.target)) return reject("无效的请求目标");
+			return accept({ type: "request", id: frame.id, request });
+		}
 		case "result":
 			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
 			if (frame.error !== undefined && typeof frame.error !== "string") return reject("无效的送达错误");

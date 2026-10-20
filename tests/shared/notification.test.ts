@@ -64,14 +64,6 @@ test("metadata and abort notice both count towards the byte budget", () => {
   assert.throws(() => formatNotification({ ...source, modelName: "x".repeat(MAX_NOTIFICATION_BYTES) }, "result", { tailParagraphs: 1 }), /来源信息过长/);
 });
 
-test("welcome text uses the same source fields within its plain text byte limit", () => {
-  const message = formatNotification(source, "你好🙂".repeat(1000), { kind: "welcome" });
-  assert.ok(Buffer.byteLength(message, "utf8") <= 2048);
-  assert.match(message, /^🔔 pi-wecom-aibot · 欢迎\n🏷️ test-provider · Model A\n🆔 session: pi-session-1\n\n/);
-  assert.match(message, /已截断/);
-  assert.equal(message.includes("\ufffd"), false);
-});
-
 test("metadata stays on a single line and embedded backticks cannot break the header", () => {
   const message = formatNotification({ ...source, modelName: "Model `A`\nextra", directoryName: "project`name" }, "body");
   assert.ok(message.startsWith("🔔 project\\`name · 会话通知  \n"));
@@ -81,7 +73,7 @@ test("metadata stays on a single line and embedded backticks cannot break the he
 
 test("every published envelope round-trips: a quoted notification or status routes to its exact session", () => {
   const tricky = { ...source, sessionId: "session_with_[brackets]\\suffix", directoryName: "project session: notes", modelName: "model `A`" };
-  for (const kind of ["notification", "completion", "reply", "test", "welcome"] as const) {
+  for (const kind of ["notification", "completion", "reply", "test"] as const) {
     const message = formatNotification(tricky, `body\nsession: another-session`, { kind });
     assert.deepEqual(quotedSessions(message), [tricky.sessionId], kind);
     // WeCom may prefix each quoted line with "> ".

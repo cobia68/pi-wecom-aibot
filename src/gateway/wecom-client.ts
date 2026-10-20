@@ -8,7 +8,6 @@
  *   aibot_subscribe              { bot_id, secret }
  *   ping                         heartbeat
  *   aibot_respond_msg            reply to a msg callback (stream / markdown / template_card / file / ...)
- *   aibot_respond_welcome_msg    reply to an enter_chat event
  *   aibot_respond_update_msg     update a template card
  *   aibot_send_msg               proactive push (no callback required)
  *   aibot_upload_media_init/chunk/finish
@@ -338,10 +337,6 @@ export class WeComClient {
 		return this.isReady() && this.send({ cmd: "aibot_respond_msg", headers: { req_id: reqId }, body }) === undefined;
 	}
 
-	/** aibot_respond_welcome_msg — reply to an enter_chat event. */
-	respondWelcome(reqId: string, body: any): boolean {
-		return this.isReady() && this.send({ cmd: "aibot_respond_welcome_msg", headers: { req_id: reqId }, body }) === undefined;
-	}
 
 
 	/**

@@ -24,7 +24,7 @@ export interface NotificationOptions {
 }
 
 const TITLES: Record<NotificationKind, string> = {
-	notification: "会话通知", completion: "会话通知", reply: "会话通知", test: "部署测试", welcome: "欢迎",
+	notification: "会话通知", completion: "会话通知", reply: "会话通知", test: "部署测试",
 };
 /** Header line icons. They lead each line in Markdown and in the rendered image. */
 export const NOTIFICATION_ICONS = { title: "🔔", model: "🏷️", session: "🆔" } as const;
@@ -111,7 +111,7 @@ export function formatProcessingStatus(sessionId: string, state: ProcessingState
 	return `${NOTIFICATION_ICONS.session} session: ${metadataValue(sessionId, false)}  \n${STATUS_TEXT[state]}`;
 }
 
-/** One envelope for final notifications, deployment checks and welcome messages. */
+/** One envelope for final notifications and deployment checks. */
 export function formatNotification(
 	source: NotificationSource,
 	text: string,
@@ -125,7 +125,7 @@ export function formatNotification(
 
 /**
  * The gateway's half of formatNotification: the source header plus a body that is already excerpted.
- * An excerpt, a reply and a welcome are cut to the byte limit; other text that does not fit is an error.
+ * An excerpt and a reply are cut to the byte limit; other text that does not fit is an error.
  */
 export function renderNotification(
 	source: NotificationSource,
@@ -164,19 +164,18 @@ function layoutNotification(
 	if (invalid) return { reason: invalid };
 	if (!body.trim()) return { reason: "当前 pi 会话没有可发送的文本回复" };
 	const kind = options.kind ?? "notification";
-	const plain = kind === "welcome";
-	const title = `${NOTIFICATION_ICONS.title} ${metadataValue(source.directoryName, plain)} · ${TITLES[kind]}`;
+	const title = `${NOTIFICATION_ICONS.title} ${metadataValue(source.directoryName, false)} · ${TITLES[kind]}`;
 	const header = [
 		title,
-		`${NOTIFICATION_ICONS.model} ${metadataValue(source.provider, plain)} · ${metadataValue(source.modelName, plain)}`,
-		`${NOTIFICATION_ICONS.session} session: ${metadataValue(source.sessionId, plain)}`,
-	].join(plain ? "\n" : "  \n") + "\n\n";
+		`${NOTIFICATION_ICONS.model} ${metadataValue(source.provider, false)} · ${metadataValue(source.modelName, false)}`,
+		`${NOTIFICATION_ICONS.session} session: ${metadataValue(source.sessionId, false)}`,
+	].join("  \n") + "\n\n";
 	const suffix = options.aborted ? "\n\n（本轮任务已中止）" : "";
-	const limit = plain ? 2048 : MAX_NOTIFICATION_BYTES;
+	const limit = MAX_NOTIFICATION_BYTES;
 	const budget = limit - Buffer.byteLength(header + suffix, "utf8");
 	if (budget < 0) return { reason: "通知来源信息过长，无法容纳正文" };
 	let content = body.trim();
-	if (options.excerpt || kind === "reply" || plain) {
+	if (options.excerpt || kind === "reply") {
 		content = truncateContent(content, budget, !!options.excerpt);
 	}
 	if (Buffer.byteLength(content, "utf8") > budget) {

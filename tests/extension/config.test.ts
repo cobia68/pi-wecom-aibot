@@ -7,7 +7,7 @@ import { after, beforeEach, test } from "node:test";
 const sandbox = mkdtempSync(join(tmpdir(), "pi-wecom-aibot-config-test-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = sandbox;
-const { CONFIG_FILE, DEFAULT_WELCOME, clearConfig, loadConfig, updateConfig } = await import("../../src/extension/config.ts");
+const { CONFIG_FILE, clearConfig, loadConfig, updateConfig } = await import("../../src/extension/config.ts");
 const readJson = () => JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
 
 beforeEach(() => {
@@ -29,17 +29,17 @@ test("updateConfig merges into the file as it is now, keeping hand edits and unk
   assert.deepEqual(config.allowedUserIds, ["boss"]);
   assert.equal(config.secret, "rotated");
   assert.deepEqual(readJson(), {
-    welcome: DEFAULT_WELCOME, sendMode: "text", botId: "bot", secret: "rotated",
+    sendMode: "text", botId: "bot", secret: "rotated",
     allowedUserIds: ["boss"], futureField: { kept: true }, defaultChatId: "boss", defaultChatType: 1,
   });
   assert.deepEqual(readdirSync(sandbox).filter((name) => name.endsWith(".tmp")), [], "no temporary file is left behind");
 });
 
 test("updateConfig never creates a configuration without credentials", () => {
-  assert.throws(() => updateConfig({ welcome: "hello" }), /\/wecom-aibot setup/);
+  assert.throws(() => updateConfig({ sendMode: "image" }), /\/wecom-aibot setup/);
   assert.throws(() => readFileSync(CONFIG_FILE), { code: "ENOENT" });
   updateConfig({ botId: "bot", secret: "secret" });
-  assert.deepEqual(loadConfig(), { botId: "bot", secret: "secret", welcome: DEFAULT_WELCOME, sendMode: "text", allowedUserIds: undefined, defaultChatId: undefined, defaultChatType: undefined });
+  assert.deepEqual(loadConfig(), { botId: "bot", secret: "secret", sendMode: "text", allowedUserIds: undefined, defaultChatId: undefined, defaultChatType: undefined });
   if (process.platform !== "win32") assert.equal(statSync(CONFIG_FILE).mode & 0o777, 0o600);
 });
 
@@ -58,10 +58,10 @@ test("conditional configuration updates refuse another bot, a rotated Secret, or
 
 test("conditional target updates still preserve unrelated edits for the same bot", () => {
   const expected = { botId: "bot-A", secret: "secret-A" };
-  writeFileSync(CONFIG_FILE, JSON.stringify({ ...expected, allowedUserIds: ["boss"], futureField: true, welcome: "edited" }));
+  writeFileSync(CONFIG_FILE, JSON.stringify({ ...expected, allowedUserIds: ["boss"], futureField: true }));
   const saved = updateConfig({ defaultChatId: "boss", defaultChatType: 1 }, expected);
   assert.equal(saved.defaultChatId, "boss");
-  assert.equal(saved.welcome, "edited");
+  assert.equal(Object.hasOwn(saved, "futureField"), false, "unknown fields stay out of the runtime configuration");
   assert.deepEqual(saved.allowedUserIds, ["boss"]);
   assert.equal(readJson().futureField, true);
 });
@@ -89,8 +89,8 @@ test("a stored field this version does not know is ignored and preserved", () =>
   const before = readFileSync(CONFIG_FILE, "utf8");
   assert.equal(Object.hasOwn(loadConfig()!, "futureField"), false, "unknown fields never reach the running configuration");
   assert.equal(readFileSync(CONFIG_FILE, "utf8"), before, "loading never rewrites the file");
-  assert.equal(updateConfig({ welcome: "hello" }).secret, "secret");
-  assert.deepEqual(readJson(), { ...stored, welcome: "hello", sendMode: "text" }, "an edit keeps fields this version does not own");
+  assert.equal(updateConfig({ sendMode: "image" }).secret, "secret");
+  assert.deepEqual(readJson(), { ...stored, sendMode: "image" }, "an edit keeps fields this version does not own");
 });
 
 test("send mode defaults to text and only an explicit image changes it", () => {
@@ -110,7 +110,6 @@ test("every stored field is validated once, with its field name", () => {
     [{ defaultChatType: 3 }, /defaultChatType/],
     [{ defaultChatType: "2" }, /defaultChatType/],
     [{ defaultChatId: 42 }, /defaultChatId/],
-    [{ welcome: null }, /welcome/],
     [{ botId: 42, secret: "secret" }, /botId/],
   ];
   for (const [fields, field] of cases) {

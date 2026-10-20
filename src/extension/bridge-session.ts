@@ -8,12 +8,12 @@ import type { ExtensionContext, MessageEndEvent, MessageStartEvent, MessageUpdat
 import { NotificationOutbox, removeNotificationImage, type CompletionRequest } from "./notification-outbox.ts";
 import type { WeComConfig } from "./config.ts";
 import type { GatewayClientOptions } from "./gateway-client.ts";
-import type { BridgeClient, ChatIdentity, GatewayTask, TaskState } from "../shared/gateway-protocol.ts";
+import type { BridgeClient, BridgeRequest as GatewayRequest, BridgeResponse, ChatIdentity, GatewayTask, TaskState } from "../shared/gateway-protocol.ts";
 import { InboundContentPreparer, type PreparedInboundContent } from "./inbound/content.ts";
 import { ConnectionNotices, type BridgeConnectionStatus } from "./connection-notices.ts";
 import { assistantReplyText, captureModelIdentity, captureNotificationSource } from "./notification-source.ts";
 import { NO_REPLY_TEXT } from "../shared/notification.ts";
-import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
+import type { GatewayImage, GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 
 /** WeCom messages accepted but not yet handed to pi: a bounded FIFO. */
@@ -54,6 +54,10 @@ export interface BridgeHost {
 	connectionChanged?(session: BridgeSession): void;
 	/** Render this notification as a screen image; failures return the Markdown fallback. */
 	prepareImage(notification: GatewayNotification, ctx: ExtensionContext, signal: AbortSignal): Promise<GatewayNotification>;
+	/** A screen request: capture now, without starting a turn. */
+	captureScreen(ctx: ExtensionContext, signal: AbortSignal): Promise<GatewayImage | undefined>;
+	/** Abort the agent operation currently running in this session. */
+	abort(): void;
 	/** Dispose this session, e.g. after the client gave up or the pi session changed. */
 	stop(reason: string): void;
 }
@@ -128,6 +132,7 @@ export class BridgeSession {
 			},
 			onState: (next, detail) => this.changeState(next, detail),
 			onTask: (task) => this.receive(task),
+			onRequest: (id, request) => this.request(id, request),
 			log: (line) => host.log(line),
 		});
 	}
@@ -167,7 +172,24 @@ export class BridgeSession {
 		if (!this.disposed && ctx.sessionManager.getSessionId() === this.sessionId) this.client.updateSource(captureNotificationSource(ctx));
 	}
 
-	updateWelcome(welcome: string): void { this.client.updateWelcome(welcome); }
+	/** A gateway request is read-only with respect to the conversation: no turn is started. */
+	private request(id: string, request: GatewayRequest): void {
+		const ctx = this.host.context();
+		const answer = (response: BridgeResponse) => { if (!this.disposed) this.client.respond(id, response); };
+		if (this.disposed || !ctx) { answer({ ok: false, error: "pi 会话已停止" }); return; }
+		if (ctx.sessionManager.getSessionId() !== this.sessionId || request.target.sessionId !== this.sessionId) {
+			answer({ ok: false, error: "请求的 session 与当前 pi 不匹配" });
+			return;
+		}
+		if (request.action === "cancel") {
+			this.host.abort();
+			answer({ ok: true });
+			return;
+		}
+		void this.host.captureScreen(ctx, this.mediaAbort.signal)
+			.then((image) => answer(image ? { ok: true, image } : { ok: false, error: "没有返回图片" }))
+			.catch((error: unknown) => answer({ ok: false, error: errMsg(error) }));
+	}
 
 	resume(): void { this.client.resume(); }
 

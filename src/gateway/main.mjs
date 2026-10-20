@@ -23,8 +23,7 @@ export async function bootstrap(overrides = {}) {
 	}
 	const { endpoint, credentials } = JSON.parse(input);
 	const { startGatewayServer } = await import("./server.ts");
-	const { gatewayStateFile } = await import("./selection-store.ts");
-	const server = await startGatewayServer({ routingStateFile: gatewayStateFile(credentials.botId), ...overrides, endpoint, credentials });
+	const server = await startGatewayServer({ ...overrides, endpoint, credentials });
 	if (!server) return; // Another contender owns the shared endpoint.
 	const close = () => server.close();
 	process.once("SIGINT", close);

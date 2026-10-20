@@ -16,7 +16,7 @@ const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = sandbox;
 const { default: extension } = await import("../../src/extension/index.ts");
 const { CONFIG_FILE, saveConfig, clearConfig } = await import("../../src/extension/config.ts");
-const config = { botId: "private-bot-id", secret: "private-secret", welcome: "hello" };
+const config = { botId: "private-bot-id", secret: "private-secret" };
 const key = "wecom-aibot";
 const theme = fixtureTheme("dark");
 const label = (color: "success" | "warning" | "error") => theme.fg(color, "wecom-aibot");
@@ -33,7 +33,7 @@ function connection(options: GatewayClientOptions) {
     start() { state = "connecting"; options.onState?.(state); },
     stop(reason) { stopped.push(reason); ready = false; state = "disconnected"; detail = reason; options.onState?.(state, detail); },
     isReady: () => ready,
-    updateSource() {}, updateWelcome() {}, resume() {},
+    updateSource() {}, respond() {}, resume() {},
     taskStatus: () => ready,
     async notify() { if (!ready) throw new Error("not connected"); },
     async watchIdentity() { throw new Error("identity is not used by status tests"); },

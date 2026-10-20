@@ -102,7 +102,7 @@ async function pair(connected = true) {
 beforeEach(async () => {
   harnesses = [];
   FakeWebSocket.instances = [];
-  const config = { botId: `multi-test-${randomUUID()}`, secret: "offline-test-secret", welcome: "hello" };
+  const config = { botId: `multi-test-${randomUUID()}`, secret: "offline-test-secret" };
   saveConfig(config);
   server = (await startGatewayServer({ credentials: config, endpoint: gatewayEndpoint(config.botId), idleTimeoutMs: 50, createWebSocket(url) {
     const ws = new FakeWebSocket(url);

@@ -53,10 +53,22 @@ async function drain(): Promise<void> {
 }
 
 function inbound(id: string, extra: Record<string, unknown> = {}): void {
+  // Media callbacks carry no text, so they name their target by quoting a notification instead.
+  const media = typeof extra.msgtype === "string" && extra.msgtype !== "text";
+  const quote = { quote: { msgtype: "text", text: { content: `session: ${sessionId}` } } };
   ws.receive({
     cmd: "aibot_msg_callback", headers: { req_id: `callback-${id}` },
-    body: { msgid: id, from: { userid: "test-user" }, chattype: "single", msgtype: "text", text: { content: id }, ...extra },
+    body: {
+      msgid: id, from: { userid: "test-user" }, chattype: "single", msgtype: "text",
+      text: { content: taskText(id) }, ...(media ? quote : {}), ...extra,
+      ...(media ? quote : {}),
+    },
   });
+}
+
+/** Every task names its target: the bridge tests speak the WeCom-side grammar. */
+function taskText(prompt: string): string {
+  return `/wecom-aibot send --sessionid ${sessionId} --prompt ${prompt}`;
 }
 
 function sendNotification(params: Record<string, unknown>): Promise<any> {
@@ -123,7 +135,7 @@ beforeEach(async (t) => {
       });
     },
   } as unknown as ExtensionAPI;
-  saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello" });
+  saveConfig({ botId: "test-bot", secret: "test-secret" });
   // The real gateway in-process: its routing, status messages and rendered notifications are what these tests assert.
   extension(pi, {
     renderScreen: (screen, options) => rasterise(screen, options),
@@ -156,13 +168,11 @@ after(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-test("changing welcome text preserves queued work and completion notifications on the same connection", async () => {
+test("re-reading an unchanged configuration keeps queued work and pending notifications", async () => {
   idle = false;
-  await sendNotification({ chatid: "test-user", after_settle: true, content: "PENDING-BEFORE-WELCOME-EDIT" });
-  inbound("queued-before-welcome-edit");
+  await sendNotification({ chatid: "test-user", after_settle: true, content: "PENDING-BEFORE-RECONNECT" });
+  inbound("queued-before-reconnect");
   await drain();
-  const config = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
-  await writeFile(CONFIG_FILE, JSON.stringify({ ...config, welcome: "UPDATED-WELCOME" }));
   const previous = ws;
   await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
@@ -171,14 +181,12 @@ test("changing welcome text preserves queued work and completion notifications o
   await emit("agent_settled", { aborted: false });
   const pushed = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
   assert.equal(pushed.length, 1);
-  assert.match(pushed[0].body.markdown.content, /PENDING-BEFORE-WELCOME-EDIT/);
-  clock.tick(250); // A busy pi already armed the normal idle-drain retry.
+  assert.match(pushed[0].body.markdown.content, /PENDING-BEFORE-RECONNECT/);
+  clock.tick(250);
   await drain();
   assert.equal(sent.length, 1);
-  assert.match(sent[0].content[0].text, /queued-before-welcome-edit/);
-  assert.equal(ws, previous, "presentation changes must not replace a registration or its upstream");
-  ws.receive({ cmd: "aibot_event_callback", headers: { req_id: "updated-welcome" }, body: { from: { userid: "test-user" }, event: { eventtype: "enter_chat" } } });
-  assert.match(ws.sent.at(-1).body.text.content, /UPDATED-WELCOME/);
+  assert.match(sent[0].content[0].text, /queued-before-reconnect/);
+  assert.equal(ws, previous, "an unchanged configuration must not replace the registration");
 });
 
 test("an allowlist change still revokes queued work and notifications from the old registration", async () => {
@@ -244,7 +252,7 @@ test("keeps arrival order when an image download is slower than the next text", 
   finishDownload(new Response(new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), { headers: { "content-type": "image/png" } }));
   await drain();
   assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0].content.map((part: { type: string }) => part.type), ["image"]);
+  assert.deepEqual(sent[0].content.map((part: { type: string }) => part.type), ["text", "image"], "the quoted source stays with the image");
   idle = true;
   await emit("agent_settled", { aborted: false });
   await drain();
@@ -472,14 +480,14 @@ test("an aborted task ends its status and includes the cancellation in its resul
 });
 
 test("the pi bridge also checks the allowlist before accepting a task", async () => {
-  saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello", allowedUserIds: ["allowed-user"] });
+  saveConfig({ botId: "test-bot", secret: "test-secret", allowedUserIds: ["allowed-user"] });
   await emit("session_start");
   await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
   ws.open();
   ws.acknowledge();
   inbound("blocked");
-  ws.receive({ cmd: "aibot_event_callback", headers: { req_id: "blocked-welcome" }, body: { from: { userid: "test-user" }, event: { eventtype: "enter_chat" } } });
+  ws.receive({ cmd: "aibot_event_callback", headers: { req_id: "blocked-enter" }, body: { from: { userid: "test-user" }, event: { eventtype: "enter_chat" } } });
   await drain();
   assert.equal(sent.length, 0);
   assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_respond_welcome_msg").length, 0);
@@ -718,7 +726,7 @@ test("wecom_send without a target replies to the chat that sent the WeCom task",
 
 test("group messages addressed to the bot reach pi and receive a reply in that conversation", async () => {
   inbound("group-request", {
-    chattype: "group", chatid: "test-group", text: { content: "@Robot 帮我检查项目" },
+    chattype: "group", chatid: "test-group", text: { content: taskText("帮我检查项目") },
   });
   await drain();
   assert.equal(sent.length, 1);
@@ -874,7 +882,7 @@ test("changing branches cannot substitute another branch's reply into a notifica
 });
 
 test("notifications use the configured target without changing an explicit target's chat type", async () => {
-  saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello", defaultChatId: "configured-group", defaultChatType: 2 });
+  saveConfig({ botId: "test-bot", secret: "test-secret", defaultChatId: "configured-group", defaultChatType: 2 });
   await emit("session_start");
   await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
@@ -897,7 +905,7 @@ test("notifications use the configured target without changing an explicit targe
 
 test("the deployment test command sends a labelled test to the default target and waits for confirmation", async () => {
   autoAcknowledge = false;
-  saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello", defaultChatId: "test-user", defaultChatType: 1 });
+  saveConfig({ botId: "test-bot", secret: "test-secret", defaultChatId: "test-user", defaultChatType: 1 });
   await emit("session_start");
   await command("connect", ctx);
   ws = FakeWebSocket.instances.at(-1)!;
@@ -1090,7 +1098,7 @@ test("logout reports deletion failure and stops this pi without claiming the cre
 
 for (const change of ["bot while waiting", "bot during confirmation", "Secret during confirmation"]) {
   test(`whoami cannot save an old identity after changing the ${change}`, async (t) => {
-    const replacement = { botId: change.startsWith("Secret") ? "test-bot" : "replacement-bot", secret: "replacement-secret", enabled: true, welcome: "replacement" };
+    const replacement = { botId: change.startsWith("Secret") ? "test-bot" : "replacement-bot", secret: "replacement-secret", enabled: true };
     const replace = () => writeFile(CONFIG_FILE, JSON.stringify(replacement));
     const notices = identityDialogs(t, async () => {
       if (change.includes("confirmation")) await replace();
@@ -1205,7 +1213,7 @@ test("setup options are used as given: --chatid is always a literal ID, even who
 });
 
 test("setup connects only this session and leaves the shared file otherwise untouched", async () => {
-  await writeFile(CONFIG_FILE, JSON.stringify({ botId: "old-bot", secret: "old-secret", futureField: { kept: true }, welcome: "hello" }));
+  await writeFile(CONFIG_FILE, JSON.stringify({ botId: "old-bot", secret: "old-secret", futureField: { kept: true } }));
   const sockets = FakeWebSocket.instances.length;
   await command("setup --bot-id fresh-bot --secret fresh-secret --chatid fresh-user", ctx);
   const saved = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
@@ -1413,7 +1421,7 @@ test("a file from WeCom is saved in the project with a .gitignore that keeps it 
 });
 
 async function imageModeStart() {
-  saveConfig({ botId: "test-bot", secret: "test-secret", welcome: "hello", sendMode: "image" });
+  saveConfig({ botId: "test-bot", secret: "test-secret", sendMode: "image" });
   const fixture = installTuiFixture(ctx);
   await emit("session_start");
   await command("connect", ctx);

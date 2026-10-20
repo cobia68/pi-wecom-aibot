@@ -5,7 +5,6 @@ import { dirname } from "node:path";
 import { deliveryFailure } from "../shared/delivery.ts";
 import type { WeComClientOptions } from "./wecom-client.ts";
 import { WeComGateway, type GatewayPeer } from "./runtime.ts";
-import { GatewaySelectionStore } from "./selection-store.ts";
 import {
 	GATEWAY_IDLE_MS, GATEWAY_PROTOCOL_VERSION, IPC_LEASE_MS, gatewayEndpoint, gatewayProof, parseClientFrame, readFrames,
 	validRegistration, verifyProof, writeFrame,
@@ -17,7 +16,6 @@ export interface GatewayServerOptions extends Pick<WeComClientOptions, "createWe
 	credentials: GatewayCredentials;
 	idleTimeoutMs?: number;
 	startupTimeoutMs?: number;
-	routingStateFile?: string;
 }
 
 export interface GatewayServer {
@@ -37,8 +35,7 @@ export async function startGatewayServer(options: GatewayServerOptions): Promise
 	let finish!: () => void;
 	const closed = new Promise<void>((resolve) => { finish = resolve; });
 	const server = createServer((socket) => accept(socket));
-	const selectionStore = options.routingStateFile ? new GatewaySelectionStore(options.routingStateFile) : undefined;
-	const gateway = new WeComGateway({ botId, secret, createWebSocket: options.createWebSocket }, updateIdleTimer, selectionStore);
+	const gateway = new WeComGateway({ botId, secret, createWebSocket: options.createWebSocket }, updateIdleTimer);
 
 	/** One timer owner for initialization and membership changes; listening may admit a pi before chmod ends. */
 	function updateIdleTimer(): void {
@@ -49,7 +46,6 @@ export async function startGatewayServer(options: GatewayServerOptions): Promise
 		idleTimer = setTimeout(() => {
 			idleTimer = undefined;
 			if (stopping || gateway.size) return;
-			if (started) { try { selectionStore?.clear(); } catch { /* retained bindings fail closed on the next startup */ } }
 			close();
 		}, started ? options.idleTimeoutMs ?? GATEWAY_IDLE_MS : options.startupTimeoutMs ?? 15_000);
 	}
@@ -136,8 +132,8 @@ export async function startGatewayServer(options: GatewayServerOptions): Promise
 					case "source":
 						gateway.updateSource(registered.instanceId, frame.source);
 						return;
-					case "welcome":
-						gateway.updateWelcome(registered.instanceId, frame.text);
+					case "response":
+						gateway.response(registered.instanceId, frame.id, frame.response);
 						return;
 					case "status":
 						gateway.taskStatus(registered.instanceId, frame.taskId, frame.state);
@@ -183,7 +179,7 @@ function copyRegistration(value: unknown): GatewayRegistration | undefined {
 	return {
 		instanceId, registrationId,
 		source: { sessionId: source.sessionId, provider: source.provider, modelName: source.modelName, directoryName: source.directoryName },
-		config: { botId: config.botId, welcome: config.welcome, ...(config.allowedUserIds ? { allowedUserIds: [...config.allowedUserIds] } : {}) },
+		config: { botId: config.botId, ...(config.allowedUserIds ? { allowedUserIds: [...config.allowedUserIds] } : {}) },
 	};
 }
 

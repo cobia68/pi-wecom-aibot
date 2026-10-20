@@ -6,7 +6,7 @@ export interface NotificationSource {
 	readonly directoryName: string;
 }
 
-export type NotificationKind = "notification" | "completion" | "reply" | "test" | "welcome";
+export type NotificationKind = "notification" | "completion" | "reply" | "test";
 
 /** A notification snapshot; the gateway adds the source header and applies WeCom's byte limit. */
 /** A file the gateway uploads and sends as a native WeCom image message. */

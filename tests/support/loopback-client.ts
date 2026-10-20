@@ -7,8 +7,8 @@ import { randomUUID } from "node:crypto";
 import { DeliveryError } from "../../src/shared/delivery.ts";
 import { WeComGateway, type GatewayPeer } from "../../src/gateway/runtime.ts";
 import type { GatewayClientOptions } from "../../src/extension/gateway-client.ts";
-import type { BridgeClient, ChatIdentity, GatewayRegistration, GatewayStatus, ServerFrame, TaskState } from "../../src/shared/gateway-protocol.ts";
-import { sameTarget, sessionTarget, validWelcome } from "../../src/shared/gateway-protocol.ts";
+import type { BridgeClient, BridgeResponse, ChatIdentity, GatewayRegistration, GatewayStatus, ServerFrame, TaskState } from "../../src/shared/gateway-protocol.ts";
+import { sameTarget, sessionTarget } from "../../src/shared/gateway-protocol.ts";
 import type { GatewayNotification, NotificationSource } from "../../src/shared/notification-types.ts";
 import type { WeComSocket } from "../../src/gateway/wecom-client.ts";
 import type { ChatRef, WeComState } from "../../src/shared/wecom-protocol.ts";
@@ -27,10 +27,10 @@ export class LoopbackClient implements BridgeClient {
   constructor(options: GatewayClientOptions, createWebSocket: (url: string) => WeComSocket) {
     this.options = options;
     this.createWebSocket = createWebSocket;
-    const { botId, welcome, allowedUserIds } = options.config;
+    const { botId, allowedUserIds } = options.config;
     this.registration = {
       instanceId: options.instanceId ?? randomUUID(), registrationId: randomUUID(), source: { ...options.source },
-      config: { botId, welcome, ...(allowedUserIds ? { allowedUserIds: [...allowedUserIds] } : {}) },
+      config: { botId, ...(allowedUserIds ? { allowedUserIds: [...allowedUserIds] } : {}) },
     };
   }
 
@@ -66,10 +66,8 @@ export class LoopbackClient implements BridgeClient {
     if (this.registered) this.gateway?.updateSource(this.registration.instanceId, source);
   }
 
-  updateWelcome(welcome: string): void {
-    if (!validWelcome(welcome)) throw new Error("invalid welcome");
-    this.registration.config = { ...this.registration.config, welcome };
-    if (this.registered) this.gateway?.updateWelcome(this.registration.instanceId, welcome);
+  respond(id: string, response: BridgeResponse): void {
+    this.gateway?.response(this.registration.instanceId, id, response);
   }
 
   resume(): void {
@@ -113,6 +111,9 @@ export class LoopbackClient implements BridgeClient {
       case "status": this.status(frame.status); return;
       case "task":
         if (sameTarget(frame.target, sessionTarget(this.registration))) this.options.onTask?.(frame.task);
+        return;
+      case "request":
+        if (sameTarget(frame.request.target, sessionTarget(this.registration))) this.options.onRequest?.(frame.id, frame.request);
         return;
       case "identity": this.watches.get(frame.id)?.(undefined, frame.identity); return;
       case "log": this.options.log?.(frame.message); return;

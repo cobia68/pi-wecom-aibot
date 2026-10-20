@@ -16,8 +16,6 @@ export interface WeComConfig {
 	botId: string;
 	/** 长连接专用 Secret. */
 	secret: string;
-	/** Welcome text replied on the enter_chat event. */
-	welcome: string;
 	/** Optional allowlist of userids. Empty/undefined means everyone. */
 	allowedUserIds?: string[];
 	/** Default destination for proactive notifications. */
@@ -30,10 +28,7 @@ export interface WeComConfig {
 /** A file of its own: pi gives extensions no settings writer, and project settings cannot override credentials here. */
 export const CONFIG_FILE = join(pluginDirectory(), "config.json");
 
-export const DEFAULT_WELCOME = "你好，我是 pi 智能助手。直接把问题或任务发给我即可。";
-
 const DEFAULTS: Omit<WeComConfig, "botId" | "secret"> = {
-	welcome: DEFAULT_WELCOME,
 	sendMode: "text",
 };
 
@@ -133,7 +128,6 @@ function normalize(value: unknown, file: string): WeComConfig | undefined {
 	return {
 		botId,
 		secret,
-		welcome: text("welcome") ?? DEFAULTS.welcome,
 		allowedUserIds: allowed as string[] | undefined,
 		defaultChatId: text("defaultChatId")?.trim() || undefined,
 		defaultChatType: chatType as 1 | 2 | undefined,
