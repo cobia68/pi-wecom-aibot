@@ -11,9 +11,12 @@ import {
 import {
 	cellMetrics,
 	cellsToSvg,
+	MAX_CONTENT_ROWS,
 	maskSecrets,
 	parseAnsiLine,
 	renderScreenPng,
+	TARGET_PNG_HEIGHT,
+	TARGET_PNG_WIDTH,
 } from "../../../src/extension/screen/render.ts";
 
 const metrics = { advance: 0.6, ascent: 0.8, descent: 0.2, lineGap: 0.2 };
@@ -484,8 +487,55 @@ test("real WASM renders visible glyphs into PNG and bounds very wide screens", a
 	};
 	const image = Buffer.from(await renderScreenPng(screen, { fonts }));
 	assert.deepEqual([...image.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
-	assert.ok(image.readUInt32BE(16) <= 2400);
-	assert.ok(image.readUInt32BE(20) > 10);
+	assert.equal(image.readUInt32BE(16), TARGET_PNG_WIDTH);
+	assert.equal(image.readUInt32BE(20), TARGET_PNG_HEIGHT, "very wide content still fills the fixed canvas");
 	const hidden = await renderScreenPng({ ...screen, lines: [`\x1b[8m${screen.lines[0]}`] }, { fonts });
 	assert.notDeepEqual(image, Buffer.from(hidden), "the image must contain glyphs, not just a background rectangle");
+});
+
+test("every image is exactly TARGET_PNG_WIDTH × TARGET_PNG_HEIGHT, so two pi windows look alike", async (t) => {
+	let fonts: ReturnType<typeof loadFonts>;
+	try {
+		fonts = loadFonts();
+	} catch {
+		t.skip("no system font installed");
+		return;
+	}
+	for (const columns of [40, 60, 80, 100, 120, 140, 160]) {
+		for (const rows of [1, 5, 40, MAX_CONTENT_ROWS, MAX_CONTENT_ROWS + 20]) {
+			const png = Buffer.from(
+				await renderScreenPng(
+					{
+						lines: Array.from({ length: rows }, (_, i) => `截图宽度归一化 line-${i}`),
+						columns,
+						foreground: "#eeeeee",
+						background: "#101010",
+						palette,
+					},
+					{ fonts },
+				),
+			);
+			assert.equal(png.readUInt32BE(16), TARGET_PNG_WIDTH, `${columns} columns, ${rows} rows: width`);
+			assert.equal(png.readUInt32BE(20), TARGET_PNG_HEIGHT, `${columns} columns, ${rows} rows: height`);
+		}
+	}
+});
+
+test("only the newest MAX_CONTENT_ROWS rows are kept, and a short screen pads the rest with background", async (t) => {
+	let fonts: ReturnType<typeof loadFonts>;
+	try {
+		fonts = loadFonts();
+	} catch {
+		t.skip("no system font installed");
+		return;
+	}
+	const render = (lines: string[]) =>
+		renderScreenPng({ lines, columns: 80, foreground: "#eeeeee", background: "#101010", palette }, { fonts });
+	const rows = Array.from({ length: MAX_CONTENT_ROWS }, (_, i) => `keep-${i}`);
+	const newest = Buffer.from(await render(rows));
+	const overflowing = Buffer.from(await render(["dropped-old-row", ...rows]));
+	assert.deepEqual(overflowing, newest, "the oldest row is cut, not squeezed");
+	const short = Buffer.from(await render(["keep-0"]));
+	assert.notDeepEqual(short, Buffer.from(await render(["keep-0", "one more"])));
+	assert.equal(short.readUInt32BE(20), TARGET_PNG_HEIGHT, "a short screen keeps its empty rows");
 });

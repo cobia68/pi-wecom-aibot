@@ -428,7 +428,7 @@ export function wecomHelpText(topic?: WeComCommand): string {
 					],
 					[
 						"sendMode",
-						"通知模式：text（默认）用 Markdown；image 与企微 screen 一样截取当前 pi 终端（含 session 等三行头部，不含 footer/状态栏），不另外排版正文。connect 入口、自动结果、wecom_send（含显式 content）和部署测试统一跟随；状态回执、帮助、错误和会话列表固定文字。显式 content 在 image 下仅为文字兜底。",
+						"通知模式：text（默认）用 Markdown；image 与企微 screen 一样截取当前 pi 终端（含 session 等三行头部；固定 1600×2150 像素，最多最新 59 行，行数不足下方留空，不含编辑框、状态栏与 footer），不另外排版正文。connect 入口、自动结果、wecom_send（含显式 content）和部署测试统一跟随；状态回执、帮助、错误和会话列表固定文字。显式 content 在 image 下仅为文字兜底。",
 					],
 				]),
 				"  配置示例（请替换示例中的 BotID、Secret 和目标 ID）：",

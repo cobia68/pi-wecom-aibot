@@ -264,6 +264,10 @@ export interface SvgOptions {
 	emojiAdvance?: number;
 	fontSize?: number;
 	lineHeight?: number;
+	/** Canvas width in SVG units; narrower content is padded so every image has the same width. */
+	minWidth?: number;
+	/** Canvas height in SVG units; fewer rows leave the rest of the canvas in the background colour. */
+	minHeight?: number;
 }
 
 const FONT_SIZE = 15;
@@ -298,10 +302,10 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 	const fontSize = options.fontSize ?? FONT_SIZE;
 	const cell = cellMetrics(options.metrics, fontSize, options.lineHeight);
 	const used = Math.max(columns, ...rows.map((cells) => cells.reduce((sum, c) => sum + c.width, 0)));
-	const width = Math.ceil(PADDING_X * 2 + used * cell.width);
+	const width = Math.max(options.minWidth ?? 0, Math.ceil(PADDING_X * 2 + used * cell.width));
 	const header = options.header ? headerSvg(options.header, width, options) : undefined;
 	const gridTop = (header?.height ?? 0) + PADDING_Y;
-	const height = Math.ceil(gridTop + rows.length * cell.height + PADDING_Y);
+	const height = Math.max(options.minHeight ?? 0, Math.ceil(gridTop + rows.length * cell.height + PADDING_Y));
 	const x = (col: number) => round(PADDING_X + col * cell.width);
 	const y = (row: number) => round(gridTop + row * cell.height);
 	const placed = rows.map((cells) => {
@@ -615,7 +619,16 @@ function fontFamilyList(families: readonly string[]): string {
 
 // ---------------------------------------------------------------- fonts
 
-const MAX_PNG_WIDTH = 2400;
+/**
+ * Every image is the same size — `TARGET_PNG_WIDTH` × `TARGET_PNG_HEIGHT` — whatever the terminal:
+ * a fixed canvas keeps two pi windows, and the phone (which shows an image at the chat's width),
+ * comparable. At most `MAX_CONTENT_ROWS` rows are captured and the rest of the canvas stays in the
+ * terminal background; narrower content is padded on the right, wider content is scaled down.
+ */
+export const TARGET_PNG_WIDTH = 1600;
+export const TARGET_PNG_HEIGHT = 2150;
+/** A 64-row terminal at 113 columns fills 1600×2150 with the header and the last 59 rows exactly. */
+export const MAX_CONTENT_ROWS = 59;
 const CJK = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/;
 
 interface ResvgModule {
@@ -656,7 +669,7 @@ export interface RenderOptions {
 	lineHeight?: number;
 }
 
-/** Render the captured screen to a PNG. */
+/** Render the captured screen to a PNG of the fixed canvas size. */
 export async function renderScreenPng(screen: CapturedScreen, options: RenderOptions = {}): Promise<Uint8Array> {
 	const secrets = options.secrets ?? [];
 	const rows = trimBlankRows(maskSecrets(screen.lines.map(parseAnsiLine), secrets));
@@ -667,7 +680,11 @@ export async function renderScreenPng(screen: CapturedScreen, options: RenderOpt
 	if (!fonts.hasCjk && (CJK.test(headerText) || rows.some((cells) => cells.some((cell) => CJK.test(cell.text))))) {
 		throw new Error(missingCjkFontMessage(fonts.platform));
 	}
-	const svg = cellsToSvg(rows, screen.columns, {
+	// Keep the newest rows and pad the bottom, so the geometry (and therefore the text scale) is the
+	// same for every image; the footer padding is the terminal background, i.e. deliberately empty.
+	const content = rows.slice(-MAX_CONTENT_ROWS);
+	const padded: Cell[][] = [...content, ...Array.from({ length: MAX_CONTENT_ROWS - content.length }, () => [])];
+	const layout = {
 		families: fonts.families,
 		sansFamilies: fonts.sansFamilies,
 		metrics: fonts.metrics,
@@ -679,12 +696,23 @@ export async function renderScreenPng(screen: CapturedScreen, options: RenderOpt
 		header,
 		fontSize: options.fontSize,
 		lineHeight: options.lineHeight,
+	};
+	// Measure the content, then give the canvas exactly the target aspect ratio; the title band spans
+	// the whole canvas, so both paddings stay invisible.
+	const measured = cellsToSvg(padded, screen.columns, layout);
+	const width = Number(/^<svg[^>]*\swidth="([\d.]+)"/.exec(measured)?.[1] ?? 1);
+	const height = Number(/^<svg[^>]*\sheight="([\d.]+)"/.exec(measured)?.[1] ?? 1);
+	const zoom = Math.min(TARGET_PNG_WIDTH / width, TARGET_PNG_HEIGHT / height);
+	const canvasWidth = TARGET_PNG_WIDTH / zoom;
+	const svg = cellsToSvg(padded, screen.columns, {
+		...layout,
+		minWidth: canvasWidth,
+		minHeight: canvasWidth * (TARGET_PNG_HEIGHT / TARGET_PNG_WIDTH),
 	});
-	const width = Number(/width="(\d+)"/.exec(svg)?.[1] ?? 1);
 	const { Resvg } = await loadResvg();
 	const renderer = new Resvg(svg, {
 		font: { fontBuffers: fonts.buffers, defaultFontFamily: fonts.families[0], monospaceFamily: fonts.families[0] },
-		fitTo: { mode: "zoom", value: Math.min(2, MAX_PNG_WIDTH / width) },
+		fitTo: { mode: "width", value: TARGET_PNG_WIDTH },
 	});
 	try {
 		const image = renderer.render();

@@ -3,12 +3,16 @@
  * document, pending messages, status, widgets-above, editor, widgets-below, footer.
  * There is no public screenshot API. Keep that internal layout dependency here and fail closed
  * when it changes; never fall back to rendering the whole TUI (which would expose editor drafts).
+ * Only the first three are captured: a powerline footer renders into widgets-above as the status
+ * bar, and that bar (like the editor and footer below it) is never part of a notification image.
  */
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, colorToHex, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { CapturedScreen } from "./render.ts";
 
 const WIDGET_KEY = "wecom-screen-capture";
+/** Document, pending messages and status; widgets-above is the status bar, the rest is the editor. */
+const CAPTURED_CONTAINERS = 3;
 const LAYOUT_ERROR = "无法识别当前 pi 的界面结构；屏幕图片暂不可用，请检查插件与 pi 版本是否兼容";
 
 type ScreenRoot = Pick<TUI, "children" | "terminal" | "hasOverlay">;
@@ -44,12 +48,15 @@ export function captureScreen(root: ScreenRoot, marker: Component, theme: Theme)
 	) {
 		throw new Error("终端尺寸不可用或过大（最多 500 列、300 行），请调整窗口后重试");
 	}
-	// Only measure the input/footer area; none of its text enters the snapshot.
-	const excludedRows = children.slice(4).reduce((sum, child) => sum + child.render(columns).length, 0);
+	// Only measure what sits below the captured block (status bar, editor, widgets, footer); its text
+	// never enters the snapshot, it only tells how many rows are actually visible above it.
+	const excludedRows = children
+		.slice(CAPTURED_CONTAINERS)
+		.reduce((sum, child) => sum + child.render(columns).length, 0);
 	const available = rows - excludedRows;
 	if (available <= 0) throw new Error("终端太矮，编辑框以上没有可见内容，请增大窗口后重试");
 	const lines = children
-		.slice(0, 4)
+		.slice(0, CAPTURED_CONTAINERS)
 		.flatMap((child) => child.render(columns))
 		.slice(-available)
 		.map((line) => truncateToWidth(line, columns, ""));

@@ -236,7 +236,8 @@ pi install .
 
 - `setup` 不发送入口通知；只有正式 `connect` 成功后发送。
 - `wecom_send(content: "部署成功")` 在 image 模式下仍然发当前终端截图，**不把“部署成功”另画进图里**；`content` 只作为图片失败时的 Markdown 兜底。省略 `content` 时，从本轮回复摘录文字兜底。
-- image 模式截取 pi 编辑框以上最新一屏，不读 scrollback；RPC、JSON、print 模式没有 TUI，降级为 Markdown 并说明原因。
+- image 模式截取 pi 编辑框以上最新一屏，不读 scrollback；编辑框、pi 状态栏（powerline 等挂在编辑框上方的栏）和 footer 都不进图片。RPC、JSON、print 模式没有 TUI，降级为 Markdown 并说明原因。
+- 每张图都是**固定 1600×2150 像素**：最多取最新 59 行，超出的从顶部丢掉；行数不足时下方留空（终端背景色）。窄行宽的内容右侧补白，超过画布宽度的内容等比缩小。因此不同窗口、不同内容发出的截图在企业微信里尺寸完全一致。
 - 图片通过 `aibot_upload_media_*` 上传后以 `msgtype=image` 发送；生成、上传失败或发送明确被拒绝时，改发 Markdown 并注明原因。发送确认丢失、结果未知时不自动发第二份。
 - 显式 `screen` 失败只回复文字错误，不把无关正文当作截图结果。
 - 图片会带上屏幕上的工具输出和文件内容，包括 connect 当时的旧屏幕；只发到该通知的目标聊天，不经过第三方图床。

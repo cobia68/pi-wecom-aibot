@@ -29,7 +29,11 @@ test("capture contains only the latest visible rows above the editor, never edit
 		Object.assign(root, { mode });
 		const screen = capture.capture(ctx);
 		assert.equal(screen.columns, 80);
-		assert.equal(screen.lines.length, 10, "six rows are reserved for editor, below widgets and footer");
+		assert.equal(
+			screen.lines.length,
+			9,
+			"seven rows are reserved for the status bar, editor, below widgets and footer",
+		);
 		assert.match(screen.lines.join("\n"), /^line-31\n/);
 		assert.ok(screen.lines.includes("line-39"));
 		assert.doesNotMatch(screen.lines.join("\n"), /EDITOR|FOOTER/);
@@ -39,17 +43,29 @@ test("capture contains only the latest visible rows above the editor, never edit
 	capture.dispose();
 });
 
+test("the status bar above the editor is never captured, whichever widget renders it", () => {
+	const { ctx, capture, state } = setup();
+	state.lines = Array.from({ length: 40 }, (_, i) => `line-${i}`);
+	// A powerline footer places its bar as a widget above the editor, exactly like the real one does.
+	ctx.ui.setWidget("powerline", () => ({ render: () => ["POWERLINE-BAR"], invalidate() {} }));
+	const screen = capture.capture(ctx);
+	assert.doesNotMatch(screen.lines.join("\n"), /POWERLINE-BAR/);
+	assert.equal(screen.lines.length, 8, "the bar's row is excluded from the capture like the editor's");
+	assert.match(screen.lines.join("\n"), /^line-32\n/);
+	capture.dispose();
+});
+
 test("the colored footer name and its invisible theme observer never enter the screenshot", () => {
 	const { ctx, capture, state } = setup();
 	const status = new WeComStatus();
 	state.lines = Array.from({ length: 40 }, (_, i) => `line-${i}`);
 	status.update(ctx, "online");
 	const screen = capture.capture(ctx);
-	assert.equal(screen.lines.length, 9);
+	assert.equal(screen.lines.length, 8);
 	assert.match(screen.lines.join("\n"), /^line-32\n/);
 	assert.doesNotMatch(screen.lines.join("\n"), /wecom-aibot|EDITOR|FOOTER/);
 	status.clear();
-	assert.equal(capture.capture(ctx).lines.length, 10);
+	assert.equal(capture.capture(ctx).lines.length, 9);
 	capture.dispose();
 });
 
