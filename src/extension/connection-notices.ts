@@ -42,7 +42,7 @@ export class ConnectionNotices {
 		if (this.ready) {
 			this.clearTimer();
 			// The first success is shown only in the footer, even after a slow or refused attempt.
-			if (this.everSubscribed && (this.reported || wasStopped)) this.notify("企业微信机器人连接已恢复", "info");
+			if (this.everSubscribed && (this.reported || wasStopped)) this.notify("企业微信智能机器人连接已恢复", "info");
 			this.everSubscribed = true;
 			this.reported = false;
 			this.disconnectDetail = undefined;
@@ -55,7 +55,7 @@ export class ConnectionNotices {
 				? ""
 				: "。请核对 BotID/Secret（/wecom-aibot setup），然后运行 /wecom-aibot connect 恢复";
 			this.reported = true;
-			this.notify(`企业微信机器人连接已停止：${reason}${hint}`, "warning");
+			this.notify(`企业微信智能机器人连接已停止：${reason}${hint}`, "warning");
 		} else if (!this.ready && !this.stopped) {
 			if (observation.detail) this.disconnectDetail = observation.detail;
 			this.arm();
@@ -76,7 +76,7 @@ export class ConnectionNotices {
 				this.reported = true;
 				this.notify(
 					this.everSubscribed
-						? `企业微信机器人连接中断已超过 30 秒${this.disconnectDetail ? `：${this.disconnectDetail}` : ""}。仍在自动重连，可运行 /wecom-aibot log 查看诊断`
+						? `企业微信智能机器人连接中断已超过 30 秒${this.disconnectDetail ? `：${this.disconnectDetail}` : ""}。仍在自动重连，可运行 /wecom-aibot log 查看诊断`
 						: "企业微信首次连接等待已超过 30 秒。仍在重试，可运行 /wecom-aibot status 和 /wecom-aibot log 查看原因；/wecom-aibot disconnect 可取消。",
 					"warning",
 				);

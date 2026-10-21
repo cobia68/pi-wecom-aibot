@@ -46,6 +46,36 @@ test("the name stays exactly wecom-aibot; only its foreground color indicates th
 	status.clear();
 });
 
+test("a user disconnect keeps the error colour briefly, then removes the name", async () => {
+	const ctx = context();
+	const status = new WeComStatus(5);
+	status.update(ctx, "online");
+	status.flash(ctx);
+	assert.equal(ctx.statuses.get(WECOM_STATUS_KEY), ctx.ui.theme.fg("error", "wecom-aibot"));
+	assert.equal(ctx.widgets.size, 1);
+	await new Promise((resolve) => setTimeout(resolve, 25));
+	assert.equal(ctx.statuses.size, 0);
+	assert.equal(ctx.widgets.size, 0);
+});
+
+test("a reconnect during the flash cancels its pending removal", async () => {
+	const ctx = context();
+	const status = new WeComStatus(10);
+	status.flash(ctx);
+	status.update(ctx, "online");
+	await new Promise((resolve) => setTimeout(resolve, 40));
+	assert.equal(ctx.statuses.get(WECOM_STATUS_KEY), ctx.ui.theme.fg("success", "wecom-aibot"));
+	status.clear();
+});
+
+test("without a terminal UI a disconnect flash changes nothing", () => {
+	for (const ctx of [context("rpc"), context("json"), context("print"), context("tui", false)]) {
+		new WeComStatus(1).flash(ctx);
+		assert.deepEqual(ctx.writes, []);
+		assert.equal(ctx.widgets.size, 0);
+	}
+});
+
 test("fresh SDK contexts and changes with the same color do not cause redundant footer writes", () => {
 	const ctx = context();
 	const status = new WeComStatus();

@@ -23,6 +23,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import type { BridgeClient } from "../shared/gateway-protocol.ts";
 import { DEFAULT_TAIL_PARAGRAPHS, notificationPayload, notificationProblem } from "../shared/notification.ts";
+import type { WeComState } from "../shared/wecom-protocol.ts";
 import { type BridgeHost, BridgeSession, connectionConfig } from "./bridge-session.ts";
 import { chatIdProblem, completeWecom, parseWecomInvocation, WHOAMI_WAIT_SECONDS, wecomHelpText } from "./commands.ts";
 import { CONFIG_FILE, clearConfig, loadConfig, updateConfig, type WeComConfig } from "./config.ts";
@@ -147,7 +148,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 		const state = bridge?.state ?? "disconnected";
 		const detail = bridge ? bridge.detail : stopReason;
 		return [
-			`企业微信智能机器人：${state}${detail ? `（${detail}）` : ""}`,
+			`企业微信智能机器人：${stateLabel(state)}${detail ? `（${stopReasonLabel(detail)}）` : ""}`,
 			cfg ? `BotID：${mask(cfg.botId)}　Secret：${mask(cfg.secret)}` : "未配置（运行 /wecom-aibot setup）",
 			`接入方式：手动（每个 session 需 /wecom-aibot connect）　待处理：${bridge?.queued ?? 0}　处理中：${bridge?.running ? "是" : "否"}`,
 			`本机共享网关：${bridge ? `${bridge.gatewaySessions} 个已注册 pi` : "未接入"}　当前 pi：${bridge?.identifyOnly ? "临时识别（未正式接入）" : bridge?.ready ? "已连接" : bridge ? "未就绪" : "未连接"}`,
@@ -405,7 +406,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 						if (ctx.hasUI) {
 							const ok = await ctx.ui.confirm(
 								"连接配置已改变，重新接入？",
-								"将撤销当前 session 的旧注册，清除排队任务和待发通知；已开始的任务继续运行，但旧结果不再回传。其他 pi 不受影响。",
+								"将撤销当前 session 的旧注册，清除排队任务和待发通知；已开始的任务继续运行，但旧结果不再回传。",
 							);
 							if (!ok) return;
 						}
@@ -441,7 +442,9 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 				}
 				case "disconnect": {
 					stopBridge("disconnected by user");
-					ctx.ui.notify("当前 pi 已断开；其他 pi 不受影响，最后一个 pi 断开后网关自动结束。", "info");
+					// The label turns red for a moment, so an empty footer is explained rather than mysterious.
+					footerStatus.flash(sessionCtx);
+					ctx.ui.notify("已断开当前 pi 的企业微信接入；需要恢复请运行 /wecom-aibot connect。", "info");
 					return;
 				}
 				case "reset": {
@@ -472,7 +475,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 				case "test": {
 					const sender = bridge;
 					if (!sender?.ready || sender.identifyOnly)
-						throw new Error("企业微信机器人未正式接入，请先运行 /wecom-aibot connect");
+						throw new Error("企业微信智能机器人未正式接入，请先运行 /wecom-aibot connect");
 					const chatType = options.get("chat-type");
 					const target = destination(args[0], chatType === undefined ? undefined : chatType === "2" ? 2 : 1);
 					await sender.notify(
@@ -578,7 +581,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 			}
 			const current = bridge;
 			if (!current?.ready || current.identifyOnly)
-				throw new Error("企业微信机器人未正式接入，请先运行 /wecom-aibot connect");
+				throw new Error("企业微信智能机器人未正式接入，请先运行 /wecom-aibot connect");
 			const details = {
 				chatid: request.chatId,
 				chat_type: request.chatType,
@@ -629,6 +632,35 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 }
 
 // -------------------------------------------------------------------- helpers
+
+/** pi-facing words for the connection state; the wire protocol keeps its own names. */
+const STATE_LABELS: Record<WeComState, string> = {
+	disconnected: "已断开",
+	connecting: "正在连接",
+	connected: "连接已建立，尚未订阅",
+	subscribed: "已接入",
+};
+
+/** The reasons this extension sets itself; anything else is an upstream diagnostic and shown as given. */
+const STOP_REASON_LABELS: Record<string, string> = {
+	"configuration saved": "配置已保存",
+	"default target changed": "默认推送目标已更改",
+	"disconnected by user": "已由用户断开",
+	"identity completed": "whoami 识别完成",
+	reset: "配置已删除",
+	"session changed": "会话已切换",
+	"session or configuration changed": "会话或配置已更改",
+	"session shutdown": "pi 已退出",
+	"target session changed": "目标会话已切换",
+};
+
+function stateLabel(state: WeComState): string {
+	return STATE_LABELS[state];
+}
+
+function stopReasonLabel(reason: string): string {
+	return STOP_REASON_LABELS[reason] ?? reason;
+}
 
 function mask(value: string): string {
 	if (value.length <= 8) return `${value.slice(0, 2)}****`;

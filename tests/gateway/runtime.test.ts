@@ -143,6 +143,14 @@ test("a message without a target never reaches a pi: it teaches the command inst
 	assert.match(prompt(), /\/wecom-aibot sessions/);
 });
 
+test("a message that arrives after the last pi unregistered names the way back", () => {
+	const a = add("A", SESSION_A);
+	gateway.unregister(a.value.instanceId, a.peer);
+	message("hello");
+	assert.match(prompt(), /没有在线的 pi 会话/);
+	assert.match(prompt(), /\/wecom-aibot connect/);
+});
+
 test("send names its target, and the target receives exactly the prompt", () => {
 	const a = add("A", SESSION_A);
 	send(SESSION_A, "检查构建");

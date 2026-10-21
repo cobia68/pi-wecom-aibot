@@ -4,6 +4,8 @@ import type { BridgeConnectionStatus } from "./connection-notices.ts";
 
 export const WECOM_STATUS_KEY = "wecom-aibot";
 const THEME_WIDGET_KEY = "wecom-aibot-theme";
+/** How long a user disconnect stays visible in the error colour before the name is removed. */
+export const FLASH_MS = 1_500;
 
 const COLOR: Record<BridgeConnectionStatus, ThemeColor> = {
 	online: "success",
@@ -23,8 +25,12 @@ interface StatusBinding {
 
 export class WeComStatus {
 	private binding: StatusBinding | undefined;
+	private flashTimer: ReturnType<typeof setTimeout> | undefined;
+
+	constructor(private readonly flashMs = FLASH_MS) {}
 
 	update(ctx: StatusContext | undefined, connection: BridgeConnectionStatus | undefined): void {
+		this.cancelFlash();
 		const target = ctx?.mode === "tui" && ctx.hasUI ? ctx.ui : undefined;
 		if (!target || connection === undefined) {
 			this.clear();
@@ -61,7 +67,19 @@ export class WeComStatus {
 		binding.ui.setStatus(WECOM_STATUS_KEY, text);
 	}
 
+	/** A user disconnect: show the error colour for a moment, then remove the name instead of blinking away. */
+	flash(ctx: StatusContext | undefined): void {
+		this.update(ctx, "blocked");
+		if (!this.binding) return;
+		this.flashTimer = setTimeout(() => {
+			this.flashTimer = undefined;
+			this.clear();
+		}, this.flashMs);
+		this.flashTimer.unref();
+	}
+
 	clear(): void {
+		this.cancelFlash();
 		const binding = this.binding;
 		this.binding = undefined;
 		if (!binding) return;
@@ -70,5 +88,11 @@ export class WeComStatus {
 		} finally {
 			binding.ui.setWidget(THEME_WIDGET_KEY, undefined);
 		}
+	}
+
+	private cancelFlash(): void {
+		if (!this.flashTimer) return;
+		clearTimeout(this.flashTimer);
+		this.flashTimer = undefined;
 	}
 }

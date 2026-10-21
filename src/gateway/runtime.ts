@@ -444,7 +444,12 @@ export class WeComGateway {
 		const userid = senderOf(inbound.body);
 		if (!userid) return;
 		const permitted = this.eligible(userid);
-		if (!permitted.length) return;
+		if (!permitted.length) {
+			// The WeCom connection outlives the last pi by a moment: say where to reconnect instead of staying
+			// silent, but keep silence when a registered pi's allowlist simply excludes this sender.
+			if (!this.members.size) this.reply(inbound.reqId, NO_ONLINE_SESSION);
+			return;
+		}
 		const eligible = permitted.filter((member) => !member.identifyOnly);
 		const message = parseInbound(inbound.body);
 		const id = message?.msgId || inbound.reqId;
@@ -762,6 +767,7 @@ const GUIDANCE = [
 const TARGET_MISSING = "找不到这个 session ID；它可能已离线或写错。";
 const TARGET_GONE = "目标会话已离线。";
 const QUOTE_FAILED = "引用的通知或图片无法定位到一个在线会话。";
+const NO_ONLINE_SESSION = "当前没有在线的 pi 会话：最后一个会话已断开。请重新打开 pi 并运行 /wecom-aibot connect。";
 
 function quotedMember(eligible: Member[], quoteText: string): Member | undefined {
 	const ids = quotedSessions(quoteText);

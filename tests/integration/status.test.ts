@@ -7,6 +7,7 @@ import { after, afterEach, beforeEach, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { GatewayClientOptions } from "../../src/extension/gateway-client.ts";
+import { FLASH_MS } from "../../src/extension/status.ts";
 import type { BridgeClient, GatewayStatus } from "../../src/shared/gateway-protocol.ts";
 import type { WeComState } from "../../src/shared/wecom-protocol.ts";
 import { fixtureTheme } from "../support/tui-fixture.ts";
@@ -268,12 +269,15 @@ test("an initial connection taking over 30 seconds reports once, without stale p
 	assert.equal(h.notices.length, 1, "first success belongs only in the footer");
 });
 
-test("disconnect clears only this entry; late callbacks cannot overwrite a reconnected bridge", async () => {
+test("disconnect clears only this entry; late callbacks cannot overwrite a reconnected bridge", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const saved = readFileSync(CONFIG_FILE, "utf8");
 	const h = harness();
 	const old = await connect(h);
 	old.publish({ state: "subscribed", sessions: 1 });
 	await h.command("disconnect");
+	assert.equal(h.statuses.get(key), label("error"), "a disconnect is shown in the error colour before it goes");
+	t.mock.timers.tick(FLASH_MS);
 	assert.equal(h.statuses.has(key), false);
 	assert.equal(h.statuses.get("another-extension"), "Other status");
 	assert.equal(old.stopped.length, 1);
@@ -357,7 +361,8 @@ for (const mode of ["rpc", "json", "print"] as const) {
 	});
 }
 
-test("connecting, disconnecting or exiting one pi cannot opt another pi in or out", async () => {
+test("connecting, disconnecting or exiting one pi cannot opt another pi in or out", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const saved = readFileSync(CONFIG_FILE, "utf8");
 	const a = harness();
 	const b = harness();
@@ -369,6 +374,7 @@ test("connecting, disconnecting or exiting one pi cannot opt another pi in or ou
 	await b.command("connect");
 	b.clients[0].publish({ state: "subscribed", sessions: 2 });
 	await a.command("disconnect");
+	t.mock.timers.tick(FLASH_MS);
 	assert.equal(a.statuses.has(key), false);
 	assert.equal(b.statuses.get(key), label("success"));
 	await a.emit("session_shutdown");
