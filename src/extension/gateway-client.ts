@@ -40,6 +40,8 @@ export interface GatewayClientOptions {
 	config: WeComConfig;
 	source: NotificationSource;
 	instanceId?: string;
+	/** Temporary whoami registration, hidden from routing and the online session list. */
+	identifyOnly?: boolean;
 	onState?: (state: WeComState, detail?: string) => void;
 	onStatus?: (status: GatewayStatus) => void;
 	onTask?: (task: GatewayTask) => void;
@@ -86,6 +88,7 @@ export class GatewayClient implements BridgeClient {
 			source: { ...options.source },
 			instanceId: options.instanceId ?? randomUUID(),
 			registrationId: randomUUID(),
+			...(options.identifyOnly ? { identifyOnly: true } : {}),
 		};
 		this.endpoint = gatewayEndpoint(botId);
 	}

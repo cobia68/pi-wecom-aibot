@@ -87,9 +87,24 @@ test("capture or rasteriser failures keep the text notification and explain the 
 		});
 		assert.equal(prepared.image, undefined);
 		assert.equal(prepared.text, "fallback body");
+		assert.match(prepared.imageFailure ?? "", /生成失败：.*(?:RPC|缺少字体)/);
 		assert.equal(warnings.length, 1);
 		assert.match(warnings[0], /已改发文字/);
 	}
+});
+
+test("render errors redact configured secrets in both UI warnings and the Markdown fallback", async () => {
+	const warnings: string[] = [];
+	const prepared = await prepareScreenImage(notification, () => screen, {
+		secrets: ["PRIVATE-SECRET"],
+		warn: (line) => warnings.push(line),
+		render: async () => {
+			throw new Error("failed PRIVATE-SECRET");
+		},
+	});
+	assert.doesNotMatch(warnings.join("\n"), /PRIVATE-SECRET/);
+	assert.doesNotMatch(prepared.imageFailure ?? "", /PRIVATE-SECRET/);
+	assert.match(prepared.imageFailure ?? "", /failed \*\*\*\*/);
 });
 
 test("an aborted image preparation rejects instead of sending a late fallback", async () => {

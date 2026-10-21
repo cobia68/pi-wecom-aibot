@@ -70,21 +70,24 @@ pi install .
 ```
 
 1. 按提示填入 BotID 和 Secret。
-2. 「默认推送目标」选「自动识别：连上后给机器人发一条消息」。
-3. 提示「已连接」后，在企业微信给机器人发一条消息：单聊直接发，群聊需 @机器人。
-4. pi 显示识别到的聊天，确认后保存为默认推送目标。
+2. 「默认推送目标」选「自动识别：连上后给机器人发一条消息」。这里的连接仅用于识别，不是正式接入。
+3. 提示「临时识别连接已就绪」后，在企业微信给机器人发一条消息：单聊直接发，群聊需 @机器人。
+4. pi 显示识别到的聊天，确认后保存为默认推送目标，临时连接随即关闭。也可以手动填写 userid／chatid，无需执行过 `whoami`。
 
 这条消息只用于识别，不会被当成任务。想让通知默认发到某个群，就在那个群里 @机器人 发。
 
-`/wecom-aibot setup` 会配置并连接**当前 session**。之后每个 session 都必须手动执行 `/wecom-aibot connect`，新建、恢复、分叉和 `/reload` 后也不例外；退出或切换会话时自动 disconnect。`connect` / `disconnect` 不修改共享配置，也不影响其他已接入的 pi。
+`/wecom-aibot setup` **只完成配置，不自动正式接入，也不发送会话入口通知**。`whoami` 在离线时可临时连接以识别：不接收任务、不出现在在线会话列表，完成、取消或超时后关闭当前临时接入。每个 session 都必须手动执行 `/wecom-aibot connect`，新建、恢复、分叉和 `/reload` 后也不例外；退出或切换会话时自动 disconnect。`connect` / `disconnect` 不修改共享配置，也不影响其他已接入的 pi。
 
-### 第 3 步：发送测试
+### 第 3 步：正式接入并测试
 
 ```text
+/wecom-aibot connect
 /wecom-aibot test
 ```
 
-企业微信收到一条「部署测试」消息，pi 提示「部署测试通知已获得企业微信服务端确认」，就接通了 🎉
+`connect` 要求 BotID、Secret 和默认推送目标齐全。网关注册与企业微信订阅成功后，自动向默认目标发送一条带完整 session ID 的「会话已接入」通知，**直接引用它回复即可发送任务**。通知跟随 `sendMode`：文字或当前终端截图；已在线重复执行 `connect` 和网络自动重连不重复通知。入口通知发送失败不代表连接失败，可用 `test` 排查。
+
+企业微信收到「部署测试」通知，pi 提示「部署测试通知已获得企业微信服务端确认」，就接通了 🎉
 
 ## 🔐 设置白名单
 
@@ -127,12 +130,14 @@ pi install .
 | 字段               | 作用                                                                                      |
 | :----------------- | :---------------------------------------------------------------------------------------- |
 | `botId` / `secret` | 机器人的 BotID 和 Secret                                                                  |
-| `sendMode`         | 自动结果的通知模式：`text`（默认）发 Markdown，`image` 发当前终端图片；见下方「通知模式」 |
+| `sendMode`         | 正式通知的模式：`text`（默认）发 Markdown，`image` 与 `screen` 一样截当前终端；见下方「通知模式」 |
 | `allowedUserIds`   | 允许使用机器人的 userid 名单；不写或留空表示所有人都能用                                  |
 | `defaultChatId`    | 默认推送目标：单聊填 userid，群聊填群 chatid                                              |
 | `defaultChatType`  | 默认推送目标类型：`1` 单聊，`2` 群聊                                                      |
 
-- 改完后在每个正在使用的 pi 窗口执行 `/wecom-aibot connect` 生效。只改默认推送目标不会清掉排队任务和通知；更换 BotID、Secret 或 `allowedUserIds` 会撤销旧注册及其待处理工作。
+- 仅修改 `sendMode`：在每个需要更新的 pi 中执行 `/wecom-aibot connect`，不清任务和队列；尚未生成的结果使用新模式，已生成、等待发送的通知保持原快照，不转换或重新截图。
+- 更换默认目标、BotID、Secret 或 `allowedUserIds`：需要重新接入，确认后撤销当前 session 的旧注册及其待处理工作；其他 pi 在自己下次读取配置前继续使用原配置，不被强制断开。不自动监听文件变化。
+- 通过 `whoami` 确认保存不同默认目标时，保存成功后断开当前 session，提示手动 `connect`；取消、只查看身份、目标相同或保存失败都保留原连接。断开会清除排队任务和待发通知，已开始的任务继续运行但结果不再回传。
 - 连接状态只属于当前 session，不保存到配置文件。
 - Secret 以明文保存，请勿提交到代码仓库或发给他人。
 
@@ -148,7 +153,7 @@ pi install .
 | 黄色                 | 已连接过，但当前断线，正在自动重连                     |
 | 红色                 | 认证多次被拒绝、连接被接管等情况，已暂停重试，需要处理 |
 
-**首次连接未就绪前不显示标签**，也不往正文追加「正在注册」「已连接」的静态通知；重复执行 `/wecom-aibot connect` 不重复提示。首次等待超过 30 秒会提醒一次，可用 `/wecom-aibot status`、`/wecom-aibot log` 排查，或 `/wecom-aibot disconnect` 取消；明确失败会提示原因。
+**首次连接未就绪前不显示标签**，也不往 pi 正文追加「正在注册」「已连接」的静态通知；重复执行 `/wecom-aibot connect` 不重复提示。注册与订阅均可用后才显示绿色标签，并在企业微信发送一次会话入口通知。首次等待超过 30 秒会提醒一次，可用 `/wecom-aibot status`、`/wecom-aibot log` 排查，或 `/wecom-aibot disconnect` 取消；明确失败会提示原因。
 
 成功连接后才用颜色跟踪断线和恢复。执行 `/wecom-aibot disconnect` / `/wecom-aibot reset`、退出、切换会话或 `/reload` 后隐藏，新 session 必须重新手动连接。每个 pi 独立显示自己的状态，查询 `/wecom-aibot` 不会启动接入。
 
@@ -158,7 +163,7 @@ pi install .
 
 ### 发送任务
 
-每条任务都要指明目标会话：引用一条通知或机器人发来的图片，或者用命令写出完整 session ID。机器人收到后先回一条「执行中…」的状态消息；pi 在 10 分钟内完成时，这条消息会直接变成结果（带 session 等来源信息），不会再单独发一条通知。超过 10 分钟的任务先收尾为「任务仍在执行，请等待会话通知」，结果随后单独推送；图片结果暂时仍单独发送。
+每条任务都要指明目标会话：引用 `connect` 的入口通知、结果通知或机器人发来的图片，或者用命令写出完整 session ID。机器人收到后先回一条**固定文字**的「执行中…」状态消息；文字模式下，pi 在 10 分钟内完成时这条消息直接变成结果（带 session 等来源信息），不会再单独发通知。超过 10 分钟的任务先收尾为「任务仍在执行，请等待会话通知」，结果随后单独推送。图片模式下，状态收尾为「本轮已结束，结果将另行通知」，然后单独发送当前终端截图，不额外再发完整文字结果；图片失败时改发文字兜底并说明原因。
 
 ```text
 /wecom-aibot sessions
@@ -202,7 +207,7 @@ pi install .
 
 共享网关不需要单独启动或停止：
 
-- 第一个 pi 手动接入（`/wecom-aibot connect` 或配置时的 `/wecom-aibot setup`）时，网关自动启动。
+- 第一个 pi 正式接入（`/wecom-aibot connect`）或临时识别（离线 `whoami`、`setup` 自动识别）时，网关自动启动。临时连接不是可接收任务的在线会话。
 - 其他 pi 复用同一个网关，不会各自再连一条企业微信长连接。
 - 最后一个 pi 执行 `/wecom-aibot disconnect`、退出或崩溃后约 1.5 秒，网关自动退出。
 - `/wecom-aibot connect` / `/wecom-aibot disconnect` 只控制**当前 session** 是否接入，不停止 pi 进程、不修改共享配置，也不影响其他已接入的 pi。要停止全部，就在每个 pi 窗口各执行一次 `/wecom-aibot disconnect`。
@@ -215,23 +220,27 @@ pi install .
 - **断线恢复**：任务结果和已安排的完成通知在当前 pi 内保留快照，确定尚未发送时恢复连接后补发；若已尝试发送但确认丢失，则提示结果未知，不自动重复推送。明确被服务端拒绝的通知也不会自动重试。停止或退出当前 pi 会清除这些内存中的待发通知。
 
 > [!NOTE]
-> 企业微信要求对方先给机器人发过消息，机器人才能主动推送给他（或那个群）。通知默认是 Markdown 文字；`sendMode: "image"` 时自动结果会发一张渲染后的终端图片。暂不支持单独发送任意图片或文件。
+> 企业微信要求对方先给机器人发过消息，机器人才能主动推送给他（或那个群）。正式通知默认是 Markdown 文字；`sendMode: "image"` 时发送当前终端截图，与 `screen` 一致。暂不支持单独发送任意图片或文件。
 
 ## 🖼️ 通知模式（文字或图片）
 
-`sendMode` 决定自动结果怎么发：
+`sendMode` 控制正式通知，**不是把任意消息正文排版成图**：`image` 与 `screen` 使用同一种当前终端截图。
 
-| `sendMode`     | 自动结果     | 说明                                                                                          |
-| :------------- | :----------- | :-------------------------------------------------------------------------------------------- |
-| `text`（默认） | Markdown     | 三行来源信息 + 正文                                                                           |
-| `image`        | 原生图片消息 | 当前 pi 终端可见内容 + 卡片式来源头部；session 等信息在图片里，不含 footer/状态栏；不需要图床 |
+| 消息类别 | `text` | `image` |
+| :------- | :----- | :------ |
+| connect 会话入口、自动结果、`wecom_send`（含显式 `content`）、部署测试 | Markdown：三行来源信息 + 正文 | 当前终端截图 + 来源头部，原生图片消息 |
+| 执行中、排队、中止等状态回执 | 文字 | 文字 |
+| 帮助、错误、在线会话列表 | 文字 | 文字 |
+| 显式 `screen` 请求 | 截图 | 截图 |
 
-- 只作用于自动结果（企业微信任务的结果、`wecom_send` 不带 `content` 的完成通知）。`wecom_send` 显式给 `content` 和 `/wecom-aibot test` 始终发 Markdown。
-- image 模式截取 pi 编辑框以上最新一屏，不读 scrollback；RPC、JSON、print 模式没有 TUI，自动降级为 Markdown。
-- 图片通过 `aibot_upload_media_*` 上传后以 `msgtype=image` 发送；生成或上传失败时改发 Markdown，并在末尾注明原因。
-- 图片会带上屏幕上的工具输出和文件内容，只发到当前企业微信会话，不经过第三方图床。
+- `setup` 不发送入口通知；只有正式 `connect` 成功后发送。
+- `wecom_send(content: "部署成功")` 在 image 模式下仍然发当前终端截图，**不把“部署成功”另画进图里**；`content` 只作为图片失败时的 Markdown 兜底。省略 `content` 时，从本轮回复摘录文字兜底。
+- image 模式截取 pi 编辑框以上最新一屏，不读 scrollback；RPC、JSON、print 模式没有 TUI，降级为 Markdown 并说明原因。
+- 图片通过 `aibot_upload_media_*` 上传后以 `msgtype=image` 发送；生成、上传失败或发送明确被拒绝时，改发 Markdown 并注明原因。发送确认丢失、结果未知时不自动发第二份。
+- 显式 `screen` 失败只回复文字错误，不把无关正文当作截图结果。
+- 图片会带上屏幕上的工具输出和文件内容，包括 connect 当时的旧屏幕；只发到该通知的目标聊天，不经过第三方图床。
 - Windows 和 macOS 自带的是彩色 emoji 字体，图片渲染不支持；想让图片里的 emoji（包括三行开头的图标）正常显示，请安装单色的 Noto Emoji（Windows 放到 `%LOCALAPPDATA%\Microsoft\Windows\Fonts\`，文件名为 `NotoEmoji-Regular.ttf` 或 `NotoEmoji.ttf`）。没有时图片会省略三行开头的图标，Markdown 通知不受影响。
-- 头部按终端主题配色，深色、浅色都适用：标题是工作目录，右侧标签为「会话通知」，任务中止时改为警示色的「已中止」；下面两行是供应商 · 模型和 session，行首图标与 Markdown 一致（🔔 / 🏷️ / 🆔）。左侧是 pi 的三色图标（官方 logo，SVG）。
+- 头部按终端主题配色，深色、浅色都适用：标题是工作目录，右侧标签通常为「会话通知」，connect 入口为「会话已接入」、测试为「部署测试」，任务中止时改为警示色的「已中止」；下面两行是供应商 · 模型和 session，行首图标与 Markdown 一致（🔔 / 🏷️ / 🆔）。左侧是 pi 的三色图标（官方 logo，SVG）。
 - Linux 上中文粗体需要同目录下对应的 `-Bold` 字体文件（如 `NotoSansCJKsc-Bold.otf`）。正文里的 emoji 仍使用单色 `Noto Emoji`（Linux 可放到 `~/.local/share/fonts/noto-emoji/NotoEmoji.ttf`）；找不到时正文 emoji 可能显示为方框。彩色 emoji 字体（如 Noto Color Emoji）当前渲染不支持。
 
 ```json
@@ -247,10 +256,10 @@ pi install .
 | 命令                | 作用                                                       |
 | :------------------ | :--------------------------------------------------------- |
 | `/wecom-aibot`            | 查看连接状态、默认推送目标和配置文件位置                   |
-| `/wecom-aibot setup`      | 配置或更换 BotID、Secret，并重新连接                       |
+| `/wecom-aibot setup`      | 配置或更换 BotID、Secret 和默认目标，不自动正式接入        |
 | `/wecom-aibot whoami`     | 识别下一条消息所在的聊天，可设为默认推送目标               |
 | `/wecom-aibot test`       | 发送一条部署测试消息                                       |
-| `/wecom-aibot connect`    | 当前 session 手动接入并重新读取配置；网关未运行时自动启动  |
+| `/wecom-aibot connect`    | 配置齐全后正式接入并发会话入口；仅修改模式时热更新         |
 | `/wecom-aibot disconnect` | 仅注销当前 session；不修改配置，最后一个 pi 注销后网关退出 |
 | `/wecom-aibot log`        | 查看最近 20 条运行记录                                     |
 | `/wecom-aibot reset`      | 删除整份共享配置并停止接收（需确认）                       |
@@ -333,7 +342,7 @@ pi install .
 <details>
 <summary><b>怎么查自己的 userid 或群的 chatid</b></summary>
 
-执行 `/wecom-aibot whoami`，再让对方给机器人发一条消息（群聊需 @机器人）。pi 显示识别到的 chatid 和 userid，并询问是否设为默认推送目标，只想查看时选否。默认等 2 分钟，可用 `/wecom-aibot whoami --wait 300` 延长，最长 600 秒。
+执行 `/wecom-aibot whoami`，再让对方给机器人发一条消息（群聊需 @机器人）。离线时会临时连接识别，无需先 `connect`；pi 显示 chatid 和 userid，询问是否设为默认推送目标，只想查看时选否。默认等 2 分钟，可用 `/wecom-aibot whoami --wait 300` 延长，最长 600 秒。已连接时确认更换目标，会在保存成功后断开当前 session，需手动重新 `connect`。
 
 </details>
 

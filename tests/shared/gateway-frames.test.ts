@@ -86,6 +86,7 @@ test("every client frame the gateway consumes is validated before use", () => {
 	assert.equal(parseClientFrame({ type: "hello", version: 3, nonce: "0123456789abcdef" }).ok, true);
 	assert.equal(parseClientFrame({ type: "hello", version: 3, nonce: "short" }).ok, false);
 	assert.equal(parseClientFrame({ type: "status", taskId: "t", state: "running" }).ok, true);
+	assert.equal(parseClientFrame({ type: "status", taskId: "t", state: "notifying" }).ok, true);
 	assert.equal(parseClientFrame({ type: "status", taskId: "t", state: "hacked" }).ok, false);
 	assert.equal(parseClientFrame({ type: "status", state: "running" }).ok, false);
 	assert.equal(
@@ -120,6 +121,33 @@ test("every client frame the gateway consumes is validated before use", () => {
 		}).ok,
 		false,
 		"a string allowlist can never reach the gateway and expand into one userid per character",
+	);
+	const registration = { instanceId: "i", registrationId: "r", source, config: { botId: "bot" } };
+	assert.equal(
+		parseClientFrame({ type: "register", registration: { ...registration, identifyOnly: true }, proof: "0" }).ok,
+		true,
+	);
+	assert.equal(
+		parseClientFrame({ type: "register", registration: { ...registration, identifyOnly: "yes" }, proof: "0" }).ok,
+		false,
+	);
+	assert.equal(
+		parseClientFrame({
+			type: "notify",
+			id: "1",
+			chat: { chatId: "user", chatType: 1 },
+			notification: { kind: "connect", source, text: "entry", imageFailure: "no TUI" },
+		}).ok,
+		true,
+	);
+	assert.equal(
+		parseClientFrame({
+			type: "notify",
+			id: "1",
+			chat: { chatId: "user", chatType: 1 },
+			notification: { kind: "reply", source, text: "body", imageFailure: 42 },
+		}).ok,
+		false,
 	);
 	assert.equal(parseClientFrame({ type: "nonsense" }).ok, false);
 });

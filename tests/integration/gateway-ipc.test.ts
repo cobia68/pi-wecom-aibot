@@ -206,6 +206,38 @@ test("IPC registers only started clients and last unregister closes the gateway"
 	assert.equal(FakeWebSocket.instances[0].readyState, 3);
 });
 
+test("a temporary IPC registration is hidden and only watches identities while other sessions stay connected", async () => {
+	const running = await startServer();
+	const a = client("A");
+	const identifying = client("I", {}, { identifyOnly: true });
+	a.connection.start();
+	identifying.connection.start();
+	await until(() => a.connection.isReady() && identifying.connection.isReady(), "formal and temporary registrations");
+	assert.equal(running.gateway.size, 2, "the temporary client keeps the shared transport alive");
+	messageFor("A", "/wecom-aibot sessions");
+	await until(
+		() => FakeWebSocket.instances[0].sent.some((frame) => frame.cmd === "aibot_respond_msg"),
+		"session listing",
+	);
+	const list = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body
+		.stream.content;
+	assert.match(list, /当前有 1 个在线会话/);
+	assert.doesNotMatch(list, /session-I/);
+	inbound("cannot run", {}, "session-I");
+	await assert.rejects(identifying.connection.notify(user, notification("I")), /临时识别连接/);
+	assert.equal(identifying.tasks.length, 0);
+	const identity = identifying.connection.watchIdentity(60_000);
+	await a.connection.notify(user, notification("A", "IPC barrier"));
+	messageFor("I", "identify");
+	assert.deepEqual(await identity, { chatId: "user", chatType: 1, userid: "user" });
+	assert.equal(identifying.tasks.length, 0);
+	identifying.connection.stop();
+	await until(() => running.gateway.size === 1, "temporary registration closed");
+	inbound("A continues");
+	await until(() => a.tasks.length === 1, "A receives its own task");
+	assert.equal(FakeWebSocket.instances.length, 1);
+});
+
 test("a registration arriving during the idle grace period retains the same gateway", async () => {
 	const running = await startServer(250);
 	const a = client("A");

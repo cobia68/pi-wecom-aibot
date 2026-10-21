@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { after, afterEach, beforeEach, type TestContext, test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { inspectPng } from "../../src/gateway/png-marker.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
 import { LoopbackClient } from "../support/loopback-client.ts";
+import { TINY_PNG } from "../support/media.ts";
 import { installTuiFixture } from "../support/tui-fixture.ts";
 
 const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-aibot-bridge-test-"));
@@ -167,7 +169,7 @@ beforeEach(async (t) => {
 				});
 		},
 	} as unknown as ExtensionAPI;
-	saveConfig({ botId: "test-bot", secret: "test-secret" });
+	saveConfig({ botId: "test-bot", secret: "test-secret", defaultChatId: "default-user" });
 	// The real gateway in-process: its routing, status messages and rendered notifications are what these tests assert.
 	extension(pi, {
 		renderScreen: (screen, options) => rasterise(screen, options),
@@ -195,6 +197,8 @@ beforeEach(async (t) => {
 	ws = FakeWebSocket.instances[0];
 	ws.open();
 	ws.acknowledge();
+	await drain();
+	ws.sent.length = 0; // Each test starts after the separately tested connection entry.
 });
 
 afterEach(async () => {
@@ -242,6 +246,8 @@ test("an allowlist change still revokes queued work and notifications from the o
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
+	await drain();
+	ws.sent.length = 0;
 	idle = true;
 	await emit("agent_settled", { aborted: false });
 	await drain();
@@ -382,9 +388,11 @@ test("a task pi refused is reported instead of taking the next local answer", as
 	assert.equal(status.body.stream.finish, true);
 	assert.match(status.body.stream.content, /没有接受/);
 	assert.doesNotMatch(status.body.stream.content, /LOCAL-ONLY-ANSWER/);
-	// The local run does not inherit the refused task's conversation as wecom_send's default target.
-	await assert.rejects(sendNotification({ content: "LOCAL-PUSH" }), /缺少 chatid/);
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+	// The local run uses the configured default, never the refused task's source chat.
+	await sendNotification({ content: "LOCAL-PUSH" });
+	const localPush = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)!;
+	assert.equal(localPush.body.chatid, "default-user");
+	assert.doesNotMatch(localPush.body.markdown.content, /LOCAL-ONLY-ANSWER/);
 	// The queue is no longer wedged: the next WeCom task runs.
 	refusePrompt = false;
 	inbound("after-refusal");
@@ -587,7 +595,12 @@ test("an aborted task ends its status and includes the cancellation in its resul
 });
 
 test("the pi bridge also checks the allowlist before accepting a task", async () => {
-	saveConfig({ botId: "test-bot", secret: "test-secret", allowedUserIds: ["allowed-user"] });
+	saveConfig({
+		botId: "test-bot",
+		secret: "test-secret",
+		defaultChatId: "default-user",
+		allowedUserIds: ["allowed-user"],
+	});
 	await emit("session_start");
 	await command("connect", ctx);
 	ws = FakeWebSocket.instances.at(-1)!;
@@ -848,7 +861,6 @@ test("an explicit session ID cannot mislabel another session's output", async ()
 		}),
 		/session_id/,
 	);
-	if (["aibot_send_msg", "aibot_respond_msg"].includes(ws.sent.at(-1).cmd)) ws.acknowledge();
 	await rejected;
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
 });
@@ -861,6 +873,8 @@ test("disconnect cancels notifications scheduled for the end of a run", async ()
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
+	await drain();
+	ws.sent.length = 0;
 	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "LATE-RESULT" }] } });
 	idle = true;
 	await emit("agent_settled", { aborted: false });
@@ -1046,6 +1060,8 @@ test("switching sessions cancels a scheduled notification", async () => {
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
+	await drain();
+	ws.sent.length = 0;
 	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "ANOTHER-SESSION" }] } });
 	idle = true;
 	await emit("agent_settled", { aborted: false });
@@ -1274,7 +1290,11 @@ test("setup merges into the file as it is now: fields edited after this pi start
 		[saved.botId, saved.secret, saved.defaultChatId, saved.defaultChatType],
 		["rotated-bot", "rotated-secret", "boss", 1],
 	);
-	// The reconnected bridge enforces the merged allowlist.
+	// setup saves configuration without connecting; an explicit connect applies the merged allowlist.
+	const sockets = FakeWebSocket.instances.length;
+	assert.equal(ws.readyState, 3);
+	await command("connect", ctx);
+	assert.equal(FakeWebSocket.instances.length, sockets + 1);
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
@@ -1373,7 +1393,7 @@ test("stopping and restarting during whoami confirmation invalidates that regist
 	await drain();
 	inbound("old-registration-identity");
 	await pending;
-	assert.equal(JSON.parse(await readFile(CONFIG_FILE, "utf8")).defaultChatId, undefined);
+	assert.equal(JSON.parse(await readFile(CONFIG_FILE, "utf8")).defaultChatId, "default-user");
 	assert.ok(
 		notices.some((line) => /已停止或切换/.test(line)),
 		notices.join("\n"),
@@ -1389,8 +1409,6 @@ test("whoami validates its wait and its preconditions before waiting for any mes
 	assert.equal(notices.length, 4);
 	assert.ok(notices.every((notice) => notice.type === "warning" && /10～600/.test(notice.message)));
 	await command("disconnect", ctx);
-	await command("whoami", ctx);
-	assert.match(notices.at(-1)!.message, /\/wecom-aibot connect/);
 	clearConfig();
 	await emit("session_start");
 	await command("whoami", ctx);
@@ -1431,7 +1449,7 @@ test("interactive setup: missing credentials are asked for, the target comes fro
 		["new-bot", "new-secret", "group_chat", 2],
 	);
 	assert.match(menus[0][0], /自动识别/);
-	assert.equal(menus[0][3], "暂不设置");
+	assert.equal(menus[0][3], "保持当前：default-user（单聊）");
 	assert.match(notices.at(-1)!.message, /默认推送目标已保存：group_chat（群聊）/);
 
 	// Credentials given as options: only the menu is shown, and it can keep the current target.
@@ -1480,7 +1498,7 @@ test("setup options are used as given: --chatid is always a literal ID, even who
 	assert.deepEqual([saved.botId, saved.defaultChatId], ["b3", "whoami"]);
 });
 
-test("setup connects only this session and leaves the shared file otherwise untouched", async () => {
+test("setup only saves configuration and leaves the shared file otherwise untouched", async () => {
 	await writeFile(
 		CONFIG_FILE,
 		JSON.stringify({ botId: "old-bot", secret: "old-secret", futureField: { kept: true } }),
@@ -1489,9 +1507,10 @@ test("setup connects only this session and leaves the shared file otherwise unto
 	await command("setup --bot-id fresh-bot --secret fresh-secret --chatid fresh-user", ctx);
 	const saved = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
 	assert.deepEqual(saved.futureField, { kept: true }, "a field this version does not own survives the edit");
-	assert.equal(FakeWebSocket.instances.length, sockets + 1, "setup connects the current session");
+	assert.equal(FakeWebSocket.instances.length, sockets, "setup never starts a formal connection");
+	assert.equal(ws.readyState, 3, "saving setup disconnects the current session");
 	await emit("session_start");
-	assert.equal(FakeWebSocket.instances.length, sockets + 1, "the next session never connects automatically");
+	assert.equal(FakeWebSocket.instances.length, sockets, "the next session never connects automatically");
 });
 
 test("empty or dismissed setup credentials cancel without HTTP requests, config changes or reconnects", async (t) => {
@@ -1730,15 +1749,265 @@ test("a file from WeCom is saved in the project with a .gitignore that keeps it 
 });
 
 async function imageModeStart() {
-	saveConfig({ botId: "test-bot", secret: "test-secret", sendMode: "image" });
+	saveConfig({ botId: "test-bot", secret: "test-secret", defaultChatId: "default-user", sendMode: "image" });
 	const fixture = installTuiFixture(ctx);
 	await emit("session_start");
 	await command("connect", ctx);
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
+	await drain();
+	ws.sent.length = 0;
 	return fixture;
 }
+
+test("connect sends one quotable image entry without drawing notification prose into the screenshot", async () => {
+	saveConfig({ botId: "test-bot", secret: "test-secret", defaultChatId: "default-user", sendMode: "image" });
+	const fixture = installTuiFixture(ctx);
+	fixture.state.lines = ["CURRENT-SCREEN"];
+	await emit("session_start");
+	let screen: any;
+	let header: any;
+	rasterise = async (snapshot, options) => {
+		screen = snapshot;
+		header = options.header;
+		return TINY_PNG;
+	};
+	await command("connect", ctx);
+	ws = FakeWebSocket.instances.at(-1)!;
+	ws.open();
+	ws.acknowledge();
+	await drain();
+	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(pushes.length, 1);
+	assert.equal(pushes[0].body.msgtype, "image");
+	assert.equal(header.badge, "会话已接入");
+	assert.match(header.caption, /session: pi-session-1/);
+	assert.match(screen.lines.join("\n"), /CURRENT-SCREEN/);
+	assert.doesNotMatch(screen.lines.join("\n"), /引用本条消息/);
+	const chunks = ws.sent.filter((frame) => frame.cmd === "aibot_upload_media_chunk");
+	const uploaded = Buffer.concat(chunks.map((frame) => Buffer.from(frame.body.base64_data, "base64")));
+	assert.equal(inspectPng(uploaded)?.session, "pi-session-1");
+	await command("connect", ctx);
+	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
+});
+
+test("changing sendMode with connect preserves active and queued work and applies to unfinished results", async () => {
+	const fixture = installTuiFixture(ctx);
+	await emit("session_start");
+	await command("connect", ctx);
+	ws = FakeWebSocket.instances.at(-1)!;
+	ws.open();
+	ws.acknowledge();
+	await drain();
+	ws.sent.length = 0;
+	inbound("first-mode-task");
+	inbound("second-mode-task");
+	await drain();
+	assert.equal(sent.length, 1);
+	await sendNotification({ content: "SCHEDULED-FALLBACK", after_settle: true });
+	const current = ws;
+	const cfg = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
+	await writeFile(CONFIG_FILE, JSON.stringify({ ...cfg, sendMode: "image" }));
+	await command("connect", ctx);
+	assert.equal(ws, current);
+	assert.equal(FakeWebSocket.instances.length, 2, "mode changes must not create a new registration");
+	fixture.state.lines = ["FIRST-MODE-RESULT"];
+	await emit("message_end", {
+		message: { role: "assistant", content: [{ type: "text", text: "FIRST-TEXT-FALLBACK" }] },
+	});
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	await drain();
+	assert.equal(sent.length, 2, "queued task survives the mode change");
+	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
+	assert.equal(ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.msgtype, "image");
+	await writeFile(CONFIG_FILE, JSON.stringify({ ...cfg, sendMode: "text" }));
+	await command("connect", ctx);
+	await emit("message_end", {
+		message: { role: "assistant", content: [{ type: "text", text: "SECOND-TEXT-RESULT" }] },
+	});
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	const last = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1)!;
+	assert.match(last.body.stream.content, /SECOND-TEXT-RESULT/);
+});
+
+test("a prepared offline image remains frozen when connect reloads text mode", async () => {
+	const fixture = await imageModeStart();
+	let captures = 0;
+	const render = rasterise;
+	rasterise = async (screen, options) => {
+		captures++;
+		return render(screen, options);
+	};
+	idle = false;
+	await sendNotification({ content: "FROZEN-FALLBACK", after_settle: true });
+	ws.close();
+	fixture.state.lines = ["ORIGINAL-SNAPSHOT"];
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	assert.equal(captures, 1);
+	fixture.state.lines = ["UNRELATED-LOCAL-SCREEN"];
+	const cfg = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
+	await writeFile(CONFIG_FILE, JSON.stringify({ ...cfg, sendMode: "text" }));
+	await command("connect", ctx);
+	clock.tick(1000);
+	ws = FakeWebSocket.instances.at(-1)!;
+	ws.open();
+	ws.acknowledge();
+	await drain();
+	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(pushes.length, 1);
+	assert.equal(pushes[0].body.msgtype, "image");
+	assert.equal(captures, 1, "frozen notifications must never recapture a newer screen");
+});
+
+test("an automatic result completed offline freezes its image before later local output or mode reload", async () => {
+	const fixture = await imageModeStart();
+	const captured: string[][] = [];
+	const render = rasterise;
+	rasterise = async (screen, options) => {
+		captured.push([...screen.lines]);
+		return render(screen, options);
+	};
+	inbound("offline-image-task");
+	await drain();
+	ws.close();
+	fixture.state.lines = ["ORIGINAL-OFFLINE-RESULT"];
+	await emit("message_end", {
+		message: { role: "assistant", content: [{ type: "text", text: "ORIGINAL-FALLBACK" }] },
+	});
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	assert.equal(captured.length, 1, "automatic results freeze even when their final status cannot yet be handed over");
+	fixture.state.lines = ["UNRELATED-LOCAL-OUTPUT"];
+	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "LOCAL-FALLBACK" }] } });
+	await emit("agent_settled", { aborted: false });
+	const cfg = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
+	await writeFile(CONFIG_FILE, JSON.stringify({ ...cfg, sendMode: "text" }));
+	await command("connect", ctx);
+	clock.tick(1000);
+	ws = FakeWebSocket.instances.at(-1)!;
+	ws.open();
+	ws.acknowledge();
+	await drain();
+	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(pushes.length, 1);
+	assert.equal(pushes[0].body.msgtype, "image");
+	assert.equal(captured.length, 1);
+	assert.match(captured[0].join("\n"), /ORIGINAL-OFFLINE-RESULT/);
+	assert.doesNotMatch(captured[0].join("\n"), /UNRELATED/);
+});
+
+test("image mode leaves status, help and session-list messages as text", async () => {
+	await imageModeStart();
+	for (const content of ["/wecom-aibot --help", "/wecom-aibot sessions"]) {
+		ws.receive({
+			cmd: "aibot_msg_callback",
+			headers: { req_id: content },
+			body: {
+				msgid: content,
+				from: { userid: "test-user" },
+				chattype: "single",
+				msgtype: "text",
+				text: { content },
+			},
+		});
+	}
+	const replies = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg");
+	assert.equal(replies.length, 2);
+	assert.ok(replies.every((frame) => frame.body.msgtype === "stream" && frame.body.stream.finish === true));
+	assert.equal(
+		ws.sent.some((frame) => frame.cmd === "aibot_upload_media_init"),
+		false,
+	);
+});
+
+test("screen fails with a text error instead of a fabricated image or notification body", async () => {
+	await imageModeStart();
+	rasterise = async () => {
+		throw new Error("rasteriser unavailable");
+	};
+	ws.receive({
+		cmd: "aibot_msg_callback",
+		headers: { req_id: "screen-error" },
+		body: {
+			msgid: "screen-error",
+			from: { userid: "test-user" },
+			chattype: "single",
+			msgtype: "text",
+			text: { content: `/wecom-aibot screen --sessionid ${sessionId}` },
+		},
+	});
+	await drain();
+	const reply = ws.sent.find((frame) => frame.cmd === "aibot_respond_msg");
+	assert.match(reply.body.stream.content, /截图失败：.*rasteriser unavailable/);
+	assert.equal(
+		ws.sent.some((frame) => frame.cmd === "aibot_send_msg"),
+		false,
+	);
+});
+
+test("an explicit image notification uses its content as the text fallback when capture fails", async () => {
+	await imageModeStart();
+	rasterise = async () => {
+		throw new Error("cannot capture");
+	};
+	await sendNotification({ content: "EXPLICIT-FALLBACK" });
+	const push = ws.sent.find((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(push.body.msgtype, "markdown");
+	assert.match(push.body.markdown.content, /EXPLICIT-FALLBACK/);
+	assert.match(push.body.markdown.content, /图片发送失败：.*cannot capture.*已改发文字/);
+});
+
+test("automatic reconnect does not send a scheduled completion before the run settles", async () => {
+	idle = false;
+	await sendNotification({ content: "ONLY-AFTER-SETTLE", after_settle: true });
+	ws.close();
+	clock.tick(1000);
+	ws = FakeWebSocket.instances.at(-1)!;
+	ws.open();
+	ws.acknowledge();
+	await drain();
+	assert.equal(
+		ws.sent.some((frame) => frame.cmd === "aibot_send_msg"),
+		false,
+	);
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(pushes.length, 1);
+	assert.match(pushes[0].body.markdown.content, /ONLY-AFTER-SETTLE/);
+});
+
+test("image mode keeps an automatic reconnect from capturing an unfinished completion", async () => {
+	const fixture = await imageModeStart();
+	let captures = 0;
+	const render = rasterise;
+	rasterise = async (screen, options) => {
+		captures++;
+		return render(screen, options);
+	};
+	idle = false;
+	await sendNotification({ content: "AFTER-SETTLE-FALLBACK", after_settle: true });
+	ws.close();
+	clock.tick(1000);
+	ws = FakeWebSocket.instances.at(-1)!;
+	ws.open();
+	ws.acknowledge();
+	await drain();
+	assert.equal(captures, 0);
+	assert.equal(
+		ws.sent.some((frame) => frame.cmd === "aibot_send_msg"),
+		false,
+	);
+	fixture.state.lines = ["FINAL-AFTER-RECONNECT"];
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	assert.equal(captures, 1);
+	assert.equal(ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.msgtype, "image");
+});
 
 test("image mode sends an automatic result as a native image message with no Markdown body", async () => {
 	const fixture = await imageModeStart();
@@ -1756,15 +2025,25 @@ test("image mode sends an automatic result as a native image message with no Mar
 	assert.equal(pushes[0].body.markdown, undefined);
 });
 
-test("image mode keeps explicit content as Markdown and never uploads an image", async () => {
+test("image mode sends explicit content as the current screenshot, not a rendered body", async () => {
 	await imageModeStart();
+	const screens: string[][] = [];
+	rasterise = async (screen) => {
+		screens.push([...screen.lines]);
+		return Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+			"base64",
+		);
+	};
 	await sendNotification({ chatid: "test-user", content: "EXPLICIT-CONTENT" });
 	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(pushes.at(-1)?.body.msgtype, "markdown");
-	assert.match(pushes.at(-1)?.body.markdown.content ?? "", /EXPLICIT-CONTENT/);
+	assert.equal(pushes.at(-1)?.body.msgtype, "image");
+	assert.equal(pushes.at(-1)?.body.markdown, undefined);
+	assert.equal(screens.length, 1);
+	assert.doesNotMatch(screens[0].join("\n"), /EXPLICIT-CONTENT/);
 	assert.equal(
 		ws.sent.some((frame) => frame.cmd === "aibot_upload_media_init"),
-		false,
+		true,
 	);
 });
 
@@ -1780,22 +2059,26 @@ test("image mode falls back to the Markdown answer when rendering is unavailable
 	await emit("agent_settled", { aborted: false });
 	await drain();
 	const reply = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
-	assert.match(reply.body.stream.content, /FINAL-TEXT/);
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+	assert.equal(reply.body.stream.finish, true);
+	assert.match(reply.body.stream.content, /本轮已结束，结果将另行通知/);
+	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(pushes.length, 1);
+	assert.match(pushes[0].body.markdown.content, /FINAL-TEXT/);
+	assert.match(pushes[0].body.markdown.content, /图片发送失败：.*no rasteriser.*已改发文字/);
 	assert.equal(
 		ws.sent.some((frame) => frame.cmd === "aibot_upload_media_init"),
 		false,
 	);
 });
 
-test("the deployment test stays text even in image mode", async () => {
+test("the deployment test follows image mode and uploads the current screenshot", async () => {
 	await imageModeStart();
 	await command("test test-user", ctx);
 	const push = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
-	assert.equal(push.body.msgtype, "markdown");
-	assert.match(push.body.markdown.content, /部署测试/);
+	assert.equal(push.body.msgtype, "image");
+	assert.equal(push.body.markdown, undefined);
 	assert.equal(
 		ws.sent.some((frame) => frame.cmd === "aibot_upload_media_init"),
-		false,
+		true,
 	);
 });

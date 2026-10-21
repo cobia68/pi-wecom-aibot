@@ -15,7 +15,12 @@ export interface SetupHost {
 	applyConfig(config: WeComConfig): void;
 	/** The configuration as it is on disk now. */
 	readConfig(ctx: ExtensionContext): WeComConfig | undefined;
-	waitUntilReady(signal: AbortSignal): Promise<void>;
+	/** Reuse the formal bridge, or open a temporary identity-only registration. */
+	beginIdentity(ctx: ExtensionContext): BridgeSession;
+	/** Dispose only the temporary registration owned by this identification. */
+	endIdentity(watcher: BridgeSession): void;
+	/** A saved default target change revokes the current formal registration. */
+	targetChanged(watcher: BridgeSession): void;
 	log(line: string): void;
 }
 
@@ -32,16 +37,20 @@ export class SessionSetup {
 			return;
 		}
 		this.identifying = true;
+		let watcher: BridgeSession | undefined;
 		try {
-			if (!this.host.bridge()?.ready)
-				await cancellableWait(ctx, "正在连接企业微信…", (signal) => this.host.waitUntilReady(signal));
-			const watcher = this.host.bridge();
+			watcher = this.host.beginIdentity(ctx);
 			const cfg = this.host.config();
-			if (!watcher || !cfg) throw new Error("当前 pi 的企微接入已停止");
+			if (!cfg) throw new Error("尚未配置，请先运行 /wecom-aibot setup");
 			const expected = { botId: cfg.botId, secret: cfg.secret };
-			const watch = watcher.watchIdentity.bind(watcher);
+			const identifying = watcher;
+			if (!identifying.ready)
+				await cancellableWait(ctx, "正在临时连接以识别聊天…", (signal) => identifying.waitUntilReady(signal));
+			if (identifying !== this.host.bridge() || identifying.sessionId !== ctx.sessionManager.getSessionId())
+				throw new Error("当前 pi 的识别连接已停止或切换");
+			const watch = identifying.watchIdentity.bind(identifying);
 			ctx.ui.notify(
-				"已连接。请在企微给机器人发一条消息：单聊直接发，群聊需 @机器人。这条消息只用于识别，不会交给 pi 处理。",
+				`${identifying.identifyOnly ? "临时识别连接已就绪，尚未正式接入。" : ""}请在企微给机器人发一条消息：单聊直接发，群聊需 @机器人。这条消息只用于识别，不会交给 pi 处理。`,
 				"info",
 			);
 			const identity = await cancellableWait(
@@ -63,6 +72,7 @@ export class SessionSetup {
 				);
 			} else ctx.ui.notify(`whoami 未完成：${error.message}`, "warning");
 		} finally {
+			if (watcher) this.host.endIdentity(watcher);
 			this.identifying = false;
 		}
 	}
@@ -103,11 +113,14 @@ export class SessionSetup {
 		const replaced = current.defaultChatId
 			? `将替换当前默认：${current.defaultChatId}（${current.defaultChatType === 2 ? "群聊" : "单聊"}）。`
 			: "当前没有默认推送目标。";
+		const consequence = watcher.identifyOnly
+			? "识别完成后关闭临时连接；请手动运行 /wecom-aibot connect 正式接入。"
+			: "保存后将断开当前 session 的企微接入，清除排队任务和待发通知；已开始的任务继续运行，但结果不再回传。请手动运行 /wecom-aibot connect 重新接入。";
 		const ok =
 			ctx.hasUI &&
 			(await ctx.ui.confirm(
 				"设为默认推送目标？",
-				`${found}\n${replaced}\nwecom_send 和 /wecom-aibot test 省略目标时发到这里。`,
+				`${found}\n${replaced}\nwecom_send 和 /wecom-aibot test 省略目标时发到这里。\n${consequence}`,
 			));
 		if (!ok) {
 			ctx.ui.notify(
@@ -126,8 +139,9 @@ export class SessionSetup {
 		const allowlist = saved.allowedUserIds?.length
 			? ""
 			: `当前未配置 allowedUserIds：任何能给机器人发消息的人都能让 pi 执行任务。建议在 ${CONFIG_FILE} 中加入 "allowedUserIds": [${JSON.stringify(identity.userid)}]，然后运行 /wecom-aibot connect。`;
+		if (!watcher.identifyOnly) this.host.targetChanged(watcher);
 		ctx.ui.notify(
-			`默认推送目标已保存：${identity.chatId}（${kind}）。可运行 /wecom-aibot test 验证。${allowlist}`,
+			`默认推送目标已保存：${identity.chatId}（${kind}）。${watcher.identifyOnly ? "尚未正式接入" : "当前 session 已断开"}，请运行 /wecom-aibot connect；连上后可运行 /wecom-aibot test 验证。${allowlist}`,
 			"info",
 		);
 	}
@@ -182,7 +196,7 @@ export function givenTarget(options: Map<string, string>): { chatId: string; cha
 	return chatId === undefined ? undefined : { chatId, chatType: options.get("chat-type") === "2" ? 2 : 1 };
 }
 
-/** setup's default target: --chatid as given, otherwise a menu. "whoami" identifies after connecting; undefined keeps; null cancels setup. */
+/** setup's default target: --chatid as given, otherwise a menu; whoami uses a temporary connection. */
 export async function setupTarget(
 	ctx: ExtensionContext,
 	options: Map<string, string>,

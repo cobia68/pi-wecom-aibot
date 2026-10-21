@@ -19,11 +19,14 @@ const MAX_QUEUE_SIZE = 50;
 
 /** A wecom_send with after_settle, or the result of a finished task: content is read when the run ends. */
 export interface CompletionRequest {
+	/** The connection entry has its own outbox key; it cannot replace a task's final notification. */
+	kind?: "connect";
+	taskId?: string;
 	chatId: string;
 	chatType: 1 | 2;
 	source: NotificationSource;
 	content?: string;
-	/** The frozen result of an automatic reply; content is reserved for explicit wecom_send bodies. */
+	/** The frozen automatic reply; content holds explicit wecom_send bodies or a connection entry. */
 	result?: string;
 	aborted?: boolean;
 	/** A failure explanation, never a screen capture: it can show what the user is doing locally. */
@@ -94,12 +97,18 @@ export class NotificationOutbox {
 	 */
 	queueResult(request: CompletionRequest): void {
 		const key = keyOf(request);
-		if (this.waiting.has(key)) return;
+		const scheduled = this.waiting.get(key);
+		if (scheduled) {
+			scheduled.request.taskId = request.taskId;
+			if (scheduled.phase.kind === "ready")
+				scheduled.phase.notification = { ...scheduled.phase.notification, taskId: request.taskId };
+			return;
+		}
 		this.waiting.set(key, { request, phase: { kind: "pending" } });
 	}
 
 	/** Freeze every waiting result, render images where the mode asks for one, then deliver what is ready. */
-	async prepare(ctx: ExtensionContext, aborted: boolean): Promise<void> {
+	async prepare(ctx: ExtensionContext, aborted: boolean, boundary: "settled" | "ready" = "settled"): Promise<void> {
 		if (this.disposed) return;
 		const images: Promise<void>[] = [];
 		for (const [key, entry] of this.waiting) {
@@ -110,6 +119,9 @@ export class NotificationOutbox {
 			}
 			try {
 				const request = entry.request;
+				if (request.kind === "connect" && !this.host.isReady()) continue;
+				// A readiness change is not the end of a run: scheduled completions still wait for agent_settled.
+				if (boundary === "ready" && request.kind !== "connect" && request.result === undefined) continue;
 				if (request.source.sessionId !== ctx.sessionManager.getSessionId())
 					throw new Error("pi session_id 已改变，已取消通知");
 				const answer =
@@ -119,19 +131,20 @@ export class NotificationOutbox {
 				if (answer) request.source = { ...request.source, ...captureModelIdentity(ctx, answer) };
 				// Autonomous replies keep the tail like a normal reply; scheduled excerpts use completion rules.
 				const ready = notificationPayload(
-					request.result !== undefined ? "reply" : "completion",
+					request.kind ?? (request.result !== undefined ? "reply" : "completion"),
 					request.source,
 					request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT,
 					{
 						tailParagraphs: request.tailParagraphs,
-						aborted: request.aborted ?? aborted,
+						aborted: request.kind === "connect" ? false : (request.aborted ?? aborted),
+						taskId: request.taskId,
 					},
 				);
 				// Validate the Markdown fallback before any image side effects; the gateway renders it once.
 				const problem = notificationProblem(ready.source, ready.text, ready);
 				if (problem) throw new Error(problem);
-				// Explicit content stays Markdown; automatic replies and scheduled answers follow the mode.
-				if (request.content !== undefined || request.textOnly || this.host.sendMode() !== "image") {
+				// All notifications follow the same mode; failure explanations must never leak a local screen.
+				if (request.textOnly || this.host.sendMode() !== "image") {
 					entry.phase = { kind: "ready", notification: ready };
 					continue;
 				}
@@ -142,7 +155,10 @@ export class NotificationOutbox {
 							this.removeImage(prepared);
 							return;
 						}
-						entry.phase = { kind: "ready", notification: prepared };
+						entry.phase = {
+							kind: "ready",
+							notification: { ...prepared, ...(request.taskId ? { taskId: request.taskId } : {}) },
+						};
 					})
 					.catch((error: unknown) => this.cancel(key, entry, error));
 				entry.phase = { kind: "preparing", promise: prepare };
@@ -260,8 +276,8 @@ function imageOf(entry: Entry): GatewayNotification | undefined {
 	return entry.phase.kind === "ready" || entry.phase.kind === "delivering" ? entry.phase.notification : undefined;
 }
 
-function keyOf(request: { source: NotificationSource; chatId: string; chatType: 1 | 2 }): string {
-	return JSON.stringify([request.source.sessionId, request.chatType, request.chatId]);
+function keyOf(request: Pick<CompletionRequest, "source" | "chatId" | "chatType" | "kind">): string {
+	return JSON.stringify([request.source.sessionId, request.chatType, request.chatId, request.kind ?? "result"]);
 }
 
 function errMsg(err: unknown): string {

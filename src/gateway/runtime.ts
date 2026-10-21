@@ -16,7 +16,6 @@ import {
 } from "../shared/gateway-protocol.ts";
 import {
 	formatProcessingStatus,
-	MAX_NOTIFICATION_BYTES,
 	type ProcessingState,
 	quotedSessions,
 	renderNotification,
@@ -82,6 +81,7 @@ interface Task {
 	opened?: boolean;
 	/** Settled, waiting for its result notification to replace the status content. */
 	awaitingResult?: boolean;
+	completionState?: "settled" | "notifying";
 	mergeTimer?: ReturnType<typeof setTimeout>;
 	/** A final state that could not be sent while WeCom was disconnected. */
 	unsent?: ProcessingState;
@@ -109,6 +109,9 @@ export class WeComGateway {
 	get size(): number {
 		return this.members.size;
 	}
+	private onlineSize(): number {
+		return [...this.members.values()].filter((member) => !member.identifyOnly).length;
+	}
 	owns(instanceId: string, peer: GatewayPeer): boolean {
 		return this.members.get(instanceId)?.peer === peer;
 	}
@@ -132,7 +135,7 @@ export class WeComGateway {
 		// A whoami belongs to the connection that asked; the replaced one has already failed it.
 		this.watches.delete(registration.instanceId);
 		previous?.peer.close();
-		peer.send({ type: "registered", status: { ...this.status, sessions: this.size } });
+		peer.send({ type: "registered", status: { ...this.status, sessions: this.onlineSize() } });
 		this.membershipChanged();
 		this.broadcastStatus();
 		if (!this.client) {
@@ -142,7 +145,12 @@ export class WeComGateway {
 				secret,
 				createWebSocket,
 				onState: (state, detail) => {
-					this.status = { state, detail, sessions: this.size, ...(this.client?.stopped ? { stopped: true } : {}) };
+					this.status = {
+						state,
+						detail,
+						sessions: this.onlineSize(),
+						...(this.client?.stopped ? { stopped: true } : {}),
+					};
 					if (state === "subscribed") this.flushUnsent();
 					this.broadcastStatus();
 				},
@@ -203,7 +211,7 @@ export class WeComGateway {
 	taskStatus(instanceId: string, taskId: string, state: TaskState): boolean {
 		const task = this.tasks.get(taskId);
 		const member = this.members.get(instanceId);
-		if (!task || !member || !sameTarget(task.target, sessionTarget(member))) return false;
+		if (!task || !member || member.identifyOnly || !sameTarget(task.target, sessionTarget(member))) return false;
 		if (task.expiresAt < Date.now()) {
 			this.closeTask(taskId);
 			return false;
@@ -213,7 +221,8 @@ export class WeComGateway {
 			task.deadline ??= setTimeout(() => this.expireStream(taskId), STREAM_DEADLINE_MS);
 			return this.stream(taskId, task, state);
 		}
-		if (state === "settled") {
+		if (state === "settled" || state === "notifying") {
+			task.completionState = state;
 			// The result follows on the same IPC channel and replaces this message, so do not close it yet.
 			// A scheduled notification may own the delivery instead; then this deadline closes the status.
 			if (!task.awaitingResult) {
@@ -229,21 +238,34 @@ export class WeComGateway {
 	async notify(instanceId: string, chat: ChatRef, notification: GatewayNotification): Promise<void> {
 		const member = this.members.get(instanceId);
 		if (!member || !this.client) throw new Error("pi 尚未注册");
+		if (member.identifyOnly) throw new Error("临时识别连接不能发送通知；请完成配置后运行 /wecom-aibot connect");
 		if (notification.source.sessionId !== member.source.sessionId)
 			throw new Error("通知的 session 与发送 pi 不匹配，已拒绝发送");
 		const content = renderNotification(notification.source, notification.text, {
 			kind: notification.kind,
 			excerpt: notification.excerpt,
 			aborted: notification.aborted,
+			imageFailure: notification.imageFailure,
 		});
 		// A task's own result replaces its status message: one message, tied to the person who asked.
 		// Only a text result can ride the stream; an image stays a separate message.
-		const awaiting = notification.kind === "reply" ? this.awaitingTask(member, chat) : undefined;
-		if (awaiting && !notification.image) {
+		const awaiting = notification.taskId ? this.awaitingTask(member, chat, notification.taskId) : undefined;
+		if (
+			awaiting &&
+			notification.kind === "reply" &&
+			!notification.image &&
+			awaiting.task.completionState !== "notifying"
+		) {
 			const outcome = await this.finishWithResult(this.client, awaiting.taskId, awaiting.task, content);
 			if (outcome === "delivered" || outcome === "unknown") return;
 			// A rejected or unsent finish falls back to the push below; the status closes first.
 		}
+		if (awaiting)
+			this.stream(
+				awaiting.taskId,
+				awaiting.task,
+				notification.image || awaiting.task.completionState === "notifying" ? "notifying" : "settled",
+			);
 		if (notification.image) {
 			const image = readImage(notification.image.path);
 			let failure = image.reason;
@@ -274,11 +296,10 @@ export class WeComGateway {
 			// The reason belongs in the fallback, as the README promises; a truncated tail is cut, not lost.
 			const reason = failure?.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 200);
 			this.log(`图片通知改发文字：${reason ?? "未知原因"}`);
-			const note = `\n\n（图片发送失败${reason ? `：${reason}` : ""}，已改发文字）`;
-			const fallback =
-				Buffer.byteLength(content, "utf8") + Buffer.byteLength(note, "utf8") <= MAX_NOTIFICATION_BYTES
-					? content + note
-					: content;
+			const fallback = renderNotification(notification.source, notification.text, {
+				...notification,
+				imageFailure: reason ?? "未知原因",
+			});
 			await this.client.sendMsg(chat.chatId, chat.chatType, {
 				msgtype: "markdown",
 				markdown: { content: fallback },
@@ -307,15 +328,13 @@ export class WeComGateway {
 		return sent;
 	}
 
-	/** The settled task of this pi and conversation, still open for its result. At most one per pi session. */
-	private awaitingTask(member: Member, chat: ChatRef): { taskId: string; task: Task } | undefined {
-		for (const [taskId, task] of this.tasks) {
-			if (!task.awaitingResult || !task.opened) continue;
-			if (!sameTarget(task.target, sessionTarget(member))) continue;
-			if (task.chat.chatId !== chat.chatId || task.chat.chatType !== chat.chatType) continue;
-			return { taskId, task };
-		}
-		return undefined;
+	/** Only finish this result's task; an earlier scheduled notification cannot consume a newer status. */
+	private awaitingTask(member: Member, chat: ChatRef, taskId: string): { taskId: string; task: Task } | undefined {
+		const task = this.tasks.get(taskId);
+		if (!task?.awaitingResult || !task.opened) return undefined;
+		if (!sameTarget(task.target, sessionTarget(member))) return undefined;
+		if (task.chat.chatId !== chat.chatId || task.chat.chatType !== chat.chatType) return undefined;
+		return { taskId, task };
 	}
 
 	/** Replace the status content with the result and wait for WeCom's acknowledgement. */
@@ -356,7 +375,7 @@ export class WeComGateway {
 			this.closeTask(taskId);
 			return;
 		}
-		this.stream(taskId, task, "settled");
+		this.stream(taskId, task, task.completionState ?? "settled");
 	}
 
 	/** WeCom would end the status message on its own; end it first and point at the coming notification. */
@@ -411,7 +430,7 @@ export class WeComGateway {
 	}
 
 	private broadcastStatus(): void {
-		this.status = { ...this.status, sessions: this.size };
+		this.status = { ...this.status, sessions: this.onlineSize() };
 		this.broadcast({ type: "status", status: this.status });
 	}
 
@@ -424,8 +443,9 @@ export class WeComGateway {
 	private async route(inbound: WeComInbound): Promise<void> {
 		const userid = senderOf(inbound.body);
 		if (!userid) return;
-		const eligible = this.eligible(userid);
-		if (!eligible.length) return;
+		const permitted = this.eligible(userid);
+		if (!permitted.length) return;
+		const eligible = permitted.filter((member) => !member.identifyOnly);
 		const message = parseInbound(inbound.body);
 		const id = message?.msgId || inbound.reqId;
 		if (this.seen.has(id)) return;
@@ -440,7 +460,7 @@ export class WeComGateway {
 		const quoting = message.quoteText !== undefined || quoted !== undefined;
 		this.expire();
 		// While a pi waits in /wecom-aibot whoami, the next message it may receive only identifies the chat.
-		const watchers = eligible.filter((member) => this.watches.has(member.instanceId));
+		const watchers = permitted.filter((member) => this.watches.has(member.instanceId));
 		if (watchers.length) {
 			this.identify(watchers, inbound.reqId, { ...message.chat, userid: message.userid });
 			return;

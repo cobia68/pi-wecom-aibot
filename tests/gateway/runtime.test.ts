@@ -164,12 +164,75 @@ test("a task's text result replaces its status message instead of a second push"
 	await gateway.notify(
 		"A",
 		{ chatId: "user", chatType: 1 },
-		{ kind: "reply", source: a.value.source, text: "RESULT-BODY" },
+		{ kind: "reply", source: a.value.source, text: "RESULT-BODY", taskId: id },
 	);
 	const finish = frames.filter((frame) => frame.cmd === "aibot_respond_msg" && frame.body.stream.finish).at(-1);
 	assert.match(finish.body.stream.content, /RESULT-BODY$/);
 	assert.match(finish.body.stream.content, new RegExp(`session: ${SESSION_A}`));
 	assert.equal(frames.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "one bubble per task");
+});
+
+test("a late result cannot finish another task's status message even in the same chat", async () => {
+	const a = add("A", SESSION_A);
+	a.ws.onSend = (frame) => {
+		if (frame.cmd === "aibot_send_msg" || frame.cmd === "aibot_respond_msg") a.ws.acknowledge(frame);
+	};
+	const old = send(SESSION_A, "old task").headers.req_id;
+	gateway.taskStatus("A", old, "running");
+	gateway.taskStatus("A", old, "notifying");
+	const current = send(SESSION_A, "current task").headers.req_id;
+	gateway.taskStatus("A", current, "running");
+	gateway.taskStatus("A", current, "settled");
+	await gateway.notify(
+		"A",
+		{ chatId: "user", chatType: 1 },
+		{ kind: "reply", source: a.value.source, text: "CURRENT-RESULT", taskId: current },
+	);
+	await gateway.notify(
+		"A",
+		{ chatId: "user", chatType: 1 },
+		{ kind: "completion", source: a.value.source, text: "OLDER-NOTIFICATION", taskId: old },
+	);
+	const currentReplies = a.ws.sent.filter(
+		(frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === current,
+	);
+	assert.match(currentReplies.at(-1).body.stream.content, /CURRENT-RESULT$/);
+	assert.doesNotMatch(currentReplies.at(-1).body.stream.content, /OLDER/);
+	const oldReplies = a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === old);
+	assert.match(oldReplies.at(-1).body.stream.content, /结果将另行通知/);
+});
+
+test("temporary identity registrations are hidden and cannot be targeted or publish notifications", async () => {
+	const a = add("A", SESSION_A);
+	const identifying = add("I", "identity-session", (value) => {
+		value.identifyOnly = true;
+	});
+	message("/wecom-aibot sessions");
+	assert.match(prompt(), /当前有 1 个在线会话/);
+	assert.doesNotMatch(prompt(), /identity-session|project-I/);
+	const status = identifying.peer.frames.filter((frame) => frame.type === "status").at(-1)!;
+	assert.equal(status.status.sessions, 1);
+	send("identity-session", "must not run");
+	message("must not run either", { quote: quote("identity-session") });
+	message("/wecom-aibot screen --sessionid identity-session");
+	assert.equal(identifying.peer.messages().length, 0);
+	assert.equal(requests(identifying.peer).length, 0);
+	await assert.rejects(
+		gateway.notify(
+			"I",
+			{ chatId: "user", chatType: 1 },
+			notificationPayload("connect", identifying.value.source, "entry"),
+		),
+		/临时识别连接/,
+	);
+
+	gateway.watch("I", "identity-watch", 60_000);
+	message("identify me");
+	assert.equal(identifying.peer.frames.filter((frame) => frame.type === "identity").length, 1);
+	assert.equal(a.peer.messages().length, 0);
+	gateway.unregister("I", identifying.peer);
+	send(SESSION_A, "A still works");
+	assert.equal(a.peer.messages().length, 1);
 });
 
 test("without a result notification the settled status closes after the grace window", (t) => {
@@ -679,6 +742,65 @@ test("an image notification uploads media and sends a native image message inste
 	rmSync(file.dir, { recursive: true, force: true });
 });
 
+test("an unconfirmed image send never falls back to a duplicate Markdown notification", async () => {
+	const a = add("A", SESSION_A);
+	const file = imageFile(TINY_PNG);
+	const previous = a.ws.onSend;
+	a.ws.onSend = (frame) => {
+		previous?.(frame);
+		if (frame.cmd === "aibot_send_msg") a.ws.close();
+	};
+	try {
+		await assert.rejects(
+			gateway.notify(
+				"A",
+				{ chatId: "user", chatType: 1 },
+				{
+					kind: "reply",
+					source: a.value.source,
+					text: "FALLBACK",
+					image: { mime: "image/png", filename: "image.png", path: file.path },
+				},
+			),
+			{ outcome: "unknown" },
+		);
+		assert.equal(a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
+		assert.equal(a.ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.msgtype, "image");
+	} finally {
+		rmSync(file.dir, { recursive: true, force: true });
+	}
+});
+
+test("a rejected image send falls back to one Markdown body with its rejection reason", async () => {
+	const a = add("A", SESSION_A);
+	const file = imageFile(TINY_PNG);
+	const previous = a.ws.onSend;
+	a.ws.onSend = (frame) => {
+		previous?.(frame);
+		if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame, frame.body.msgtype === "image" ? 40006 : 0);
+	};
+	try {
+		await gateway.notify(
+			"A",
+			{ chatId: "user", chatType: 1 },
+			{
+				kind: "reply",
+				source: a.value.source,
+				text: "FALLBACK",
+				image: { mime: "image/png", filename: "image.png", path: file.path },
+			},
+		);
+		const pushes = a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+		assert.deepEqual(
+			pushes.map((frame) => frame.body.msgtype),
+			["image", "markdown"],
+		);
+		assert.match(pushes[1].body.markdown.content, /FALLBACK[\s\S]*发送被拒绝.*40006/);
+	} finally {
+		rmSync(file.dir, { recursive: true, force: true });
+	}
+});
+
 test("a missing image file falls back to the Markdown body with a visible reason", async () => {
 	const a = add("A", SESSION_A);
 	const sent: any[] = [];
@@ -700,6 +822,27 @@ test("a missing image file falls back to the Markdown body with a visible reason
 	assert.equal(push.body.msgtype, "markdown");
 	assert.match(push.body.markdown.content, /fallback body/);
 	assert.match(push.body.markdown.content, /图片发送失败：.*ENOENT.*已改发文字/);
+});
+
+test("a notification fallback always retains its reason inside the UTF-8 byte limit", async () => {
+	const a = add("A", SESSION_A);
+	a.ws.onSend = (frame) => {
+		if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
+	};
+	await gateway.notify(
+		"A",
+		{ chatId: "user", chatType: 1 },
+		{
+			kind: "reply",
+			source: a.value.source,
+			text: "汉🙂".repeat(10000),
+			image: { mime: "image/png", filename: "missing.png", path: "/definitely/missing.png" },
+		},
+	);
+	const content = a.ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.markdown.content;
+	assert.ok(Buffer.byteLength(content, "utf8") <= 20_480);
+	assert.match(content, /图片发送失败：.*ENOENT.*已改发文字/);
+	assert.equal(content.includes("\ufffd"), false);
 });
 
 test("a rejected media upload falls back to Markdown while a rejected image send also falls back", async () => {

@@ -47,6 +47,9 @@ interface BridgeRequest {
 	label: string;
 	result?: string;
 	aborted?: boolean;
+	/** Frozen at result creation, so a later mode reload cannot change its status or screenshot. */
+	completionState?: "settled" | "notifying";
+	notificationQueued?: boolean;
 }
 
 /** What a session needs from the pi extension that owns it. */
@@ -82,7 +85,7 @@ export interface BridgeHost {
 export class BridgeSession {
 	/** The pi session the gateway registration belongs to. */
 	readonly sessionId: string;
-	/** Credentials and permissions this connection was made with; a change revokes the old registration. */
+	/** Credentials, permissions and the default target used by this registration; changes revoke it. */
 	readonly configKey: string;
 	state: WeComState = "disconnected";
 	detail: string | undefined;
@@ -90,7 +93,7 @@ export class BridgeSession {
 	/** The shared WeCom connection gave up and waits for /wecom-aibot connect (from the latest gateway status). */
 	private upstreamStopped = false;
 	private readonly host: BridgeHost;
-	private readonly config: WeComConfig;
+	private config: WeComConfig;
 	private readonly client: BridgeClient;
 	private readonly contentPreparer = new InboundContentPreparer();
 	private readonly queue: BridgeRequest[] = [];
@@ -119,6 +122,7 @@ export class BridgeSession {
 		ctx: ExtensionContext,
 		createClient: (options: GatewayClientOptions) => BridgeClient,
 		instanceId: string,
+		readonly identifyOnly = false,
 	) {
 		this.host = host;
 		this.config = config;
@@ -136,8 +140,19 @@ export class BridgeSession {
 		});
 		this.sessionId = ctx.sessionManager.getSessionId();
 		this.configKey = connectionConfig(config);
+		if (!identifyOnly && config.defaultChatId) {
+			this.outbox.schedule({
+				kind: "connect",
+				chatId: config.defaultChatId,
+				chatType: config.defaultChatType ?? 1,
+				source: captureNotificationSource(ctx),
+				content: "引用本条消息回复，即可向这个会话发送任务。",
+				afterEntryId: null,
+			});
+		}
 		this.client = createClient({
 			config,
+			identifyOnly,
 			source: captureNotificationSource(ctx),
 			instanceId,
 			onStatus: (status) => {
@@ -168,7 +183,7 @@ export class BridgeSession {
 		return !this.disposed && this.state === "subscribed" && this.client.isReady();
 	}
 	get connectionStatus(): BridgeConnectionStatus | undefined {
-		return this.notices.connectionStatus;
+		return this.identifyOnly ? undefined : this.notices.connectionStatus;
 	}
 	get queued(): number {
 		return this.queue.length;
@@ -204,6 +219,12 @@ export class BridgeSession {
 		for (const wake of [...this.readyWaiters]) wake(new Error(`当前 pi 的企微接入已停止（${reason}）`));
 	}
 
+	/** Presentation-only updates retain queued work and already frozen notifications. */
+	updateConfig(config: WeComConfig): void {
+		if (connectionConfig(config) !== this.configKey) throw new Error("连接配置已改变，必须重新接入");
+		this.config = config;
+	}
+
 	updateSource(ctx: ExtensionContext): void {
 		if (!this.disposed && ctx.sessionManager.getSessionId() === this.sessionId)
 			this.client.updateSource(captureNotificationSource(ctx));
@@ -215,8 +236,8 @@ export class BridgeSession {
 		const answer = (response: BridgeResponse) => {
 			if (!this.disposed) this.client.respond(id, response);
 		};
-		if (this.disposed || !ctx) {
-			answer({ ok: false, error: "pi 会话已停止" });
+		if (this.disposed || this.identifyOnly || !ctx) {
+			answer({ ok: false, error: "pi 尚未正式接入" });
 			return;
 		}
 		if (ctx.sessionManager.getSessionId() !== this.sessionId || request.target.sessionId !== this.sessionId) {
@@ -306,24 +327,26 @@ export class BridgeSession {
 	// ---------------------------------------------------------------- wecom_send
 	/** Send when the run ends; the latest call for the same conversation wins. */
 	schedule(request: CompletionRequest): void {
+		if (this.identifyOnly) throw new Error("临时识别连接不能安排通知，请运行 /wecom-aibot connect 正式接入");
 		this.outbox.schedule(request);
 	}
 
 	async notify(
 		chat: ChatRef,
 		notification: GatewayNotification,
-		options: { ctx?: ExtensionContext; signal?: AbortSignal; image?: boolean } = {},
+		options: { ctx?: ExtensionContext; signal?: AbortSignal } = {},
 	): Promise<void> {
 		const signal = options.signal ?? this.mediaAbort.signal;
+		if (this.identifyOnly) throw new Error("临时识别连接不能发送通知，请运行 /wecom-aibot connect 正式接入");
 		signal.throwIfAborted();
 		const ctx = options.ctx ?? this.host.context();
 		if (!ctx || ctx.sessionManager.getSessionId() !== this.sessionId)
 			throw new Error("pi session_id 已改变，已取消通知");
-		if (options.image) notification = await this.host.prepareImage(notification, ctx, signal);
-		signal.throwIfAborted();
-		if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId)
-			throw new Error("pi 会话已停止或切换，已取消通知");
 		try {
+			if (this.config.sendMode === "image") notification = await this.host.prepareImage(notification, ctx, signal);
+			signal.throwIfAborted();
+			if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId)
+				throw new Error("pi 会话已停止或切换，已取消通知");
 			await this.client.notify(chat, notification);
 		} finally {
 			// A direct notification is not retained for reconnect: the gateway has consumed the file.
@@ -383,7 +406,7 @@ export class BridgeSession {
 				const ctx = this.host.context();
 				if (ctx)
 					void this.outbox
-						.prepare(ctx, false)
+						.prepare(ctx, false, "ready")
 						.catch((err: unknown) => this.host.log(`notification preparation failed: ${errMsg(err)}`));
 				else
 					void this.outbox
@@ -398,7 +421,7 @@ export class BridgeSession {
 
 	private receive(task: GatewayTask): void {
 		const ctx = this.host.context();
-		if (this.disposed || !ctx) return;
+		if (this.disposed || this.identifyOnly || !ctx) return;
 		if (ctx.sessionManager.getSessionId() !== this.sessionId) {
 			this.host.log("rejected message: current pi session differs from gateway registration");
 			return;
@@ -542,7 +565,7 @@ export class BridgeSession {
 		const ctx = this.host.context();
 		if (ctx)
 			void this.outbox
-				.prepare(ctx, false)
+				.prepare(ctx, false, "ready")
 				.catch((err: unknown) => this.host.log(`notification preparation failed: ${errMsg(err)}`));
 		else void this.outbox.flush().catch((err: unknown) => this.host.log(`notification flush failed: ${errMsg(err)}`));
 	}
@@ -550,27 +573,38 @@ export class BridgeSession {
 	private finishActive(textOnly = false): void {
 		const active = this.active;
 		if (!active || active.result === undefined) return;
-		// Not handed to the gateway (disconnected): the next subscription finishes it.
-		if (!this.report(active, "settled")) return;
-		this.outbox.queueResult({
-			chatId: active.chatId,
-			chatType: active.chatType,
-			source: active.source,
-			afterEntryId: null,
-			result: active.result,
-			aborted: active.aborted,
-			textOnly,
-		});
-		this.host.log(`final notification queued for ${active.label} (${active.result.length} chars)`);
+		if (!active.notificationQueued) {
+			active.completionState = !textOnly && this.config.sendMode === "image" ? "notifying" : "settled";
+			this.outbox.queueResult({
+				taskId: active.taskId,
+				chatId: active.chatId,
+				chatType: active.chatType,
+				source: active.source,
+				afterEntryId: null,
+				result: active.result,
+				aborted: active.aborted,
+				textOnly,
+			});
+			active.notificationQueued = true;
+			this.host.log(`final notification queued for ${active.label} (${active.result.length} chars)`);
+		}
+		// Freeze the result even while offline; report its final state before recovery flushes the outbox.
+		if (!this.report(active, active.completionState ?? "settled")) return;
 		this.active = undefined;
 		this.streamText = this.finalText = "";
 		this.scheduleDrain();
 	}
 }
 
-/** Credentials or permissions require a new registration; presentation updates retain pending session work. */
+/** Credentials, permissions or the default destination require a new registration; sendMode is hot-reloaded. */
 export function connectionConfig(config: WeComConfig): string {
-	return JSON.stringify([config.botId, config.secret, config.allowedUserIds ?? []]);
+	return JSON.stringify([
+		config.botId,
+		config.secret,
+		config.allowedUserIds ?? [],
+		config.defaultChatId ?? null,
+		config.defaultChatType ?? 1,
+	]);
 }
 
 export function abortError(): Error {

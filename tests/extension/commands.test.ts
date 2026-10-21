@@ -98,6 +98,20 @@ test("connection help never promises persisted consent or recommends the old sta
 	}
 });
 
+test("help describes the configuration-only setup and the unified notification mode", () => {
+	const setup = topicHelp("setup --help");
+	assert.match(setup, /只完成配置.*不发送会话入口/);
+	assert.match(setup, /显式 content.*文字兜底/);
+	assert.doesNotMatch(setup, /始终为 Markdown|会话选择记录/);
+	const identity = topicHelp("whoami --help");
+	assert.match(identity, /临时连接.*不出现在在线会话列表/);
+	assert.match(identity, /保存不同默认目标后断开/);
+	const connect = topicHelp("connect --help");
+	assert.match(connect, /默认推送目标必须齐全/);
+	assert.match(connect, /可引用的会话入口/);
+	assert.doesNotMatch(wecomHelpText(), /wecom-aibot use/);
+});
+
 test("a bare action documents no options and offers no --help, while a parameterized command does", () => {
 	for (const name of ["status", "connect", "disconnect", "log", "reset"]) {
 		const help = topicHelp(`${name} --help`);

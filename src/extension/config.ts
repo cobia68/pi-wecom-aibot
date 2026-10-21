@@ -21,7 +21,7 @@ export interface WeComConfig {
 	/** Default destination for proactive notifications. */
 	defaultChatId?: string;
 	defaultChatType?: 1 | 2;
-	/** text (default) sends Markdown; image sends automatic results as a rendered terminal image. */
+	/** text sends Markdown; image captures the current terminal for every notification, exactly like screen. */
 	sendMode?: SendMode;
 }
 

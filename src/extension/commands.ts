@@ -36,7 +36,7 @@ const WECOM_COMMANDS: WeComCommand[] = [
 	{
 		name: "setup",
 		usage: "setup [whoami] [--bot-id <BotID>] [--secret <Secret>] [--chatid <ID>] [--chat-type <1|2>]",
-		description: "配置已有机器人并接入；接 whoami 时连上后识别 chatid",
+		description: "配置已有机器人，不自动接入；接 whoami 时临时识别 chatid",
 		maxArgs: 0,
 		argsHint:
 			"setup 的值都用选项给出，例如 /wecom-aibot setup --bot-id <BotID> --secret <Secret>；也可以只输入 /wecom-aibot setup 按提示填写。",
@@ -59,10 +59,10 @@ const WECOM_COMMANDS: WeComCommand[] = [
 		details: [
 			"先在企业微信中创建或打开 API 模式、长连接的智能机器人，取得 BotID 和 Secret；插件只连接已有机器人。",
 			"未给出的 BotID 和 Secret 按提示输入，留空或按 Esc 取消整个 setup，配置不变。未给出 --chatid 时，在菜单中选择自动识别、手动填写或保持当前目标。",
-			"setup whoami：配置并连接后接着运行 whoami，给机器人发一条消息即可识别 chatid，确认后保存；可加 whoami 的 --wait。",
+			"setup whoami：保存凭据后临时连接，只识别聊天、不接收任务；给机器人发一条消息识别 chatid，确认后保存并关闭临时连接；可加 whoami 的 --wait。",
 			"whoami 与 --chatid、--chat-type 不能同时使用：默认推送目标由识别结果决定。",
-			"setup 会重新连接当前 pi 的企微接入：正在转发的企微任务不再回传结果，排队任务和待发通知会清空。",
-			"setup 只配置并连接当前 session；之后每个 session 都需手动 /wecom-aibot connect，退出或切换会话时自动断开。",
+			"setup 只完成配置，不发送会话入口通知。当前 pi 已接入时会先确认，保存成功后断开；正在转发的任务不再回传结果，排队任务和待发通知会清空。",
+			"每个 session 都需手动 /wecom-aibot connect，setup 完成也不例外；退出或切换会话时自动断开。",
 			"示例：/wecom-aibot setup",
 			"示例：/wecom-aibot setup whoami --bot-id <BotID>",
 			"示例：/wecom-aibot setup --bot-id <BotID> --secret <Secret> --chatid <群 chatid> --chat-type 2",
@@ -79,7 +79,8 @@ const WECOM_COMMANDS: WeComCommand[] = [
 			"运行后在企微给机器人发一条消息：单聊直接发，群聊需 @机器人。这条消息只用于识别，不会交给 pi 处理。",
 			"单聊的 chatid 就是你的 userid，chat_type 为 1；群聊为群 chatid，chat_type 为 2。",
 			"识别后经你确认，保存为默认推送目标 defaultChatId / defaultChatType；等待期间按 Esc 取消。",
-			"需要当前 pi 已接入企微（/wecom-aibot connect）；配置时可写成 /wecom-aibot setup whoami，连上后接着识别。",
+			"离线时仅需先保存 BotID/Secret；whoami 自动临时连接以识别，不出现在在线会话列表，也不接收任务，完成、取消或超时后关闭临时接入。",
+			"已接入时可复用当前连接识别；确认保存不同默认目标后断开当前 session，并提示重新 connect。取消、目标相同或保存失败均保留原连接。",
 			"配置了 allowedUserIds 时只识别名单内的 userid。",
 		],
 	},
@@ -90,10 +91,12 @@ const WECOM_COMMANDS: WeComCommand[] = [
 		maxArgs: 0,
 		options: [],
 		details: [
-			"重新读取配置，仅连接当前 session，不修改共享配置；重复 connect 会保留当前任务和待发通知。",
+			"重新读取配置，仅连接当前 session，不修改共享配置；配置不变或仅修改 sendMode 时保留当前任务和待发通知。",
+			"BotID、Secret 和默认推送目标必须齐全；目标可通过 whoami 识别确认，也可在 setup 中手动填写。",
+			"注册与企微订阅均成功后，按 sendMode 向默认目标发送一次可引用的会话入口通知；已在线重复 connect、网络自动重连不重复发送，通知失败不撤销连接。",
 			"每个 session 都需手动 /wecom-aibot connect，包括新建、恢复、分叉和重载；退出或切换会话时自动断开。",
 			"首次连接中不显示标签或静态注册提示，注册和订阅均可用后才显示绿色 wecom-aibot；超过 30 秒未就绪会提醒一次。",
-			"凭据或白名单变化会撤销旧注册及其待处理工作；其他 pi 共用一个网关，不会各自再连一条企业微信长连接。",
+			"凭据、白名单或默认目标变化需重新接入，确认后撤销旧注册及其待处理工作；其他 pi 共用一个网关，不会各自再连一条企业微信长连接。",
 		],
 	},
 	{
@@ -115,7 +118,10 @@ const WECOM_COMMANDS: WeComCommand[] = [
 		maxArgs: 1,
 		argsHint: "聊天类型用 --chat-type 给出，例如 /wecom-aibot test your-group-chatid --chat-type 2。",
 		options: [{ name: "chat-type", value: "<1|2>", description: "1 单聊，2 群聊；需同时给出 chatid，省略时为 1" }],
-		details: ["chatid 是位置参数，直接写值；省略时发到 defaultChatId / defaultChatType。"],
+		details: [
+			"chatid 是位置参数，直接写值；省略时发到 defaultChatId / defaultChatType。",
+			"需要正式 connect；测试通知与其他通知一样跟随 sendMode，image 为当前终端截图。",
+		],
 	},
 	{ name: "log", usage: "log", description: "查看最近 20 条日志", maxArgs: 0, options: [], details: [] },
 	{
@@ -413,7 +419,7 @@ export function wecomHelpText(topic?: WeComCommand): string {
 					["配置文件", `${CONFIG_FILE}\n独立 JSON 文件；同一 pi 用户目录下的多个窗口共用。`],
 					[
 						"默认位置",
-						"~/.pi/agent/wecom-aibot/config.json，与其他 pi 配置同在 agent 目录下，但放在插件自己的文件夹里。\n同一文件夹还放着共享网关的 socket 和会话选择记录（gateway/）；PI_CODING_AGENT_DIR 改变时整块随之移动。",
+						"~/.pi/agent/wecom-aibot/config.json，与其他 pi 配置同在 agent 目录下，但放在插件自己的文件夹里。\n同一文件夹还放着共享网关的 socket（gateway/）；PI_CODING_AGENT_DIR 改变时整块随之移动。",
 					],
 					["写入方式", "/wecom-aibot setup 保存 botId、secret 和默认推送目标；其他配置可编辑此 JSON 文件。"],
 					[
@@ -422,7 +428,7 @@ export function wecomHelpText(topic?: WeComCommand): string {
 					],
 					[
 						"sendMode",
-						"通知模式：text（默认）用 Markdown；image 把自动结果渲染成当前 pi 终端图片（含 session 等三行头部，不含 footer/状态栏），通过原生图片消息发送。wecom_send 的显式 content 和 /wecom-aibot test 始终为 Markdown。",
+						"通知模式：text（默认）用 Markdown；image 与企微 screen 一样截取当前 pi 终端（含 session 等三行头部，不含 footer/状态栏），不另外排版正文。connect 入口、自动结果、wecom_send（含显式 content）和部署测试统一跟随；状态回执、帮助、错误和会话列表固定文字。显式 content 在 image 下仅为文字兜底。",
 					],
 				]),
 				"  配置示例（请替换示例中的 BotID、Secret 和目标 ID）：",
@@ -440,7 +446,8 @@ export function wecomHelpText(topic?: WeComCommand): string {
 				)
 					.split("\n")
 					.map((line) => `  ${line}`),
-				"  修改后，在需要更新的 pi 中执行 /wecom-aibot connect 重新读取配置；只影响当前 session。",
+				"  仅修改 sendMode 时，connect 热更新当前 session；未生成的结果使用新模式，已生成的通知保持原快照，不重新截图。",
+				"  修改默认目标、凭据或白名单时需重新接入，确认后清除当前 session 的排队任务和待发通知。",
 			]),
 		);
 		lines.push("  全部命令与配置说明：/wecom-aibot --help。");
@@ -455,8 +462,9 @@ export function wecomHelpText(topic?: WeComCommand): string {
 			...section("生命周期", [
 				"  connect / disconnect 只控制当前 session，不修改共享配置；每个 session 都需手动 /wecom-aibot connect。",
 				"  退出、切换、新建、恢复、分叉或重载会话时自动断开，连接状态不会继承。",
-				"  共享网关由第一个接入的 pi 自动启动，最后一个 pi 注销后约 1.5 秒自动退出。",
-				"  在企微聊天中发送 /wecom-aibot sessions 查看会话，/wecom-aibot use <完整 session ID> 选择目标。",
+				"  setup 只配置；whoami 必要时临时识别。默认目标齐全后，每个 session 都需手动 /wecom-aibot connect 正式接入。",
+				"  共享网关由第一个正式或临时接入的 pi 自动启动，最后一个 pi 注销后约 1.5 秒自动退出。",
+				"  在企微聊天中发送 /wecom-aibot sessions 查看会话；引用通知回复，或用 send --sessionid <完整 session ID> --prompt <正文> 指定目标。",
 			]),
 		);
 	return lines.join("\n");

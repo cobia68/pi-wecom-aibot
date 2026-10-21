@@ -269,6 +269,7 @@ function copyRegistration(value: unknown): GatewayRegistration | undefined {
 			directoryName: source.directoryName,
 		},
 		config: { botId: config.botId, ...(config.allowedUserIds ? { allowedUserIds: [...config.allowedUserIds] } : {}) },
+		...(value.identifyOnly ? { identifyOnly: true } : {}),
 	};
 }
 

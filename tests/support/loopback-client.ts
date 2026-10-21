@@ -41,6 +41,7 @@ export class LoopbackClient implements BridgeClient {
 			registrationId: randomUUID(),
 			source: { ...options.source },
 			config: { botId, ...(allowedUserIds ? { allowedUserIds: [...allowedUserIds] } : {}) },
+			...(options.identifyOnly ? { identifyOnly: true } : {}),
 		};
 	}
 

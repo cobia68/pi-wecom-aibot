@@ -10,6 +10,7 @@ const MAX_NOTIFICATION_BODY_BYTES = 256 * 1024;
 const STATUS_TEXT = {
 	running: "执行中…",
 	settled: "本轮已结束。",
+	notifying: "本轮已结束，结果将另行通知。",
 	stopped: "转发已停止。",
 	waiting: "任务仍在执行，请等待会话通知。",
 	busy: "当前等待任务较多，请稍后重试。",
@@ -21,6 +22,7 @@ export interface NotificationOptions {
 	kind?: NotificationKind;
 	tailParagraphs?: number;
 	aborted?: boolean;
+	imageFailure?: string;
 }
 
 const TITLES: Record<NotificationKind, string> = {
@@ -28,6 +30,7 @@ const TITLES: Record<NotificationKind, string> = {
 	completion: "会话通知",
 	reply: "会话通知",
 	test: "部署测试",
+	connect: "会话已接入",
 };
 /** Header line icons. They lead each line in Markdown and in the rendered image. */
 export const NOTIFICATION_ICONS = { title: "🔔", model: "🏷️", session: "🆔" } as const;
@@ -129,6 +132,7 @@ export function formatNotification(
 		kind: options.kind,
 		excerpt: count !== undefined,
 		aborted: options.aborted,
+		imageFailure: options.imageFailure,
 	});
 }
 
@@ -139,7 +143,7 @@ export function formatNotification(
 export function renderNotification(
 	source: NotificationSource,
 	body: string,
-	options: { kind?: NotificationKind; excerpt?: boolean; aborted?: boolean } = {},
+	options: { kind?: NotificationKind; excerpt?: boolean; aborted?: boolean; imageFailure?: string } = {},
 ): string {
 	const layout = layoutNotification(source, body, options);
 	if ("reason" in layout) throw new Error(layout.reason);
@@ -164,6 +168,7 @@ export function notificationProblem(
 		kind: options.kind,
 		excerpt: count !== undefined,
 		aborted: options.aborted,
+		imageFailure: options.imageFailure,
 	});
 	return "reason" in layout ? layout.reason : undefined;
 }
@@ -171,7 +176,7 @@ export function notificationProblem(
 function layoutNotification(
 	source: NotificationSource,
 	body: string,
-	options: { kind?: NotificationKind; excerpt?: boolean; aborted?: boolean },
+	options: { kind?: NotificationKind; excerpt?: boolean; aborted?: boolean; imageFailure?: string },
 ): { text: string } | { reason: string } {
 	const invalid = sessionIdProblem(source.sessionId);
 	if (invalid) return { reason: invalid };
@@ -183,12 +188,15 @@ function layoutNotification(
 		`${NOTIFICATION_ICONS.model} ${metadataValue(source.provider, false)} · ${metadataValue(source.modelName, false)}`,
 		`${NOTIFICATION_ICONS.session} session: ${metadataValue(source.sessionId, false)}`,
 	].join("  \n")}\n\n`;
-	const suffix = options.aborted ? "\n\n（本轮任务已中止）" : "";
+	const failure = options.imageFailure?.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 200);
+	const suffix =
+		(options.aborted ? "\n\n（本轮任务已中止）" : "") +
+		(failure ? `\n\n（图片发送失败：${failure}，已改发文字）` : "");
 	const limit = MAX_NOTIFICATION_BYTES;
 	const budget = limit - Buffer.byteLength(header + suffix, "utf8");
 	if (budget < 0) return { reason: "通知来源信息过长，无法容纳正文" };
 	let content = body.trim();
-	if (options.excerpt || kind === "reply") {
+	if (options.excerpt || kind === "reply" || failure) {
 		content = truncateContent(content, budget, !!options.excerpt);
 	}
 	if (Buffer.byteLength(content, "utf8") > budget) {
@@ -208,7 +216,7 @@ export function notificationPayload(
 	kind: GatewayNotification["kind"],
 	source: NotificationSource,
 	text: string,
-	options: { tailParagraphs?: number; aborted?: boolean } = {},
+	options: { tailParagraphs?: number; aborted?: boolean; taskId?: string } = {},
 ): GatewayNotification {
 	const excerpt = options.tailParagraphs !== undefined;
 	const count = options.tailParagraphs;
@@ -222,6 +230,7 @@ export function notificationPayload(
 		kind,
 		source: { ...source },
 		text: bounded,
+		...(options.taskId ? { taskId: options.taskId } : {}),
 		...(excerpt ? { excerpt } : {}),
 		...(options.aborted ? { aborted: true } : {}),
 	};

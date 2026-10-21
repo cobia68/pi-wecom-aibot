@@ -62,10 +62,10 @@ export async function prepareScreenImage(
 		return { ...notification, image: { mime: "image/png", filename: "pi-notification.png", path } };
 	} catch (error) {
 		signal?.throwIfAborted();
-		const reason = (error instanceof Error ? error.message : String(error))
-			.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
-			.slice(0, 600);
+		let reason = error instanceof Error ? error.message : String(error);
+		for (const secret of options.secrets ?? []) if (secret) reason = reason.split(secret).join("****");
+		reason = reason.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 550);
 		options.warn?.(`图片生成失败：${reason}；已改发文字`);
-		return notification;
+		return { ...notification, imageFailure: `生成失败：${reason}`.slice(0, 600) };
 	}
 }

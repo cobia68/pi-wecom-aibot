@@ -8,7 +8,7 @@
  * 使用 BotID + 长连接专用 Secret，无需公网回调地址；媒体资源自动解密。
  *
  * 命令（主对象用位置参数，可选设置用 --选项）：
- *   /wecom-aibot setup [whoami] [--bot-id ID] [--secret S] [--chatid ID] [--chat-type 1|2]   配置并连接已有机器人；接 whoami 时连上后识别 chatid
+ *   /wecom-aibot setup [whoami] [--bot-id ID] [--secret S] [--chatid ID] [--chat-type 1|2]   配置已有机器人；接 whoami 时临时连接以识别 chatid
  *   /wecom-aibot whoami [--wait 秒]      等你给机器人发消息，识别 chatid，确认后设为默认推送目标
  *   /wecom-aibot test [chatid] [--chat-type 1|2]
  *   /wecom-aibot connect | disconnect | status | log | reset
@@ -24,7 +24,7 @@ import { Type } from "typebox";
 import type { BridgeClient } from "../shared/gateway-protocol.ts";
 import { DEFAULT_TAIL_PARAGRAPHS, notificationPayload, notificationProblem } from "../shared/notification.ts";
 import { type BridgeHost, BridgeSession, connectionConfig } from "./bridge-session.ts";
-import { completeWecom, parseWecomInvocation, WHOAMI_WAIT_SECONDS, wecomHelpText } from "./commands.ts";
+import { chatIdProblem, completeWecom, parseWecomInvocation, WHOAMI_WAIT_SECONDS, wecomHelpText } from "./commands.ts";
 import { CONFIG_FILE, clearConfig, loadConfig, updateConfig, type WeComConfig } from "./config.ts";
 import { GatewayClient, type GatewayClientOptions } from "./gateway-client.ts";
 import type { CompletionRequest } from "./notification-outbox.ts";
@@ -129,7 +129,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 					},
 				},
 			);
-			return prepared.image;
+			return prepared.image ?? Promise.reject(new Error(prepared.imageFailure ?? "没有返回图片"));
 		},
 		abort: () => sessionCtx?.abort(),
 		stop: (reason) => stopBridge(reason),
@@ -150,16 +150,16 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 			`企业微信智能机器人：${state}${detail ? `（${detail}）` : ""}`,
 			cfg ? `BotID：${mask(cfg.botId)}　Secret：${mask(cfg.secret)}` : "未配置（运行 /wecom-aibot setup）",
 			`接入方式：手动（每个 session 需 /wecom-aibot connect）　待处理：${bridge?.queued ?? 0}　处理中：${bridge?.running ? "是" : "否"}`,
-			`本机共享网关：${bridge ? `${bridge.gatewaySessions} 个已注册 pi` : "未接入"}　当前 pi：${bridge?.ready ? "已连接" : bridge ? "未就绪" : "未连接"}`,
+			`本机共享网关：${bridge ? `${bridge.gatewaySessions} 个已注册 pi` : "未接入"}　当前 pi：${bridge?.identifyOnly ? "临时识别（未正式接入）" : bridge?.ready ? "已连接" : bridge ? "未就绪" : "未连接"}`,
 			`session: ${source?.sessionId ?? "未启动"}　待通知：${bridge?.pendingNotifications ?? 0}`,
 			`${source?.provider ?? "未选择供应商"} · ${source?.modelName ?? "未选择模型"}　工作目录：${source?.directoryName ?? "未启动"}`,
 			`默认推送：${cfg?.defaultChatId ? `${cfg.defaultChatId}（${cfg.defaultChatType === 2 ? "群聊" : "单聊"}）` : cfg ? "未配置（运行 /wecom-aibot whoami 识别）" : "未配置"}`,
-			`通知模式：${cfg?.sendMode === "image" ? "图片（自动结果截取当前屏幕）" : "文字（Markdown）"}`,
+			`通知模式：${cfg?.sendMode === "image" ? "图片（当前终端截图，与 screen 相同）" : "文字（Markdown）"}`,
 			`配置文件：${CONFIG_FILE}`,
 		].join("\n");
 	}
 
-	function ensureClient(ctx: ExtensionContext): void {
+	function ensureClient(ctx: ExtensionContext, identifyOnly = false): void {
 		if (!cfg || bridge) return;
 		sessionCtx = ctx;
 		const session = new BridgeSession(
@@ -168,17 +168,13 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 			ctx,
 			options.createClient ?? ((clientOptions) => new GatewayClient(clientOptions)),
 			instanceId,
+			identifyOnly,
 		);
 		// Assigned before start: a client that fails at once stops this session, not an older one.
 		bridge = session;
 		stopReason = undefined;
 		refreshStatus();
 		session.start();
-	}
-
-	function restart(ctx: ExtensionContext): void {
-		stopBridge("restart");
-		ensureClient(ctx);
 	}
 
 	function stopBridge(reason: string): void {
@@ -275,14 +271,6 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 		}
 	});
 
-	/** Resolve once this pi is registered and the bot is subscribed; stop, cancel or timeout reject. */
-	function waitUntilReady(signal: AbortSignal): Promise<void> {
-		return (
-			bridge?.waitUntilReady(signal) ??
-			Promise.reject(new Error("当前 pi 的企微接入已停止，请运行 /wecom-aibot connect"))
-		);
-	}
-
 	const setup = new SessionSetup({
 		bridge: () => bridge,
 		config: () => cfg,
@@ -290,7 +278,24 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 			cfg = next;
 		},
 		readConfig,
-		waitUntilReady,
+		beginIdentity: (ctx) => {
+			const current = readConfig(ctx);
+			if (!current) throw new Error("尚未配置，请先运行 /wecom-aibot setup");
+			if (bridge && bridge.configKey !== connectionConfig(current))
+				throw new Error("连接配置已改变，请先 /wecom-aibot disconnect，再运行 /wecom-aibot whoami");
+			if (!bridge) cfg = current;
+			ensureClient(ctx, true);
+			const identifying = bridge;
+			if (!identifying) throw new Error("临时识别连接未能启动");
+			identifying.resume();
+			return identifying;
+		},
+		endIdentity: (watcher) => {
+			if (watcher.identifyOnly && bridge === watcher) stopBridge("identity completed");
+		},
+		targetChanged: (watcher) => {
+			if (bridge === watcher) stopBridge("default target changed");
+		},
 		log,
 	});
 
@@ -313,6 +318,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 				return;
 			}
 			const { args, options, command, next } = invocation;
+			const commandSessionId = ctx.sessionManager.getSessionId();
 			const sub = command.name;
 
 			switch (sub) {
@@ -320,13 +326,28 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 					const credentials = await setupCredentials(ctx, options);
 					if (!credentials) return;
 					const { botId, secret } = credentials;
-					// `setup whoami` runs whoami after connecting; otherwise the target comes from --chatid or the menu.
+					// `setup whoami` uses a temporary identity connection; otherwise the target comes from options or the menu.
 					const target = next ? "whoami" : await setupTarget(ctx, options, cfg);
 					if (target === null) {
 						ctx.ui.notify("已取消，配置未修改。", "info");
 						return;
 					}
-					// Only the fields setup asks for; connecting this session never opts another session in.
+					const owner = bridge;
+					if (owner && !owner.identifyOnly && ctx.hasUI) {
+						const ok = await ctx.ui.confirm(
+							"保存配置并断开当前接入？",
+							"setup 只完成配置，不自动接入。保存后清除当前 session 的排队任务和待发通知；已开始的任务继续运行，但结果不再回传。之后请手动运行 /wecom-aibot connect。",
+						);
+						if (!ok) {
+							ctx.ui.notify("已取消，配置未修改。", "info");
+							return;
+						}
+					}
+					if (bridge !== owner || sessionCtx?.sessionManager.getSessionId() !== commandSessionId) {
+						ctx.ui.notify("当前 session 或接入已改变，配置未保存，请重新运行 /wecom-aibot setup。", "warning");
+						return;
+					}
+					// Merge only setup's fields; no setup path opts this session into receiving tasks.
 					cfg = updateConfig({
 						botId,
 						secret,
@@ -334,27 +355,18 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 							? { defaultChatId: target.chatId, defaultChatType: target.chatType }
 							: {}),
 					});
-					ctx.ui.notify("配置已保存；仅连接当前 session，新 session 需手动 /wecom-aibot connect。", "info");
-					restart(ctx);
-					// whoami needs the connection: the next message to the bot reports chatid and chat_type.
+					stopBridge("configuration saved");
+					ctx.ui.notify("配置已保存，尚未正式接入；完成默认目标配置后请运行 /wecom-aibot connect。", "info");
 					if (target === "whoami") await setup.identify(ctx, Number(options.get("wait") ?? WHOAMI_WAIT_SECONDS));
 					else if (cfg.defaultChatId) {
 						ctx.ui.notify(
-							`默认推送目标${target ? "已保存" : "保持"}：${cfg.defaultChatId}（${cfg.defaultChatType === 2 ? "群聊" : "单聊"}）。`,
+							`默认推送目标${target ? "已保存" : "保持"}：${cfg.defaultChatId}（${cfg.defaultChatType === 2 ? "群聊" : "单聊"}）。请运行 /wecom-aibot connect 正式接入。`,
 							"info",
 						);
 					} else ctx.ui.notify("未配置默认推送目标；需要时运行 /wecom-aibot whoami 识别。", "info");
 					return;
 				}
 				case "whoami": {
-					if (!cfg) {
-						ctx.ui.notify("尚未配置，请先运行 /wecom-aibot setup", "warning");
-						return;
-					}
-					if (!bridge) {
-						ctx.ui.notify("当前 pi 未接入企业微信，请先运行 /wecom-aibot connect", "warning");
-						return;
-					}
 					await setup.identify(ctx, Number(options.get("wait") ?? WHOAMI_WAIT_SECONDS));
 					return;
 				}
@@ -372,12 +384,57 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 						ctx.ui.notify("尚未配置，请先运行 /wecom-aibot setup", "warning");
 						return;
 					}
-					cfg = current;
+					if (bridge?.identifyOnly) {
+						ctx.ui.notify("whoami 正在临时识别聊天，请完成或取消后再运行 /wecom-aibot connect。", "warning");
+						return;
+					}
+					if (!current.defaultChatId || chatIdProblem(current.defaultChatId)) {
+						if (!bridge) cfg = current;
+						ctx.ui.notify(
+							`默认推送目标未配置或无效，请先运行 /wecom-aibot whoami 识别并确认保存，或通过 setup 手动填写。${bridge ? "本次未更新当前接入。" : "尚未接入。"}`,
+							"warning",
+						);
+						return;
+					}
 					if (
 						bridge &&
-						(bridge.sessionId !== ctx.sessionManager.getSessionId() || bridge.configKey !== connectionConfig(cfg))
-					)
+						(bridge.sessionId !== ctx.sessionManager.getSessionId() ||
+							bridge.configKey !== connectionConfig(current))
+					) {
+						const owner = bridge;
+						if (ctx.hasUI) {
+							const ok = await ctx.ui.confirm(
+								"连接配置已改变，重新接入？",
+								"将撤销当前 session 的旧注册，清除排队任务和待发通知；已开始的任务继续运行，但旧结果不再回传。其他 pi 不受影响。",
+							);
+							if (!ok) return;
+						}
+						if (bridge !== owner || sessionCtx?.sessionManager.getSessionId() !== commandSessionId) {
+							ctx.ui.notify(
+								"当前 session 或接入已改变，未重新连接，请再次运行 /wecom-aibot connect。",
+								"warning",
+							);
+							return;
+						}
+						let confirmed: WeComConfig | undefined;
+						try {
+							confirmed = readConfig(ctx);
+						} catch (error) {
+							ctx.ui.notify(
+								`企业微信配置无法使用：${error instanceof Error ? error.message : String(error)}`,
+								"error",
+							);
+							return;
+						}
+						if (!confirmed || connectionConfig(confirmed) !== connectionConfig(current)) {
+							ctx.ui.notify("配置在确认期间再次改变，未重新连接，请再次运行 /wecom-aibot connect。", "warning");
+							return;
+						}
+						current = confirmed;
 						stopBridge("session or configuration changed");
+					}
+					cfg = current;
+					bridge?.updateConfig(cfg);
 					ensureClient(ctx);
 					bridge?.resume();
 					return;
@@ -414,7 +471,8 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 				}
 				case "test": {
 					const sender = bridge;
-					if (!sender?.ready) throw new Error("企业微信机器人未连接，请先运行 /wecom-aibot connect");
+					if (!sender?.ready || sender.identifyOnly)
+						throw new Error("企业微信机器人未正式接入，请先运行 /wecom-aibot connect");
 					const chatType = options.get("chat-type");
 					const target = destination(args[0], chatType === undefined ? undefined : chatType === "2" ? 2 : 1);
 					await sender.notify(
@@ -450,13 +508,14 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 		name: "wecom_send",
 		label: "WeCom Send",
 		description:
-			"Send a Markdown notification through the WeCom (企业微信) smart robot. " +
+			"Send a notification through the WeCom (企业微信) smart robot. " +
 			"The plugin automatically adds the pi session ID, provider, model name and working directory's final folder name; do not repeat them in content. " +
 			"Use userid for single chat, chatid for group chat, or omit chatid to reply to the chat that sent the current WeCom task (local runs use the configured default target). " +
 			"The user must have messaged the robot before. " +
 			"Omit content to copy pi's latest visible reply from the current run (last 3 paragraphs by default); to resend an earlier answer, pass it as content. " +
 			"For a completion notification, set after_settle=true, omit content, then continue the task and produce its final answer. " +
-			"Explicit content is always sent as Markdown; the configured sendMode only decides how automatic results are sent. " +
+			"All notifications follow sendMode: text sends Markdown; image captures the current terminal, exactly like screen. " +
+			"In image mode explicit content is the Markdown fallback, not text drawn into the screenshot. " +
 			"session_id validates the current session; it does not switch or resume another session.",
 		parameters: Type.Object({
 			chatid: Type.Optional(
@@ -475,7 +534,10 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 				Type.String({ minLength: 1, description: "Current pi session ID. Omit to read it automatically." }),
 			),
 			content: Type.Optional(
-				Type.String({ minLength: 1, description: "Explicit Markdown text; omit to extract pi's actual reply." }),
+				Type.String({
+					minLength: 1,
+					description: "Markdown body in text mode, fallback body in image mode; omit to extract pi's reply.",
+				}),
 			),
 			tail_paragraphs: Type.Optional(
 				Type.Integer({
@@ -515,7 +577,8 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 				if (problem) throw new Error(problem);
 			}
 			const current = bridge;
-			if (!current?.ready) throw new Error("企业微信机器人未连接，请先运行 /wecom-aibot connect");
+			if (!current?.ready || current.identifyOnly)
+				throw new Error("企业微信机器人未正式接入，请先运行 /wecom-aibot connect");
 			const details = {
 				chatid: request.chatId,
 				chat_type: request.chatType,
@@ -550,7 +613,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 				notificationPayload(params.after_settle ? "completion" : "notification", request.source, body, {
 					tailParagraphs: request.tailParagraphs,
 				}),
-				{ ctx, signal, image: params.content === undefined && cfg?.sendMode === "image" },
+				{ ctx, signal },
 			);
 			return {
 				content: [{ type: "text", text: `已发送到 ${request.chatId}` }],

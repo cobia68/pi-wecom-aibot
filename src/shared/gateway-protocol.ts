@@ -1,7 +1,7 @@
 /**
  * Local IPC between pi and the shared gateway: no credentials in command lines and no public listening port.
  *
- * Handshake (protocol 3): the client sends hello{nonce}; the gateway answers hello{nonce, proof}; the client
+ * Handshake (protocol 5): the client sends hello{nonce}; the gateway answers hello{nonce, proof}; the client
  * checks the proof and only then sends register{proof}. Both proofs are HMAC(Secret) over both nonces and the
  * endpoint, so a captured hello cannot be replayed, and a peer without the Secret learns nothing about the pi.
  *
@@ -17,7 +17,7 @@ import type { DeliveryFailure } from "./delivery.ts";
 import type { GatewayImage, GatewayNotification, NotificationSource } from "./notification-types.ts";
 import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComState } from "./wecom-protocol.ts";
 
-export const GATEWAY_PROTOCOL_VERSION = 4;
+export const GATEWAY_PROTOCOL_VERSION = 5;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;
 export const IPC_MAX_BYTES = 1_048_576;
@@ -45,6 +45,8 @@ export interface GatewayRegistration {
 	registrationId: string;
 	source: NotificationSource;
 	config: RegistrationConfig;
+	/** A temporary configuration connection: may watch identities, never receive tasks or publish notifications. */
+	identifyOnly?: boolean;
 }
 
 export interface SessionTarget {
@@ -78,6 +80,7 @@ export interface ChatIdentity {
 export interface GatewayStatus {
 	state: WeComState;
 	detail?: string;
+	/** Formal task-receiving sessions; temporary identity registrations are excluded. */
 	sessions: number;
 	/** The WeCom connection gave up (subscription refused, taken over) and waits for /wecom-aibot connect. */
 	stopped?: boolean;
@@ -91,9 +94,10 @@ export interface GatewayTask {
 
 /**
  * The state of a task, as pi reports it. The gateway shows it in the task's status message:
- * running opens it, any other state closes it (busy/failed: the task was not accepted).
+ * running opens the stream; settled may replace it with text, notifying closes it for a separate result.
+ * busy/failed mean the task was not accepted; stopped revokes forwarding.
  */
-export type TaskState = "running" | "settled" | "stopped" | "busy" | "failed";
+export type TaskState = "running" | "settled" | "notifying" | "stopped" | "busy" | "failed";
 
 export type ClientFrame =
 	| { type: "hello"; version: number; nonce: string }
@@ -201,6 +205,7 @@ export function validRegistration(value: unknown): value is GatewayRegistration 
 		registration.registrationId.length > 0 &&
 		registration.registrationId.length <= 256 &&
 		validSource(registration.source) &&
+		(registration.identifyOnly === undefined || typeof registration.identifyOnly === "boolean") &&
 		!!cfg &&
 		typeof cfg === "object" &&
 		typeof cfg.botId === "string" &&
@@ -218,11 +223,14 @@ export function validNotification(value: unknown): value is GatewayNotification 
 	const notification = value as GatewayNotification;
 	const image = notification.image;
 	return (
-		["notification", "completion", "reply", "test"].includes(notification.kind) &&
+		["notification", "completion", "reply", "test", "connect"].includes(notification.kind) &&
 		validSource(notification.source) &&
 		typeof notification.text === "string" &&
 		Buffer.byteLength(notification.text) <= 512 * 1024 &&
+		(notification.taskId === undefined || validRequestId(notification.taskId)) &&
 		[notification.excerpt, notification.aborted].every((flag) => flag === undefined || typeof flag === "boolean") &&
+		(notification.imageFailure === undefined ||
+			(typeof notification.imageFailure === "string" && notification.imageFailure.length <= 600)) &&
 		(image === undefined || validImage(image))
 	);
 }
@@ -309,7 +317,14 @@ export function verifyProof(proof: unknown, expected: string): boolean {
 export type FrameParse<Frame> = { ok: true; frame: Frame } | { ok: false; reason: string };
 
 export function isTaskState(value: unknown): value is TaskState {
-	return value === "running" || value === "settled" || value === "stopped" || value === "busy" || value === "failed";
+	return (
+		value === "running" ||
+		value === "settled" ||
+		value === "notifying" ||
+		value === "stopped" ||
+		value === "busy" ||
+		value === "failed"
+	);
 }
 
 const WE_COM_STATES = new Set<WeComState>(["disconnected", "connecting", "connected", "subscribed"]);

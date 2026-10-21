@@ -102,7 +102,7 @@ test("every published envelope round-trips: a quoted notification or status rout
 		directoryName: "project session: notes",
 		modelName: "model `A`",
 	};
-	for (const kind of ["notification", "completion", "reply", "test"] as const) {
+	for (const kind of ["notification", "completion", "reply", "test", "connect"] as const) {
 		const message = formatNotification(tricky, `body\nsession: another-session`, { kind });
 		assert.deepEqual(quotedSessions(message), [tricky.sessionId], kind);
 		// WeCom may prefix each quoted line with "> ".
@@ -117,7 +117,7 @@ test("every published envelope round-trips: a quoted notification or status rout
 			`${kind} quoted`,
 		);
 	}
-	for (const state of ["running", "settled", "stopped", "waiting", "busy", "failed"] as const) {
+	for (const state of ["running", "settled", "notifying", "stopped", "waiting", "busy", "failed"] as const) {
 		assert.deepEqual(quotedSessions(formatProcessingStatus(tricky.sessionId, state)), [tricky.sessionId], state);
 	}
 	// A source header without its session line never falls back to another ID in the text.
@@ -147,6 +147,7 @@ test("pi's notification payload, rendered by the gateway, is exactly the formatt
 		["reply", long, {}],
 		["notification", "自定义正文", {}],
 		["test", "部署测试正文", {}],
+		["connect", "引用本条消息发送任务", {}],
 	] as const;
 	for (const [kind, text, options] of cases) {
 		const payload = notificationPayload(kind, source, text, options);
