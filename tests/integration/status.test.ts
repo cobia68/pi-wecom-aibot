@@ -10,13 +10,13 @@ import type { GatewayClientOptions } from "../../src/extension/gateway-client.ts
 import { FLASH_MS } from "../../src/extension/status.ts";
 import type { BridgeClient, GatewayStatus } from "../../src/shared/gateway-protocol.ts";
 import type { WeComState } from "../../src/shared/wecom-protocol.ts";
-import { fixtureTheme } from "../support/tui-fixture.ts";
+import { fixtureTheme, fixtureThemes } from "../support/tui-fixture.ts";
 
 const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-aibot-status-test-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = sandbox;
 const { default: extension } = await import("../../src/extension/index.ts");
-const { CONFIG_FILE, saveConfig, clearConfig } = await import("../../src/extension/config.ts");
+const { CONFIG_FILE, writeLayer, clearConfig } = await import("../../src/extension/config.ts");
 const config = { botId: "private-bot-id", secret: "private-secret", defaultChatId: "private-user" };
 const key = "wecom-aibot";
 const theme = fixtureTheme("dark");
@@ -86,10 +86,16 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
 		cwd: sandbox,
 		isIdle: () => true,
 		model: { id: "model", name: "Model", provider: "provider" },
-		sessionManager: { getSessionId: () => state.sessionId, getBranch: () => [], getLeafId: () => null },
+		sessionManager: {
+			getSessionId: () => state.sessionId,
+			getHeader: () => null,
+			getBranch: () => [],
+			getLeafId: () => null,
+		},
 		ui: {
 			notify: (message: string) => notices.push(message),
 			confirm: async () => true,
+			getAllThemes: fixtureThemes,
 			setWidget() {},
 			setStatus(statusKey: string, text: string | undefined) {
 				assert.equal(statusKey, key, "the extension owns only its status entry");
@@ -146,7 +152,7 @@ async function connect(h: ReturnType<typeof harness>) {
 
 beforeEach(() => {
 	instances = [];
-	saveConfig(config);
+	writeLayer("global", config);
 });
 afterEach(async () => {
 	for (const instance of instances) await instance.emit("session_shutdown");
@@ -196,7 +202,7 @@ test("manual connect is silent and invisible until both registration and subscri
 	assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved, "connect is session-local, not a configuration edit");
 });
 
-test("the footer stays empty when unconfigured; connect explains that setup is needed", async () => {
+test("the footer stays empty when unconfigured; connect explains that configuration is needed", async () => {
 	clearConfig();
 	const h = harness();
 	await h.emit("session_start");
@@ -204,7 +210,26 @@ test("the footer stays empty when unconfigured; connect explains that setup is n
 	await h.command("connect");
 	assert.equal(h.clients.length, 0);
 	assert.deepEqual(h.changes, []);
-	assert.match(h.notices.at(-1)!, /尚未配置.*\/wecom-aibot setup/);
+	assert.match(h.notices.at(-1)!, /尚未配置.*\/wecom-aibot config global edit/);
+});
+
+test("a saved connection change keeps the name green and adds a pending reconnection until connect", async () => {
+	const h = harness();
+	const client = await connect(h);
+	client.publish({ state: "subscribed", sessions: 1 });
+	assert.equal(h.statuses.get(key), label("success"));
+	await h.command("config global set defaultChatId=new-user");
+	assert.equal(h.statuses.get(key), `${label("success")}${theme.fg("warning", "（待重新接入）")}`);
+	assert.equal(client.stopped.length, 0, "saving never disconnects");
+	// A setting is no connection change: nothing waits for connect.
+	await h.command("config global set defaultChatId=private-user");
+	await h.command("config session set screenshotTheme=light");
+	assert.equal(h.statuses.get(key), label("success"));
+	await h.command("config global set defaultChatId=new-user");
+	await h.command("connect");
+	assert.equal(h.clients.length, 2, "connect adopts the saved target with a new registration");
+	h.clients[1].publish({ state: "subscribed", sessions: 1 });
+	assert.equal(h.statuses.get(key), label("success"));
 });
 
 test("metadata never changes the footer name or leaks connection details", async () => {

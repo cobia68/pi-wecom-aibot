@@ -6,7 +6,6 @@ import { createConnection, createServer, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import type { WeComConfig } from "../../src/extension/config.ts";
 import { GatewayClient, type GatewayClientOptions } from "../../src/extension/gateway-client.ts";
 import { type GatewayServer, startGatewayServer } from "../../src/gateway/server.ts";
 import {
@@ -28,7 +27,7 @@ import type { NotificationSource } from "../../src/shared/notification-types.ts"
 import { FakeWebSocket } from "../support/fake-websocket.ts";
 import { sandboxHome, socketDirectory } from "../support/home-sandbox.ts";
 
-let config: WeComConfig;
+let config: GatewayClientOptions["config"];
 let server: GatewayServer | undefined;
 let clients: GatewayClient[];
 let autoAcknowledge: boolean;
@@ -90,7 +89,11 @@ async function startServer(idleTimeoutMs = 1000) {
 	return server;
 }
 
-function client(id: string, overrides: Partial<WeComConfig> = {}, options: Partial<GatewayClientOptions> = {}) {
+function client(
+	id: string,
+	overrides: Partial<GatewayClientOptions["config"]> = {},
+	options: Partial<GatewayClientOptions> = {},
+) {
 	const tasks: GatewayTask[] = [];
 	const states: string[] = [];
 	const logs: string[] = [];

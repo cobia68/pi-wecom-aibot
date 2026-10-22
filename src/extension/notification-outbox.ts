@@ -12,7 +12,7 @@ import { deliveryFailure } from "../shared/delivery.ts";
 import { NO_REPLY_TEXT, notificationPayload, notificationProblem } from "../shared/notification.ts";
 import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
-import type { WeComConfig } from "./config.ts";
+import type { NotificationMode } from "./config.ts";
 import { captureModelIdentity, latestAssistantReply } from "./notification-source.ts";
 
 const MAX_QUEUE_SIZE = 50;
@@ -40,7 +40,8 @@ export interface OutboxHost {
 	isReady(): boolean;
 	/** Counts subscriptions; a changed value during an attempt means a recovery must be re-checked. */
 	subscription(): number;
-	sendMode(): WeComConfig["sendMode"];
+	/** Read when a notification is prepared, so a frozen notification keeps the mode it was made with. */
+	notificationMode(): NotificationMode;
 	context(): ExtensionContext | undefined;
 	/** Render this notification as a screen image; failures return the Markdown fallback. */
 	prepareImage(
@@ -144,7 +145,7 @@ export class NotificationOutbox {
 				const problem = notificationProblem(ready.source, ready.text, ready);
 				if (problem) throw new Error(problem);
 				// All notifications follow the same mode; failure explanations must never leak a local screen.
-				if (request.textOnly || this.host.sendMode() !== "image") {
+				if (request.textOnly || this.host.notificationMode() !== "screenshot") {
 					entry.phase = { kind: "ready", notification: ready };
 					continue;
 				}

@@ -32,18 +32,19 @@ const TITLES: Record<NotificationKind, string> = {
 	test: "部署测试",
 	connect: "会话已接入",
 };
-/** Header line icons. They lead each line in Markdown and in the rendered image. */
+/** Markdown header line icons. The rendered image draws its own SVG line icons instead. */
 export const NOTIFICATION_ICONS = { title: "🔔", model: "🏷️", session: "🆔" } as const;
 
-/** The source fields of a rendered image, cleaned of control characters; the session reads as in Markdown. */
+/** The source fields of a rendered image, cleaned of control characters; the renderer adds the labels. */
 export function notificationHeader(source: NotificationSource, kind: NotificationKind) {
 	validateSessionId(source.sessionId);
 	const clean = (value: string) => metadataValue(value, true);
 	return {
 		directory: clean(source.directoryName),
 		title: TITLES[kind],
-		model: `${clean(source.provider)} · ${clean(source.modelName)}`,
-		session: `session: ${clean(source.sessionId)}`,
+		provider: clean(source.provider),
+		model: clean(source.modelName),
+		session: clean(source.sessionId),
 	};
 }
 

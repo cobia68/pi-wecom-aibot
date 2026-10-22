@@ -53,7 +53,7 @@ export class ConnectionNotices {
 			const reason = observation.detail ?? "企业微信连接已停止";
 			const hint = reason.includes("/wecom-aibot connect")
 				? ""
-				: "。请核对 BotID/Secret（/wecom-aibot setup），然后运行 /wecom-aibot connect 恢复";
+				: "。请核对 BotID/Secret（/wecom-aibot config show），然后运行 /wecom-aibot connect 恢复";
 			this.reported = true;
 			this.notify(`企业微信智能机器人连接已停止：${reason}${hint}`, "warning");
 		} else if (!this.ready && !this.stopped) {

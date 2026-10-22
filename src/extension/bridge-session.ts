@@ -21,12 +21,17 @@ import type {
 import { NO_REPLY_TEXT } from "../shared/notification.ts";
 import type { GatewayImage, GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
-import type { WeComConfig } from "./config.ts";
+import { type Connection, connectionKey, type Settings } from "./config.ts";
 import { type BridgeConnectionStatus, ConnectionNotices } from "./connection-notices.ts";
 import type { GatewayClientOptions } from "./gateway-client.ts";
 import { InboundContentPreparer, type PreparedInboundContent } from "./inbound/content.ts";
 import { type CompletionRequest, NotificationOutbox, removeNotificationImage } from "./notification-outbox.ts";
-import { assistantReplyText, captureModelIdentity, captureNotificationSource } from "./notification-source.ts";
+import {
+	assistantReplyText,
+	captureModelIdentity,
+	captureNotificationSource,
+	latestAssistantReply,
+} from "./notification-source.ts";
 
 /** WeCom messages accepted but not yet handed to pi: a bounded FIFO. */
 const MAX_QUEUE_SIZE = 50;
@@ -56,6 +61,8 @@ interface BridgeRequest {
 export interface BridgeHost {
 	/** The context of the latest pi event or command. */
 	context(): ExtensionContext | undefined;
+	/** The notification settings as they are now: read where they are used, never kept by the session. */
+	settings(): Settings;
 	/** pi is between agent_settled and its notification boundary: no queued task may start. */
 	settling(): boolean;
 	/** Hand a prepared prompt to pi; pi reports success only through before_agent_start. */
@@ -93,7 +100,6 @@ export class BridgeSession {
 	/** The shared WeCom connection gave up and waits for /wecom-aibot connect (from the latest gateway status). */
 	private upstreamStopped = false;
 	private readonly host: BridgeHost;
-	private config: WeComConfig;
 	private readonly client: BridgeClient;
 	private readonly contentPreparer = new InboundContentPreparer();
 	private readonly queue: BridgeRequest[] = [];
@@ -118,19 +124,19 @@ export class BridgeSession {
 
 	constructor(
 		host: BridgeHost,
-		config: WeComConfig,
+		/** What this registration was made with; a different connection needs a new registration. */
+		readonly connection: Connection,
 		ctx: ExtensionContext,
 		createClient: (options: GatewayClientOptions) => BridgeClient,
 		instanceId: string,
 		readonly identifyOnly = false,
 	) {
 		this.host = host;
-		this.config = config;
 		this.notices = new ConnectionNotices((message, type) => host.notify(message, type));
 		this.outbox = new NotificationOutbox({
 			isReady: () => this.client.isReady(),
 			subscription: () => this.subscription,
-			sendMode: () => this.config.sendMode,
+			notificationMode: () => this.host.settings().notificationMode,
 			context: () => this.host.context(),
 			prepareImage: (notification, ctx, signal) => this.host.prepareImage(notification, ctx, signal),
 			send: (chat, notification) => this.client.notify(chat, notification),
@@ -139,19 +145,18 @@ export class BridgeSession {
 			signal: this.mediaAbort.signal,
 		});
 		this.sessionId = ctx.sessionManager.getSessionId();
-		this.configKey = connectionConfig(config);
-		if (!identifyOnly && config.defaultChatId) {
+		this.configKey = connectionKey(connection);
+		if (!identifyOnly && connection.target) {
 			this.outbox.schedule({
 				kind: "connect",
-				chatId: config.defaultChatId,
-				chatType: config.defaultChatType ?? 1,
+				...connection.target,
 				source: captureNotificationSource(ctx),
 				content: "引用本条消息回复，即可向这个会话发送任务。",
 				afterEntryId: null,
 			});
 		}
 		this.client = createClient({
-			config,
+			config: connection,
 			identifyOnly,
 			source: captureNotificationSource(ctx),
 			instanceId,
@@ -217,12 +222,6 @@ export class BridgeSession {
 		this.streamText = this.finalText = "";
 		this.client.stop(reason);
 		for (const wake of [...this.readyWaiters]) wake(new Error(`当前 pi 的企微接入已停止（${reason}）`));
-	}
-
-	/** Presentation-only updates retain queued work and already frozen notifications. */
-	updateConfig(config: WeComConfig): void {
-		if (connectionConfig(config) !== this.configKey) throw new Error("连接配置已改变，必须重新接入");
-		this.config = config;
 	}
 
 	updateSource(ctx: ExtensionContext): void {
@@ -320,8 +319,32 @@ export class BridgeSession {
 			run.result = text || NO_REPLY_TEXT;
 			run.aborted = aborted;
 			this.finishActive();
+		} else if (!run) {
+			// A run nobody scheduled through WeCom: only notificationScope=all-runs reports it, and its answer
+			// is read from the session branch because the task stream is not tracked for local runs.
+			this.queueLocalReply(ctx, aborted);
 		}
 		return this.outbox.prepare(ctx, aborted);
+	}
+
+	/**
+	 * notificationScope=all-runs: a run typed in this terminal reports its own result to the default
+	 * destination this registration adopted. A WeCom task already reports through its status message,
+	 * and an upload or a send without a destination stays silent instead of guessing one.
+	 */
+	private queueLocalReply(ctx: ExtensionContext, aborted: boolean): void {
+		if (this.host.settings().notificationScope !== "all-runs" || this.identifyOnly) return;
+		const { target } = this.connection;
+		if (!target) return;
+		const answer = latestAssistantReply(ctx.sessionManager.getBranch(), null);
+		this.outbox.queueResult({
+			...target,
+			source: captureNotificationSource(ctx, answer),
+			afterEntryId: null,
+			result: answer?.text ?? NO_REPLY_TEXT,
+			aborted,
+		});
+		this.host.log(`local run finished; result notification queued for ${target.chatId}`);
 	}
 
 	// ---------------------------------------------------------------- wecom_send
@@ -343,7 +366,8 @@ export class BridgeSession {
 		if (!ctx || ctx.sessionManager.getSessionId() !== this.sessionId)
 			throw new Error("pi session_id 已改变，已取消通知");
 		try {
-			if (this.config.sendMode === "image") notification = await this.host.prepareImage(notification, ctx, signal);
+			if (this.host.settings().notificationMode === "screenshot")
+				notification = await this.host.prepareImage(notification, ctx, signal);
 			signal.throwIfAborted();
 			if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId)
 				throw new Error("pi 会话已停止或切换，已取消通知");
@@ -432,7 +456,7 @@ export class BridgeSession {
 	private async accept(ctx: ExtensionContext, task: GatewayTask): Promise<void> {
 		const message = task.message;
 		// The gateway already applied every pi's allowlist; this pi checks its own configuration again.
-		if (this.config.allowedUserIds?.length && !this.config.allowedUserIds.includes(message.userid)) {
+		if (this.connection.allowedUserIds?.length && !this.connection.allowedUserIds.includes(message.userid)) {
 			this.host.log("ignored message from non-allowlisted user");
 			return;
 		}
@@ -574,7 +598,8 @@ export class BridgeSession {
 		const active = this.active;
 		if (!active || active.result === undefined) return;
 		if (!active.notificationQueued) {
-			active.completionState = !textOnly && this.config.sendMode === "image" ? "notifying" : "settled";
+			active.completionState =
+				!textOnly && this.host.settings().notificationMode === "screenshot" ? "notifying" : "settled";
 			this.outbox.queueResult({
 				taskId: active.taskId,
 				chatId: active.chatId,
@@ -594,17 +619,6 @@ export class BridgeSession {
 		this.streamText = this.finalText = "";
 		this.scheduleDrain();
 	}
-}
-
-/** Credentials, permissions or the default destination require a new registration; sendMode is hot-reloaded. */
-export function connectionConfig(config: WeComConfig): string {
-	return JSON.stringify([
-		config.botId,
-		config.secret,
-		config.allowedUserIds ?? [],
-		config.defaultChatId ?? null,
-		config.defaultChatType ?? 1,
-	]);
 }
 
 export function abortError(): Error {

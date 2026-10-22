@@ -20,6 +20,8 @@ type StatusContext = Pick<ExtensionContext, "mode" | "hasUI"> & {
 interface StatusBinding {
 	ui: StatusContext["ui"];
 	connection: BridgeConnectionStatus;
+	/** Online, but the files now describe another connection: /wecom-aibot connect would switch. */
+	pending: boolean;
 	text?: string;
 }
 
@@ -29,7 +31,7 @@ export class WeComStatus {
 
 	constructor(private readonly flashMs = FLASH_MS) {}
 
-	update(ctx: StatusContext | undefined, connection: BridgeConnectionStatus | undefined): void {
+	update(ctx: StatusContext | undefined, connection: BridgeConnectionStatus | undefined, pending = false): void {
 		this.cancelFlash();
 		const target = ctx?.mode === "tui" && ctx.hasUI ? ctx.ui : undefined;
 		if (!target || connection === undefined) {
@@ -39,7 +41,7 @@ export class WeComStatus {
 		let binding = this.binding;
 		if (!binding || binding.ui !== target) {
 			this.clear();
-			binding = { ui: target, connection };
+			binding = { ui: target, connection, pending };
 			this.binding = binding;
 			const owner = binding;
 			// setStatus stores ANSI text. A zero-row component receives pi's theme invalidation,
@@ -55,13 +57,17 @@ export class WeComStatus {
 			}));
 		} else {
 			binding.connection = connection;
+			binding.pending = pending;
 		}
 		this.paint(binding);
 	}
 
 	private paint(binding: StatusBinding): void {
 		if (this.binding !== binding) return;
-		const text = binding.ui.theme.fg(COLOR[binding.connection], WECOM_STATUS_KEY);
+		const { theme } = binding.ui;
+		const name = theme.fg(COLOR[binding.connection], WECOM_STATUS_KEY);
+		const text =
+			binding.pending && binding.connection === "online" ? `${name}${theme.fg("warning", "（待重新接入）")}` : name;
 		if (binding.text === text) return;
 		binding.text = text;
 		binding.ui.setStatus(WECOM_STATUS_KEY, text);

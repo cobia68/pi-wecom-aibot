@@ -3,8 +3,9 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NOTIFICATION_ICONS, notificationHeader } from "../../shared/notification.ts";
-import type { GatewayNotification } from "../../shared/notification-types.ts";
+import { notificationHeader } from "../../shared/notification.ts";
+import type { GatewayNotification, NotificationKind } from "../../shared/notification-types.ts";
+import type { IconName } from "./icons.ts";
 import { type CapturedScreen, renderScreenPng, type ScreenHeader } from "./render.ts";
 
 export interface ScreenImageOptions {
@@ -18,19 +19,30 @@ export interface ScreenImageOptions {
 	directory?: string;
 }
 
+/** The pill's icon for each kind; an aborted run uses circle-stop instead. */
+const BADGE_ICONS: Record<NotificationKind, IconName> = {
+	notification: "bell",
+	completion: "bell",
+	reply: "bell",
+	connect: "plug",
+	test: "flask-conical",
+};
+
 /**
- * The working directory leads; the status pill says what this is, and an aborted run says so in the
- * warning colour instead of a line under the screen. Model and session follow, quieter.
+ * Three rows of one size and style: the working directory, provider · model, and the session. The
+ * status pill says what this is; an aborted run says so in the warning colour (pill and top strip)
+ * instead of a line under the screen.
  */
 export function screenImageHeader(notification: GatewayNotification): ScreenHeader {
-	const { directory, title, model, session } = notificationHeader(notification.source, notification.kind);
-	// The same icons lead the same lines as the Markdown header; the image's font stack includes emoji.
+	const { directory, title, provider, model, session } = notificationHeader(notification.source, notification.kind);
 	return {
-		title: `${NOTIFICATION_ICONS.title} ${directory}`,
+		directory,
+		provider,
+		model,
+		session,
 		badge: notification.aborted ? "已中止" : title,
+		badgeIcon: notification.aborted ? "circle-stop" : BADGE_ICONS[notification.kind],
 		tone: notification.aborted ? "warning" : "accent",
-		subtitle: `${NOTIFICATION_ICONS.model} ${model}`,
-		caption: `${NOTIFICATION_ICONS.session} ${session}`,
 	};
 }
 

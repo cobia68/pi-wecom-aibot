@@ -16,7 +16,7 @@ const source = {
 	directoryName: "pi-wecom-aibot",
 };
 const notification: GatewayNotification = { kind: "completion", source, text: "fallback body" };
-const palette = { accent: "#ff00ff", muted: "#999999", dim: "#777777", warning: "#ffaa00" };
+const palette = { accent: "#ff00ff", muted: "#999999", warning: "#ffaa00", link: "#3399ff", variable: "#33cccc" };
 const screen = {
 	lines: ["BODY-LINE", "$ npm test", "256 tests passing"],
 	columns: 60,
@@ -29,23 +29,28 @@ const png = Buffer.from(
 	"base64",
 );
 
-test("the card header names the directory, the kind, the model and the session", () => {
+test("the card header names the directory, the model and the session, with the kind in the pill", () => {
 	assert.deepEqual(screenImageHeader(notification), {
-		title: "🔔 pi-wecom-aibot",
+		directory: "pi-wecom-aibot",
+		provider: "welfare-agentrouter",
+		model: "deepseek-v4-flash",
+		session: "01a1535b-d65e-749d-bd3a-a549bfe3dc9a",
 		badge: "会话通知",
+		badgeIcon: "bell",
 		tone: "accent",
-		subtitle: "🏷️ welfare-agentrouter · deepseek-v4-flash",
-		caption: "🆔 session: 01a1535b-d65e-749d-bd3a-a549bfe3dc9a",
 	});
+	assert.equal(screenImageHeader({ ...notification, kind: "connect" }).badgeIcon, "plug");
+	assert.equal(screenImageHeader({ ...notification, kind: "test" }).badgeIcon, "flask-conical");
 });
 
 test("an aborted run says so in the warning tone instead of adding a line under the screen", () => {
 	const header = screenImageHeader({ ...notification, aborted: true });
 	assert.equal(header.badge, "已中止");
+	assert.equal(header.badgeIcon, "circle-stop");
 	assert.equal(header.tone, "warning");
-	assert.equal(header.title, "🔔 pi-wecom-aibot");
-	assert.equal(header.subtitle, "🏷️ welfare-agentrouter · deepseek-v4-flash");
-	assert.equal(header.caption, "🆔 session: 01a1535b-d65e-749d-bd3a-a549bfe3dc9a");
+	assert.equal(header.directory, "pi-wecom-aibot");
+	assert.equal(header.model, "deepseek-v4-flash");
+	assert.equal(header.session, "01a1535b-d65e-749d-bd3a-a549bfe3dc9a");
 });
 
 test("a generated image keeps the Markdown fallback and writes a private PNG", async () => {

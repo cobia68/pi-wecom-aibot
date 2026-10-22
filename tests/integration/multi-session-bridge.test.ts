@@ -15,7 +15,7 @@ const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-aibot-multi-test-"));
 const previousDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = sandbox;
 const { default: extension } = await import("../../src/extension/index.ts");
-const { saveConfig, loadConfig, CONFIG_FILE } = await import("../../src/extension/config.ts");
+const { writeLayer, readLayer, CONFIG_FILE } = await import("../../src/extension/config.ts");
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
 let server: GatewayServer;
 let harnesses: ReturnType<typeof piHarness>[];
@@ -46,6 +46,7 @@ function piHarness(id: string) {
 		model: { id: `model-${id}`, name: `Model ${id}`, provider: `provider-${id}` },
 		sessionManager: {
 			getSessionId: () => state.sessionId,
+			getHeader: () => null,
 			getBranch: () => state.entries,
 			getLeafId: () => state.entries.at(-1)?.id ?? null,
 		},
@@ -156,7 +157,7 @@ beforeEach(async () => {
 	harnesses = [];
 	FakeWebSocket.instances = [];
 	const config = { botId: `multi-test-${randomUUID()}`, secret: "offline-test-secret", defaultChatId: "default-user" };
-	saveConfig(config);
+	writeLayer("global", config);
 	server = (await startGatewayServer({
 		credentials: config,
 		endpoint: gatewayEndpoint(config.botId),
@@ -379,9 +380,9 @@ test("/wecom-aibot whoami identifies the sender's chat, saves it as the default 
 	await running;
 	assert.deepEqual(ui.titles, ["等待你给机器人发消息（群聊需 @机器人），最多 120 秒"]);
 	assert.match(ui.confirms[0], /chatid=group_chat　chat_type=2　userid=user_one/);
-	assert.equal(loadConfig()?.defaultChatId, "group_chat");
-	assert.equal(loadConfig()?.defaultChatType, 2);
-	assert.match(ui.notices.at(-1)!, /默认推送目标已保存：group_chat（群聊）/);
+	assert.equal(readLayer("global")?.defaultChatId, "group_chat");
+	assert.equal(readLayer("global")?.defaultChatType, 2);
+	assert.match(ui.notices.at(-1)!, /全局默认推送目标已保存：group_chat（群聊）。当前接入仍使用旧目标/);
 	assert.match(
 		ui.notices.at(-1)!,
 		/allowedUserIds.*\["user_one"\]/,
@@ -390,10 +391,11 @@ test("/wecom-aibot whoami identifies the sender's chat, saves it as the default 
 	assert.equal(a.state.sent.length + b.state.sent.length, 0, "the identifying message is not a pi task");
 	const receipt = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
 	assert.match(receipt.body.stream.content, /whoami 已识别当前群聊/);
-	assert.match(ui.confirms[0], /清除排队任务和待发通知/);
-	assert.equal(a.ready(), false, "saving a changed target disconnects A only");
+	assert.match(ui.confirms[0], /保存不会断开当前接入/);
+	assert.equal(a.ready(), true, "saving a target never disconnects");
 	assert.equal(b.ready(), true);
 	await a.command("connect");
+	assert.equal(ui.confirms.length, 2, "connect confirms replacing the registration");
 	await until(a.ready, "A reconnected with its new default");
 	await a.notification({ content: "to the default" });
 	const push = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
@@ -401,44 +403,40 @@ test("/wecom-aibot whoami identifies the sender's chat, saves it as the default 
 	assert.equal(push.body.chat_type, 2);
 });
 
-test("interactive setup identifies through a hidden temporary registration and never formally connects", async () => {
+test("offline whoami identifies through a hidden temporary registration and never formally connects", async () => {
 	const { a, b } = await pair();
-	const { botId, secret } = loadConfig()!;
-	const ui = dialogs(a, { inputs: [botId, secret], menu: /自动识别/ });
-	const running = a.command("setup");
+	await a.command("disconnect");
+	await until(() => server.gateway.size === 1, "A disconnected");
+	const ui = dialogs(a);
+	const running = a.command("whoami");
 	await ui.waiting;
 	await b.notification({ chatid: "user", content: "barrier" });
 	await until(() => server.gateway.size === 2, "temporary identity registration plus B");
 	await assert.rejects(a.notification({ chatid: "user", content: "must not push" }), /未正式接入/);
 	chatMessage({ from: { userid: "user_one" }, chattype: "group", chatid: "group_chat", text: { content: "@bot hi" } });
 	await running;
-	assert.equal(ui.confirms.length, 2, "setup confirms its disconnect before whoami confirms saving");
-	assert.match(ui.confirms[1], /chatid=group_chat　chat_type=2　userid=user_one/);
-	assert.equal(loadConfig()?.defaultChatId, "group_chat");
-	assert.equal(loadConfig()?.defaultChatType, 2);
-	assert.match(ui.notices.at(-1)!, /默认推送目标已保存：group_chat（群聊）/);
+	assert.equal(ui.confirms.length, 1);
+	assert.match(ui.confirms[0], /chatid=group_chat　chat_type=2　userid=user_one/);
+	assert.equal(readLayer("global")?.defaultChatId, "group_chat");
+	assert.equal(readLayer("global")?.defaultChatType, 2);
+	assert.match(ui.notices.at(-1)!, /全局默认推送目标已保存：group_chat（群聊）。尚未正式接入/);
 	assert.equal(a.state.sent.length + b.state.sent.length, 0, "the identifying message is not a pi task");
 	await until(() => server.gateway.size === 1, "temporary A registration disposed");
 	assert.equal(a.ready(), false);
 	assert.equal(b.ready(), true);
 });
 
-test("setup whoami runs both actions with whoami's --wait; Esc keeps the credentials and releases the next message", async () => {
+test("whoami honours --wait; Esc keeps the configuration and the connection, and releases the next message", async () => {
 	const { a } = await pair();
-	const { botId, secret } = loadConfig()!;
 	const ui = dialogs(a, { answer: /等待你/ });
-	await a.command(`setup whoami --bot-id ${botId} --secret ${secret} --wait 300`);
-	assert.equal(ui.prompts.length, 0, "every value was given as an option");
-	assert.ok(!ui.titles.includes("默认推送目标"), "setup whoami needs no target menu");
-	assert.ok(ui.titles.includes("等待你给机器人发消息（群聊需 @机器人），最多 300 秒"), "the whoami step uses --wait");
+	const before = await readFile(CONFIG_FILE, "utf8");
+	await a.command("whoami --wait 300");
+	assert.ok(ui.titles.includes("等待你给机器人发消息（群聊需 @机器人），最多 300 秒"), "the wait uses --wait");
 	assert.match(ui.notices.at(-1)!, /已取消 whoami/);
-	assert.equal(ui.confirms.length, 1, "only setup's disconnect was confirmed; whoami was cancelled");
-	assert.equal(loadConfig()?.botId, botId);
-	assert.equal(loadConfig()?.defaultChatId, "default-user");
-	assert.equal(a.ready(), false, "setup cancellation still leaves the session disconnected");
-	await a.command("connect");
-	await until(a.ready, "A manually reconnected after setup");
-	// The temporary watch was released: an explicitly connected A can receive a new task.
+	assert.equal(ui.confirms.length, 0);
+	assert.equal(await readFile(CONFIG_FILE, "utf8"), before);
+	assert.equal(a.ready(), true, "cancelling whoami keeps the formal registration");
+	// The watch was released: A receives a new task.
 	await a.notification({ chatid: "user", content: "barrier" });
 	inbound("session-A", "task after cancel");
 	await until(() => a.state.sent.length === 1, "task routed after whoami was cancelled");

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import type { ThemeToken } from "@earendil-works/pi-coding-agent";
+import { colorToHex } from "@earendil-works/pi-tui";
 import {
 	type FontEnvironment,
 	findEmojiFont,
@@ -11,16 +13,28 @@ import {
 import {
 	cellMetrics,
 	cellsToSvg,
+	contrast,
+	headerColors,
 	MAX_CONTENT_ROWS,
 	maskSecrets,
 	parseAnsiLine,
 	renderScreenPng,
+	type ScreenHeader,
 	TARGET_PNG_HEIGHT,
 	TARGET_PNG_WIDTH,
 } from "../../../src/extension/screen/render.ts";
+import { fixtureTheme } from "../../support/tui-fixture.ts";
 
 const metrics = { advance: 0.6, ascent: 0.8, descent: 0.2, lineGap: 0.2 };
-const palette = { accent: "#ff00ff", muted: "#999999", dim: "#777777", warning: "#ffaa00" };
+const palette = { accent: "#ff00ff", muted: "#999999", warning: "#ffaa00", link: "#3399ff", variable: "#33cccc" };
+const header: ScreenHeader = {
+	directory: "project",
+	provider: "provider",
+	model: "model",
+	session: "abc",
+	badge: "会话通知",
+	badgeIcon: "bell",
+};
 const plain = (rows: ReturnType<typeof parseAnsiLine>[]) => rows.map((row) => row.map((cell) => cell.text).join(""));
 
 /** Minimal sfnt tables for the font parser, not a rasterisation fixture. */
@@ -114,8 +128,7 @@ function environment(
 	};
 }
 
-test("the card header is set in the proportional font, with the badge in the theme's accent", () => {
-	const header = { title: "project", badge: "会话通知", subtitle: "provider · model", caption: "session: abc" };
+test("the header's three rows share one size and style, each led by an SVG line icon", () => {
 	const svg = cellsToSvg([parseAnsiLine("body")], 20, {
 		families: ["monospace"],
 		sansFamilies: ["Sans"],
@@ -125,30 +138,43 @@ test("the card header is set in the proportional font, with the badge in the the
 		palette,
 		header,
 	});
-	// Title, subtitle and badge take the proportional stack; only the caption stays monospace.
-	assert.match(svg, /font-family="'Sans', monospace" font-size="17" font-weight="600"/);
-	assert.match(svg, /font-family="'Sans', monospace" font-size="12\.5"/);
-	assert.match(svg, /font-family="'Sans', monospace" font-size="11\.5" fill="#ff00ff">会话通知</);
-	assert.match(svg, /font-family="monospace" font-size="11\.5"/);
+	const colors = headerColors({ foreground: "#eeeeee", background: "#111111", palette });
+	const rows = [
+		...svg.matchAll(/<text x="([\d.]+)" y="([\d.]+)" font-family="'Sans', monospace" font-size="(\d+)">/g),
+	];
+	assert.equal(rows.length, 3);
+	assert.deepEqual(new Set(rows.map((row) => `${row[1]}/${row[3]}`)), new Set(["230/34"]), "one x, one size");
+	assert.deepEqual(
+		rows.map((row) => Number(row[2])),
+		[65.9, 113.9, 161.9],
+		"rows are 48 px apart",
+	);
+	assert.match(svg, new RegExp(`<tspan font-weight="700" fill="${colors.values[0]}">project</tspan>`));
+	assert.match(svg, new RegExp(`<tspan fill="${colors.prefix}">provider · </tspan><tspan font-weight="700"`));
+	assert.match(svg, new RegExp(`<tspan fill="${colors.prefix}">session </tspan><tspan font-weight="700"`));
+	// Folder, bot, message-square-code and the pill's bell are paths, not font glyphs.
+	assert.equal((svg.match(/viewBox="0 0 24 24"/g) ?? []).length, 4);
+	for (const color of colors.icons) assert.match(svg, new RegExp(`viewBox="0 0 24 24" fill="none" stroke="${color}"`));
+	assert.doesNotMatch(svg, /\p{Extended_Pictographic}/u, "no emoji font is needed");
+	assert.match(svg, new RegExp(`font-size="32" font-weight="700" fill="${colors.pillText}">会话通知<`));
 	assert.match(svg, /#F09082/, "the header carries pi's mark, not a font glyph");
 	assert.match(svg, /#4D9ABF/);
 	assert.match(svg, /#F1BE58/);
+	assert.match(svg, /^<svg [^>]*width="1600" height="2150"/);
 	assert.match(svg, /font-size="15"/, "the terminal grid keeps its own size");
 });
 
-test("without a monochrome emoji font the header drops its leading icons instead of drawing boxes", () => {
-	const svg = cellsToSvg([parseAnsiLine("body")], 40, {
-		families: ["monospace"],
-		metrics,
-		foreground: "#eeeeee",
-		background: "#101010",
-		palette,
-		header: { title: "🔔 project", badge: "会话通知", subtitle: "🏷️ provider · model", caption: "🆔 session: abc" },
-	});
-	assert.doesNotMatch(svg, /🔔|🏷️|🆔/, "no emoji glyph is drawn when the system has none");
-	assert.match(svg, />project</);
-	assert.match(svg, />provider · model</);
-	assert.match(svg, />session: abc</);
+test("the header keeps its pixel size at every terminal width; only the grid below it scales", () => {
+	const options = { families: ["monospace"], metrics, foreground: "#eeeeee", background: "#111111", palette, header };
+	const rows = Array.from({ length: MAX_CONTENT_ROWS }, () => parseAnsiLine("row"));
+	const narrow = cellsToSvg(rows, 80, options);
+	const wide = cellsToSvg(rows, 200, options);
+	const grid = (svg: string) => /<svg x="36" y="(\d+)" width="([\d.]+)"/.exec(svg);
+	assert.equal(grid(narrow)?.[1], "237", "the grid starts below the 207 px header and its 30 px gap");
+	assert.equal(grid(wide)?.[1], "237");
+	assert.equal(narrow.slice(0, narrow.indexOf('<svg x="36"')), wide.slice(0, wide.indexOf('<svg x="36"')));
+	assert.ok(Number(grid(narrow)?.[2]) < Number(grid(wide)?.[2]), "a wider terminal fills more of the width");
+	assert.equal(Number(grid(wide)?.[2]), TARGET_PNG_WIDTH - 72, "a wide terminal scales down to the margins");
 });
 
 test("Windows finds Noto Emoji under the variable-font file name or in the user font directory", () => {
@@ -174,20 +200,75 @@ test("the warning tone marks an aborted run, and no header leaves the band out",
 	const options = { families: ["monospace"], metrics, foreground: "#eeeeee", background: "#111111", palette };
 	const aborted = cellsToSvg([parseAnsiLine("body")], 20, {
 		...options,
-		header: {
-			title: "project",
-			badge: "已中止",
-			tone: "warning" as const,
-			subtitle: "provider · model",
-			caption: "session: abc",
-		},
+		header: { ...header, badge: "已中止", badgeIcon: "circle-stop", tone: "warning" },
 	});
-	assert.match(aborted, /font-size="11\.5" fill="#ffaa00">已中止</);
-	assert.doesNotMatch(
-		cellsToSvg([parseAnsiLine("body")], 20, options),
-		/clipPath/,
-		"without a header there is no band",
+	const colors = headerColors(options, "warning");
+	assert.match(aborted, /<rect width="1600" height="6" fill="#ffaa00"\/>/, "the status strip turns to warning");
+	assert.match(aborted, new RegExp(`fill="${colors.pillText}">已中止<`));
+	assert.match(aborted, /<circle cx="12" cy="12" r="10"\/>/, "the pill shows circle-stop");
+	const plainSvg = cellsToSvg([parseAnsiLine("body")], 20, options);
+	assert.doesNotMatch(plainSvg, /height="6"|viewBox="0 0 24 24"/, "without a header there is no band");
+	assert.match(plainSvg, /<svg x="36" y="30"/, "the grid moves up to the top margin");
+});
+
+test("header colours meet their contrast floors on pi's built-in themes and on a washed-out one", () => {
+	const themed = (name: string) => {
+		const theme = fixtureTheme(name);
+		const hex = (token: ThemeToken) => colorToHex(theme.colors[token]);
+		return {
+			foreground: hex("text"),
+			background: theme.appearance === "light" ? "#ffffff" : "#000000",
+			palette: {
+				accent: hex("accent"),
+				muted: hex("muted"),
+				warning: hex("warning"),
+				link: hex("mdLink"),
+				variable: hex("syntaxVariable"),
+			},
+		};
+	};
+	const washedOut = {
+		foreground: "#bbbbbb",
+		background: "#ffffff",
+		palette: { accent: "#ddccee", muted: "#dddddd", warning: "#eeddaa", link: "#cce0ff", variable: "#ccf0f0" },
+	};
+	for (const [name, options] of [
+		["dark", themed("dark")],
+		["light", themed("light")],
+		["washed-out", washedOut],
+	] as const) {
+		for (const tone of ["accent", "warning"] as const) {
+			const c = headerColors(options, tone);
+			for (const value of c.values) assert.ok(contrast(value, c.band) >= 7, `${name}: value ${value}`);
+			assert.ok(contrast(c.prefix, c.band) >= 4.5, `${name}: prefix ${c.prefix}`);
+			for (const icon of c.icons) assert.ok(contrast(icon, c.band) >= 3, `${name}: icon ${icon}`);
+			assert.ok(contrast(c.rule, c.band) >= 3, `${name}: rule ${c.rule}`);
+			assert.ok(contrast(c.pillText, c.pill) >= 4.5, `${name} ${tone}: pill ${c.pillText}`);
+		}
+	}
+	// pi's dark theme already clears every floor, so its own colours are used unchanged.
+	const dark = themed("dark");
+	const c = headerColors(dark);
+	assert.deepEqual(c.values.slice(1), [dark.palette.link, dark.palette.variable]);
+	assert.equal(c.prefix, dark.palette.muted);
+});
+
+test("long header values are shortened with an ellipsis; only the session row runs under the pill", () => {
+	const long = "x".repeat(200);
+	const svg = cellsToSvg([parseAnsiLine("body")], 20, {
+		families: ["monospace"],
+		metrics,
+		foreground: "#eeeeee",
+		background: "#111111",
+		palette,
+		header: { ...header, directory: long, model: long, session: long },
+	});
+	const values = [...svg.matchAll(/<tspan font-weight="700" fill="#[0-9a-f]{6}">(x+)…<\/tspan>/g)].map(
+		(m) => m[1].length,
 	);
+	assert.equal(values.length, 3, "all three values are cut");
+	assert.ok(values[1] < values[0], "the model row also leaves room for its prefix");
+	assert.ok(values[2] > values[0], "the session row is below the pill, so it gets the full width");
 });
 
 test("ANSI parsing retains grapheme widths and text styles, dropping control strings and hyperlinks", () => {
@@ -538,4 +619,26 @@ test("only the newest MAX_CONTENT_ROWS rows are kept, and a short screen pads th
 	const short = Buffer.from(await render(["keep-0"]));
 	assert.notDeepEqual(short, Buffer.from(await render(["keep-0", "one more"])));
 	assert.equal(short.readUInt32BE(20), TARGET_PNG_HEIGHT, "a short screen keeps its empty rows");
+});
+
+test("a header renders on the same fixed canvas, its text masked like the screen", async (t) => {
+	let fonts: ReturnType<typeof loadFonts>;
+	try {
+		fonts = loadFonts();
+	} catch {
+		t.skip("no system font installed");
+		return;
+	}
+	if (!fonts.hasCjk) {
+		t.skip("the pill text needs a CJK font");
+		return;
+	}
+	const screen = { lines: ["body"], columns: 80, foreground: "#eeeeee", background: "#101010", palette };
+	const render = (session: string) =>
+		renderScreenPng(screen, { fonts, secrets: ["SECRET-ID"], header: { ...header, session } });
+	const masked = Buffer.from(await render("SECRET-ID"));
+	assert.equal(masked.readUInt32BE(16), TARGET_PNG_WIDTH);
+	assert.equal(masked.readUInt32BE(20), TARGET_PNG_HEIGHT);
+	assert.deepEqual(masked, Buffer.from(await render("*********")), "the session value is drawn as stars");
+	assert.notDeepEqual(masked, Buffer.from(await render("PUBLIC-ID")));
 });

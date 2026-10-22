@@ -30,14 +30,15 @@ import {
 } from "../shared/gateway-protocol.ts";
 import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
-import type { WeComConfig } from "./config.ts";
+import type { Connection } from "./config.ts";
 
 const AUTH_FAILED =
 	"共享网关认证失败：本机运行中的网关使用不同的 BotID/Secret 或插件版本。" +
 	"请在仍用旧配置的 pi 中运行 /wecom-aibot connect 或 /wecom-aibot disconnect，再在这里运行 /wecom-aibot connect。";
 
 export interface GatewayClientOptions {
-	config: WeComConfig;
+	/** The credentials and allowlist this registration is made with. */
+	config: Pick<Connection, "botId" | "secret" | "allowedUserIds">;
 	source: NotificationSource;
 	instanceId?: string;
 	/** Temporary whoami registration, hidden from routing and the online session list. */

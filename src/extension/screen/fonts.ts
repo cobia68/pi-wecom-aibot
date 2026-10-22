@@ -37,10 +37,6 @@ export interface FontSet {
 	metrics: FontMetrics;
 	/** At least one loaded font has a Chinese glyph (not merely a matching file name). */
 	hasCjk: boolean;
-	/** Emoji fallback families; the header draws its leading icons with these alone. */
-	emojiFamilies: string[];
-	/** The emoji font's advance in em, so an icon and the text after it do not overlap. */
-	emojiAdvance?: number;
 }
 
 const systemEnvironment: FontEnvironment = {
@@ -220,8 +216,7 @@ export function loadFonts(
 	let metrics: FontMetrics | undefined;
 	let hasCjk = false;
 	let sansFamilies: string[] = [];
-	let emojiAdvance: number | undefined;
-	const add = (file: string, preferredFamilies: readonly string[] = [], emoji = false) => {
+	const add = (file: string, preferredFamilies: readonly string[] = []) => {
 		const path = pathApi.normalize(file.replace(/^~(?=$|[\\/])/, environment.home));
 		const key = environment.platform === "win32" ? path.toLowerCase() : path;
 		if (seen.has(key)) return;
@@ -238,7 +233,6 @@ export function loadFonts(
 		families.push(...preferredFamilies.filter((family) => info.families.includes(family)), ...info.families);
 		metrics ??= info.metrics;
 		hasCjk ||= info.hasCjk;
-		if (emoji) emojiAdvance = info.metrics?.advance;
 	};
 	const mono = found.mono;
 	if (mono) {
@@ -271,7 +265,7 @@ export function loadFonts(
 	// Emoji last: ordinary text keeps the monospace/CJK metrics while resvg falls back for emoji.
 	const emoji = findEmojiFont(environment);
 	const beforeEmoji = families.length;
-	if (emoji) add(emoji, ["Noto Emoji"], true);
+	if (emoji) add(emoji, ["Noto Emoji"]);
 	const emojiFamilies = families.slice(beforeEmoji);
 	if (!buffers.length) throw new Error(`找不到可用的系统字体。${missingCjkFontMessage(environment.platform)}`);
 	return {
@@ -281,8 +275,6 @@ export function loadFonts(
 		sansFamilies: [...new Set(sansFamilies)],
 		metrics: metrics ?? { advance: 0.6, ascent: 0.8, descent: 0.2, lineGap: 0 },
 		hasCjk,
-		emojiFamilies: [...new Set(emojiFamilies)],
-		emojiAdvance,
 	};
 }
 

@@ -1,13 +1,15 @@
 /**
  * Draw captured terminal lines as a PNG: ANSI styles become a grid of cells, the grid becomes SVG,
  * and resvg's WebAssembly build rasterises it, so every platform renders the same way without a
- * browser or native binary. Fonts are discovered in fonts.ts. Runs in pi only; the gateway never loads it.
+ * browser or native binary. Fonts are discovered in fonts.ts; the header's line icons are SVG paths
+ * from icons.ts. Runs in pi only; the gateway never loads it.
  */
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { type FontMetrics, type FontSet, loadFonts, missingCjkFontMessage } from "./fonts.ts";
+import { type IconName, iconSvg } from "./icons.ts";
 
 export interface CapturedScreen {
 	/** Terminal lines with ANSI styling, top to bottom. */
@@ -228,24 +230,32 @@ export function maskSecrets(rows: Cell[][], secrets: readonly string[]): Cell[][
 
 /** Theme colours as #rrggbb; the capture reads all of them from pi's theme. */
 export interface ScreenPalette {
+	/** The status strip and pill, and the directory row's icon. */
 	accent: string;
+	/** The rows' quiet prefixes ("anthropic ·", "session"). */
 	muted: string;
-	dim: string;
+	/** The strip and pill of an aborted run. */
 	warning: string;
+	/** The model row (pi's Markdown link colour). */
+	link: string;
+	/** The session row (pi's syntax-variable colour). */
+	variable: string;
 }
 
-/** A card header above the terminal grid, set in proportional type instead of terminal cells. */
+/**
+ * A card header above the terminal grid: three rows of one size and style (working directory,
+ * provider · model, session), each led by a line icon, and a status pill at the top right.
+ */
 export interface ScreenHeader {
-	/** The bold first line. */
-	title: string;
-	/** A short status pill at the right of the title. */
+	directory: string;
+	provider: string;
+	model: string;
+	session: string;
+	/** The pill's text, e.g. 「会话通知」. */
 	badge: string;
-	/** The pill's colour: the theme accent (default) or its warning colour. */
+	badgeIcon: IconName;
+	/** The strip and pill colour: the theme accent (default) or its warning colour. */
 	tone?: "accent" | "warning";
-	/** A muted line under the title. */
-	subtitle: string;
-	/** The smallest line, set monospace: an identifier people compare or copy. */
-	caption: string;
 }
 
 export interface SvgOptions {
@@ -258,22 +268,25 @@ export interface SvgOptions {
 	background: string;
 	palette: ScreenPalette;
 	header?: ScreenHeader;
-	/** Families that have the emoji glyphs; the header's leading icons use these alone. */
-	emojiFamilies?: readonly string[];
-	/** The emoji font's advance in em. */
-	emojiAdvance?: number;
 	fontSize?: number;
 	lineHeight?: number;
-	/** Canvas width in SVG units; narrower content is padded so every image has the same width. */
-	minWidth?: number;
-	/** Canvas height in SVG units; fewer rows leave the rest of the canvas in the background colour. */
-	minHeight?: number;
 }
 
+/**
+ * Every image is the same size, `TARGET_PNG_WIDTH` × `TARGET_PNG_HEIGHT`, whatever the terminal: a
+ * fixed canvas keeps two pi windows, and the phone (which shows an image at the chat's width),
+ * comparable. The header is drawn in canvas pixels, so it is the same in every image; the terminal
+ * grid is scaled into the rest. At most `MAX_CONTENT_ROWS` rows are captured and the rest of the
+ * grid stays in the terminal background; wider content is scaled down instead of cut.
+ */
+export const TARGET_PNG_WIDTH = 1600;
+export const TARGET_PNG_HEIGHT = 2150;
+/** Below the header, 57 rows of a 113-column terminal (0.6 em cells) fill the canvas exactly. */
+export const MAX_CONTENT_ROWS = 57;
+/** Canvas margins in pixels: the header's content and the grid share the side margins. */
+const CANVAS = { padX: 36, gap: 30, bottom: 30 } as const;
+
 const FONT_SIZE = 15;
-/** Margins around the grid; the header band is full-bleed. */
-const PADDING_X = 24;
-const PADDING_Y = 20;
 /** Rows filled edge to edge with one background (messages, tool output) become blocks with round corners. */
 const BLOCK_RADIUS = 6;
 /** Wide glyphs grow toward their two cells, at most by this factor: monospace Latin is wider than half a CJK em. */
@@ -298,16 +311,38 @@ interface Placed {
 	bg?: string;
 }
 
+/**
+ * The whole image as SVG on the fixed canvas: the header at its pixel size, then the terminal grid
+ * scaled (aspect kept) into the space below it, both on the terminal background. `rows` is never
+ * empty (renderScreenPng refuses an empty screen) and a terminal has at least one column.
+ */
 export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions): string {
+	const width = TARGET_PNG_WIDTH;
+	const height = TARGET_PNG_HEIGHT;
+	const header = options.header ? headerSvg(options.header, width, options) : undefined;
+	const top = (header?.height ?? 0) + CANVAS.gap;
+	const grid = gridSvg(rows, columns, options);
+	const scale = Math.min((width - 2 * CANVAS.padX) / grid.width, (height - top - CANVAS.bottom) / grid.height);
+	return [
+		`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+		`<rect width="100%" height="100%" fill="${options.background}"/>`,
+		header?.svg ?? "",
+		`<svg x="${CANVAS.padX}" y="${top}" width="${round(grid.width * scale)}" height="${round(grid.height * scale)}" viewBox="0 0 ${round(grid.width)} ${round(grid.height)}">${grid.body}</svg>`,
+		"</svg>",
+	].join("");
+}
+
+/** The terminal grid in its own units, origin at the first cell; the canvas positions and scales it. */
+function gridSvg(
+	rows: Cell[][],
+	columns: number,
+	options: SvgOptions,
+): { body: string; width: number; height: number } {
 	const fontSize = options.fontSize ?? FONT_SIZE;
 	const cell = cellMetrics(options.metrics, fontSize, options.lineHeight);
 	const used = Math.max(columns, ...rows.map((cells) => cells.reduce((sum, c) => sum + c.width, 0)));
-	const width = Math.max(options.minWidth ?? 0, Math.ceil(PADDING_X * 2 + used * cell.width));
-	const header = options.header ? headerSvg(options.header, width, options) : undefined;
-	const gridTop = (header?.height ?? 0) + PADDING_Y;
-	const height = Math.max(options.minHeight ?? 0, Math.ceil(gridTop + rows.length * cell.height + PADDING_Y));
-	const x = (col: number) => round(PADDING_X + col * cell.width);
-	const y = (row: number) => round(gridTop + row * cell.height);
+	const x = (col: number) => round(col * cell.width);
+	const y = (row: number) => round(row * cell.height);
 	const placed = rows.map((cells) => {
 		let col = 0;
 		return cells.map((c): Placed => {
@@ -329,11 +364,7 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 			? first.bg
 			: undefined;
 	});
-	const out: string[] = [
-		`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
-		`<rect width="100%" height="100%" fill="${options.background}"/>`,
-		...(header ? [header.svg] : []),
-	];
+	const out: string[] = [];
 	// Consecutive block rows of one colour become one rounded rectangle.
 	for (let row = 0; row < rows.length; ) {
 		const color = blockColor[row];
@@ -410,27 +441,40 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 			} else {
 				const wideGlyph = p.c.width === 2;
 				out.push(
-					`<text x="${round(PADDING_X + (p.col + p.c.width / 2) * cell.width)}" y="${wideGlyph ? round(baseline + wideShift) : baseline}" text-anchor="middle"${wideGlyph ? wideAttrs : ""}${attrs}>${escapeXml(p.c.text)}</text>`,
+					`<text x="${round((p.col + p.c.width / 2) * cell.width)}" y="${wideGlyph ? round(baseline + wideShift) : baseline}" text-anchor="middle"${wideGlyph ? wideAttrs : ""}${attrs}>${escapeXml(p.c.text)}</text>`,
 				);
 				i++;
 			}
 		}
 	});
-	out.push("</g></svg>");
-	return out.join("");
+	out.push("</g>");
+	return { body: out.join(""), width: used * cell.width, height: rows.length * cell.height };
 }
 
-/** Header sizes in SVG units, before the PNG zoom. */
+/**
+ * Header sizes in canvas pixels, the same for every image. The three rows share one size and style;
+ * the pill is centred on the first row, the pi tile on the three rows.
+ */
 const HEADER = {
-	top: 16,
-	bottom: 14,
-	tile: 36,
-	gap: 12,
-	title: 17,
-	subtitle: 12.5,
-	caption: 11.5,
-	badge: 11.5,
-	pill: 20,
+	top: 30,
+	bottom: 30,
+	/** The status strip along the top edge. */
+	strip: 6,
+	/** The rule between the header and the terminal grid. */
+	rule: 3,
+	row: 48,
+	text: 34,
+	icon: 30,
+	/** Icons sit centred in a fixed column, so the three rows' text starts at one x. */
+	iconColumn: 40,
+	iconGap: 16,
+	tile: 112,
+	tileRadius: 26,
+	logo: 64,
+	tileGap: 26,
+	pill: { height: 64, text: 32, icon: 32, padX: 26, gap: 12 },
+	/** Space kept between the first two rows and the pill. */
+	pillGap: 28,
 } as const;
 /** Pi's mark (pi.dev/logo-auto.svg), in its three brand colours. */
 const PI_LOGO = [
@@ -440,110 +484,108 @@ const PI_LOGO = [
 ].join("");
 
 /**
- * A full-width band tinted from the terminal's own colours, so it suits light and dark themes: the
- * pi mark on a neutral tile, the bold title with a status pill, then a muted subtitle and caption.
+ * A full-width band tinted from the terminal's own colours, so it suits light and dark themes: a
+ * status strip on top, the pi mark on a neutral tile, three rows (working directory, provider ·
+ * model, session) each led by a line icon, the status pill at the top right, and a rule underneath.
  */
 function headerSvg(header: ScreenHeader, width: number, options: SvgOptions): { svg: string; height: number } {
-	const colors = headerColors(options);
+	const colors = headerColors(options, header.tone);
 	const sans = escapeXml(fontFamilyList([...new Set([...(options.sansFamilies ?? []), ...options.families])]));
-	const mono = escapeXml(fontFamilyList(options.families));
-	const advance = Math.min(0.75, Math.max(0.45, options.metrics.advance || 0.6));
-	const tone = header.tone === "warning" ? colors.warning : colors.accent;
-	// Line boxes: title 24, subtitle 18, caption 18; the tile sits beside the first two.
-	const titleTop = HEADER.top;
-	const subtitleTop = titleTop + 24;
-	const captionTop = subtitleTop + 20;
-	const height = captionTop + 18 + HEADER.bottom;
-	const left = PADDING_X;
-	const right = width - PADDING_X;
-	const textX = left + HEADER.tile + HEADER.gap;
-	const tileTop = titleTop + (24 + 18 - HEADER.tile) / 2;
-	const pillWidth = round(fitWidth(header.badge, sansMeasure(HEADER.badge)) + 16);
+	const { row, text } = HEADER;
+	const band = HEADER.top + 3 * row + HEADER.bottom;
+	const left = CANVAS.padX;
+	const right = width - CANVAS.padX;
+	const columnX = left + HEADER.tile + HEADER.tileGap;
+	const textX = columnX + HEADER.iconColumn + HEADER.iconGap;
+	const rowTop = (i: number) => HEADER.top + i * row;
+	// Baselines put the text's visual middle (about 0.35 em above the baseline) in the middle of its box.
+	const baseline = (top: number, box: number, size: number) => round(top + box / 2 + size * 0.35);
+	const pill = HEADER.pill;
+	const pillWidth = round(pill.padX * 2 + pill.icon + pill.gap + fitWidth(header.badge, sansMeasure(pill.text, true)));
 	const pillX = round(right - pillWidth);
-	const pillTop = titleTop + (24 - HEADER.pill) / 2;
-	const titleWidth = Math.max(0, pillX - 12 - textX);
-	// Baselines put the text's visual middle (about 0.36 em above the baseline) in the middle of its box.
-	const baseline = (top: number, box: number, size: number) => round(top + box / 2 + size * 0.36);
-	// A leading emoji is drawn with the emoji font alone: CJK fonts claim some of these codepoints and
-	// would render a missing-glyph box when they lead the stack. Without a monochrome emoji font
-	// (stock Windows/macOS ship only color emoji) the icon is dropped rather than drawn as a box.
-	const emojiStack = options.emojiFamilies?.length ? escapeXml(fontFamilyList(options.emojiFamilies)) : undefined;
-	const emojiAdvance = options.emojiAdvance ?? 1.1;
-	const line = (
-		text: string,
-		size: number,
-		top: number,
-		box: number,
-		limit: number,
-		family: string,
-		measure: Measure,
-		fill: string,
-		weight = "",
-	): string => {
-		const match = /^(\p{Extended_Pictographic}\uFE0F?)\s+(.*)$/u.exec(text);
-		const icon = emojiStack ? (match?.[1] ?? "") : "";
-		const rest = match ? match[2] : text;
-		const offset = icon ? size * (emojiAdvance + 0.3) : 0;
-		const y = baseline(top, box, size);
-		const iconSvg = icon
-			? `<text x="${textX}" y="${y}" font-family="${emojiStack}" font-size="${size}" fill="${fill}">${escapeXml(icon)}</text>`
-			: "";
-		return `${iconSvg}<text x="${round(textX + offset)}" y="${y}" font-family="${family}" font-size="${size}"${weight} fill="${fill}">${escapeXml(fitText(rest, Math.max(0, limit - offset), measure))}</text>`;
-	};
+	const pillTop = round(rowTop(0) + (row - pill.height) / 2);
+	const tileTop = HEADER.top + (3 * row - HEADER.tile) / 2;
+	// The pill reaches into the second row's box, so the first two rows stop before it; text widths are
+	// estimated and shortened with an ellipsis, with no second clip behind them.
+	const besidePill = Math.max(0, pillX - HEADER.pillGap - textX);
+	const rows: { icon: IconName; prefix: string; value: string; limit: number }[] = [
+		{ icon: "folder", prefix: "", value: header.directory, limit: besidePill },
+		{ icon: "bot", prefix: header.provider ? `${header.provider} · ` : "", value: header.model, limit: besidePill },
+		{ icon: "message-square-code", prefix: "session ", value: header.session, limit: Math.max(0, right - textX) },
+	];
+	const lines = rows.map(({ icon, prefix, value, limit }, i) => {
+		const top = rowTop(i);
+		const [shownPrefix, shownValue] = fitPair(prefix, value, limit, text);
+		const iconAt = round(top + (row - HEADER.icon) / 2);
+		return [
+			iconSvg(icon, round(columnX + (HEADER.iconColumn - HEADER.icon) / 2), iconAt, HEADER.icon, colors.icons[i]),
+			`<text x="${textX}" y="${baseline(top, row, text)}" font-family="${sans}" font-size="${text}">`,
+			shownPrefix ? `<tspan fill="${colors.prefix}">${escapeXml(shownPrefix)}</tspan>` : "",
+			`<tspan font-weight="700" fill="${colors.values[i]}">${escapeXml(shownValue)}</tspan></text>`,
+		].join("");
+	});
 	const svg = [
-		`<rect width="${width}" height="${height}" fill="${colors.surface}"/>`,
-		`<rect y="${height}" width="${width}" height="1" fill="${colors.divider}"/>`,
-		`<rect x="${left}" y="${tileTop}" width="${HEADER.tile}" height="${HEADER.tile}" rx="9" fill="${colors.divider}"/>`,
-		`<svg x="${left + 7}" y="${tileTop + 7}" width="22" height="22" viewBox="165.29 165.29 469.43 469.43">${PI_LOGO}</svg>`,
-		`<rect x="${pillX}" y="${pillTop}" width="${pillWidth}" height="${HEADER.pill}" rx="${HEADER.pill / 2}" fill="${tone}" fill-opacity="0.16"/>`,
-		`<text x="${round(pillX + pillWidth / 2)}" y="${baseline(pillTop, HEADER.pill, HEADER.badge)}" text-anchor="middle" font-family="${sans}" font-size="${HEADER.badge}" fill="${tone}">${escapeXml(header.badge)}</text>`,
-		// The title is estimated and shortened with an ellipsis; there is no second clip behind it.
-		line(
-			header.title,
-			HEADER.title,
-			titleTop,
-			24,
-			titleWidth,
-			sans,
-			sansMeasure(HEADER.title),
-			colors.title,
-			' font-weight="600"',
+		`<rect width="${width}" height="${band}" fill="${colors.band}"/>`,
+		`<rect width="${width}" height="${HEADER.strip}" fill="${colors.tone}"/>`,
+		`<rect y="${band}" width="${width}" height="${HEADER.rule}" fill="${colors.rule}"/>`,
+		`<rect x="${left}" y="${tileTop}" width="${HEADER.tile}" height="${HEADER.tile}" rx="${HEADER.tileRadius}" fill="${colors.tile}"${colors.tileStroke ? ` stroke="${colors.tileStroke}" stroke-width="2"` : ""}/>`,
+		`<svg x="${left + (HEADER.tile - HEADER.logo) / 2}" y="${tileTop + (HEADER.tile - HEADER.logo) / 2}" width="${HEADER.logo}" height="${HEADER.logo}" viewBox="165.29 165.29 469.43 469.43">${PI_LOGO}</svg>`,
+		...lines,
+		`<rect x="${pillX}" y="${pillTop}" width="${pillWidth}" height="${pill.height}" rx="${pill.height / 2}" fill="${colors.pill}"/>`,
+		iconSvg(
+			header.badgeIcon,
+			round(pillX + pill.padX),
+			round(pillTop + (pill.height - pill.icon) / 2),
+			pill.icon,
+			colors.pillText,
+			2.25,
 		),
-		line(
-			header.subtitle,
-			HEADER.subtitle,
-			subtitleTop,
-			18,
-			right - textX,
-			sans,
-			sansMeasure(HEADER.subtitle),
-			colors.muted,
-		),
-		line(
-			header.caption,
-			HEADER.caption,
-			captionTop,
-			18,
-			right - textX,
-			mono,
-			(s) => HEADER.caption * advance * Math.max(1, visibleWidth(s)),
-			colors.dim,
-		),
+		`<text x="${round(pillX + pill.padX + pill.icon + pill.gap)}" y="${baseline(pillTop, pill.height, pill.text)}" font-family="${sans}" font-size="${pill.text}" font-weight="700" fill="${colors.pillText}">${escapeXml(header.badge)}</text>`,
 	].join("");
-	return { svg, height: height + 1 };
+	return { svg, height: band + HEADER.rule };
 }
 
-function headerColors(options: SvgOptions) {
+/** A quiet prefix and a bold value on one row: the value is shortened first, the prefix only if it alone overflows. */
+function fitPair(prefix: string, value: string, limit: number, size: number): [string, string] {
+	const prefixWidth = fitWidth(prefix, sansMeasure(size));
+	if (prefixWidth < limit) return [prefix, fitText(value, limit - prefixWidth, sansMeasure(size, true))];
+	return [fitText(prefix, limit, sansMeasure(size)), ""];
+}
+
+/**
+ * Header colours from the terminal's own foreground, background and theme palette. Every text and
+ * icon colour is pushed toward white (dark themes) or black (light ones) until it reaches its floor
+ * against the band: 7:1 for the rows' values, 4.5:1 for prefixes and pill text, 3:1 for icons and
+ * the rule. pi's built-in themes already meet the floors except light theme values, which darken.
+ */
+export function headerColors(
+	options: Pick<SvgOptions, "foreground" | "background" | "palette">,
+	tone?: "accent" | "warning",
+) {
 	const { foreground: fg, background: bg, palette } = options;
 	const dark = isDark(bg);
+	const ink = dark ? "#ffffff" : "#000000";
+	const band = mix(fg, bg, dark ? 0.08 : 0.045);
+	const toneColor = tone === "warning" ? palette.warning : palette.accent;
+	const pill = mix(toneColor, band, dark ? 0.22 : 0.15);
+	const hues = [palette.accent, palette.link, palette.variable];
 	return {
-		surface: mix(fg, bg, dark ? 0.06 : 0.035),
-		divider: mix(fg, bg, dark ? 0.14 : 0.1),
-		title: fg,
-		muted: palette.muted,
-		dim: palette.dim,
-		accent: palette.accent,
-		warning: palette.warning,
+		band,
+		tone: toneColor,
+		// The band's own colour pushed toward the text colour: a clear line in the theme's grey.
+		rule: withContrast(band, band, contrast(fg, band) >= 3 ? fg : ink, 3),
+		tile: dark ? mix(fg, band, 0.12) : bg,
+		tileStroke: dark ? undefined : mix(fg, bg, 0.14),
+		prefix: withContrast(palette.muted, band, ink, 4.5),
+		/** Directory, model, session. */
+		values: [
+			withContrast(fg, band, ink, 7),
+			withContrast(palette.link, band, ink, 7),
+			withContrast(palette.variable, band, ink, 7),
+		],
+		icons: hues.map((hue) => withContrast(hue, band, ink, 3)),
+		pill,
+		pillText: withContrast(toneColor, pill, ink, 4.5),
 	};
 }
 
@@ -567,12 +609,48 @@ function isDark(color: string): boolean {
 	return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255 < 0.5;
 }
 
+/** WCAG relative luminance. */
+function luminance(color: string): number {
+	const [r, g, b] = rgbOf(color).map((v) => {
+		const c = v / 255;
+		return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+	});
+	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** WCAG contrast ratio of two colours, 1 to 21. */
+export function contrast(a: string, b: string): number {
+	const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+	return (light + 0.05) / (dark + 0.05);
+}
+
+/** `color`, mixed toward `ink` in 2.5% steps until it reaches `min`:1 against `background`. */
+function withContrast(color: string, background: string, ink: string, min: number): string {
+	for (let step = 0; step <= 40; step++) {
+		const candidate = mix(ink, color, step / 40);
+		if (contrast(candidate, background) >= min) return candidate;
+	}
+	return ink;
+}
+
 type Measure = (segment: string) => number;
 
-/** An estimate for proportional text: wide glyphs (and the ellipsis, full-width in CJK fonts) one em, others about half. */
-function sansMeasure(size: number): Measure {
+/**
+ * An estimate for proportional text: wide glyphs (and the ellipsis, full-width in CJK fonts) one em,
+ * others about half, a little wider in bold.
+ */
+function sansMeasure(size: number, bold = false): Measure {
 	return (segment) =>
-		size * (visibleWidth(segment) >= 2 || segment === "…" ? 1 : /[A-Z0-9mw]/.test(segment) ? 0.68 : 0.55);
+		size *
+		(visibleWidth(segment) >= 2 || segment === "…"
+			? 1
+			: /[A-Z0-9mw]/.test(segment)
+				? bold
+					? 0.72
+					: 0.68
+				: bold
+					? 0.6
+					: 0.55);
 }
 
 function fitWidth(text: string, measure: Measure): number {
@@ -619,16 +697,6 @@ function fontFamilyList(families: readonly string[]): string {
 
 // ---------------------------------------------------------------- fonts
 
-/**
- * Every image is the same size — `TARGET_PNG_WIDTH` × `TARGET_PNG_HEIGHT` — whatever the terminal:
- * a fixed canvas keeps two pi windows, and the phone (which shows an image at the chat's width),
- * comparable. At most `MAX_CONTENT_ROWS` rows are captured and the rest of the canvas stays in the
- * terminal background; narrower content is padded on the right, wider content is scaled down.
- */
-export const TARGET_PNG_WIDTH = 1600;
-export const TARGET_PNG_HEIGHT = 2150;
-/** A 64-row terminal at 113 columns fills 1600×2150 with the header and the last 59 rows exactly. */
-export const MAX_CONTENT_ROWS = 59;
 const CJK = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/;
 
 interface ResvgModule {
@@ -669,6 +737,9 @@ export interface RenderOptions {
 	lineHeight?: number;
 }
 
+/** The header's text fields, all masked and all checked for CJK glyphs. */
+const HEADER_TEXT = ["directory", "provider", "model", "session", "badge"] as const;
+
 /** Render the captured screen to a PNG of the fixed canvas size. */
 export async function renderScreenPng(screen: CapturedScreen, options: RenderOptions = {}): Promise<Uint8Array> {
 	const secrets = options.secrets ?? [];
@@ -676,7 +747,7 @@ export async function renderScreenPng(screen: CapturedScreen, options: RenderOpt
 	if (!rows.length) throw new Error("当前终端画面是空的");
 	const header = options.header && maskHeader(options.header, secrets);
 	const fonts = options.fonts ?? loadFonts();
-	const headerText = header ? [header.title, header.badge, header.subtitle, header.caption].join("") : "";
+	const headerText = header ? HEADER_TEXT.map((key) => header[key]).join("") : "";
 	if (!fonts.hasCjk && (CJK.test(headerText) || rows.some((cells) => cells.some((cell) => CJK.test(cell.text))))) {
 		throw new Error(missingCjkFontMessage(fonts.platform));
 	}
@@ -684,35 +755,21 @@ export async function renderScreenPng(screen: CapturedScreen, options: RenderOpt
 	// same for every image; the footer padding is the terminal background, i.e. deliberately empty.
 	const content = rows.slice(-MAX_CONTENT_ROWS);
 	const padded: Cell[][] = [...content, ...Array.from({ length: MAX_CONTENT_ROWS - content.length }, () => [])];
-	const layout = {
+	const svg = cellsToSvg(padded, screen.columns, {
 		families: fonts.families,
 		sansFamilies: fonts.sansFamilies,
 		metrics: fonts.metrics,
 		foreground: screen.foreground,
 		background: screen.background,
 		palette: screen.palette,
-		emojiFamilies: fonts.emojiFamilies,
-		emojiAdvance: fonts.emojiAdvance,
 		header,
 		fontSize: options.fontSize,
 		lineHeight: options.lineHeight,
-	};
-	// Measure the content, then give the canvas exactly the target aspect ratio; the title band spans
-	// the whole canvas, so both paddings stay invisible.
-	const measured = cellsToSvg(padded, screen.columns, layout);
-	const width = Number(/^<svg[^>]*\swidth="([\d.]+)"/.exec(measured)?.[1] ?? 1);
-	const height = Number(/^<svg[^>]*\sheight="([\d.]+)"/.exec(measured)?.[1] ?? 1);
-	const zoom = Math.min(TARGET_PNG_WIDTH / width, TARGET_PNG_HEIGHT / height);
-	const canvasWidth = TARGET_PNG_WIDTH / zoom;
-	const svg = cellsToSvg(padded, screen.columns, {
-		...layout,
-		minWidth: canvasWidth,
-		minHeight: canvasWidth * (TARGET_PNG_HEIGHT / TARGET_PNG_WIDTH),
 	});
 	const { Resvg } = await loadResvg();
+	// The SVG is already the canvas size, so it rasterises 1:1.
 	const renderer = new Resvg(svg, {
 		font: { fontBuffers: fonts.buffers, defaultFontFamily: fonts.families[0], monospaceFamily: fonts.families[0] },
-		fitTo: { mode: "width", value: TARGET_PNG_WIDTH },
 	});
 	try {
 		const image = renderer.render();
@@ -728,17 +785,13 @@ export async function renderScreenPng(screen: CapturedScreen, options: RenderOpt
 
 /** Header text is masked like the screen: plain text through the same cell parser. */
 function maskHeader(header: ScreenHeader, secrets: readonly string[]): ScreenHeader {
-	const mask = (text: string) =>
-		maskSecrets([parseAnsiLine(text)], secrets)[0]
+	const masked = { ...header };
+	for (const key of HEADER_TEXT) {
+		masked[key] = maskSecrets([parseAnsiLine(header[key])], secrets)[0]
 			.map((cell) => cell.text)
 			.join("");
-	return {
-		...header,
-		title: mask(header.title),
-		badge: mask(header.badge),
-		subtitle: mask(header.subtitle),
-		caption: mask(header.caption),
-	};
+	}
+	return masked;
 }
 
 /** Blank lines at the top and bottom carry nothing. */
