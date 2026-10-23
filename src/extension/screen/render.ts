@@ -1,8 +1,6 @@
 /**
- * Draw captured terminal lines as a PNG: ANSI styles become a grid of cells, the grid becomes SVG,
- * and resvg's WebAssembly build rasterises it, so every platform renders the same way without a
- * browser or native binary. Fonts are discovered in fonts.ts; the header's line icons are SVG paths
- * from icons.ts. Runs in pi only; the gateway never loads it.
+ * Terminal lines → cells → SVG → PNG through resvg's WebAssembly build, so every platform renders the
+ * same way without a browser or native binary. Runs in pi only; the gateway never loads it.
  */
 
 import { readFileSync } from "node:fs";
@@ -12,20 +10,17 @@ import { type FontMetrics, type FontSet, loadFonts, missingCjkFontMessage } from
 import { type IconName, iconSvg } from "./icons.ts";
 
 export interface CapturedScreen {
-	/** Terminal lines with ANSI styling, top to bottom. */
 	lines: string[];
 	columns: number;
 	/** The terminal's default colours as #rrggbb. */
 	foreground: string;
 	background: string;
-	/** Theme colours for the header; the capture always reads them from the active theme. */
 	palette: ScreenPalette;
 }
 
 export interface Cell {
-	/** One grapheme; "" for the second column of nothing. */
+	/** One grapheme; a wide one spans both its columns. */
 	text: string;
-	/** Terminal columns: 1 or 2. */
 	width: 1 | 2;
 	fg?: string;
 	bg?: string;
@@ -39,7 +34,6 @@ export interface Cell {
 }
 
 type Style = Omit<Cell, "text" | "width">;
-/** Every mutable style field, for SGR 0. */
 const STYLE_KEYS = [
 	"fg",
 	"bg",
@@ -185,9 +179,8 @@ function applySgr(style: Style, params: string): void {
 }
 
 /**
- * Mask known credentials after ANSI parsing. Match across styling, line wraps and inserted padding;
- * replace whole graphemes with the same number of terminal cells. This is best-effort protection
- * for known values only, not a general secret scanner.
+ * Best-effort masking of known values only, not a secret scanner: matches across styling, wraps and
+ * padding, and replaces whole graphemes with the same number of cells.
  */
 export function maskSecrets(rows: Cell[][], secrets: readonly string[]): Cell[][] {
 	const needles = new Set<string>();
@@ -230,36 +223,24 @@ export function maskSecrets(rows: Cell[][], secrets: readonly string[]): Cell[][
 
 /** Theme colours as #rrggbb; the capture reads all of them from pi's theme. */
 export interface ScreenPalette {
-	/** The status strip and pill, and the directory row's icon. */
 	accent: string;
-	/** The rows' quiet prefixes ("anthropic ·", "session"). */
 	muted: string;
-	/** The strip and pill of an aborted run. */
 	warning: string;
-	/** The model row (pi's Markdown link colour). */
 	link: string;
-	/** The session row (pi's syntax-variable colour). */
 	variable: string;
 }
 
-/**
- * A card header above the terminal grid: three rows of one size and style (working directory,
- * provider · model, session), each led by a line icon, and a status pill at the top right.
- */
 export interface ScreenHeader {
 	directory: string;
 	provider: string;
 	model: string;
 	session: string;
-	/** The pill's text, e.g. 「会话通知」. */
 	badge: string;
 	badgeIcon: IconName;
-	/** The strip and pill colour: the theme accent (default) or its warning colour. */
 	tone?: "accent" | "warning";
 }
 
 export interface SvgOptions {
-	/** The terminal grid's font stack, monospace first. */
 	families: string[];
 	/** The header's proportional stack, tried before `families`. */
 	sansFamilies?: readonly string[];
@@ -273,11 +254,8 @@ export interface SvgOptions {
 }
 
 /**
- * Every image is the same size, `TARGET_PNG_WIDTH` × `TARGET_PNG_HEIGHT`, whatever the terminal: a
- * fixed canvas keeps two pi windows, and the phone (which shows an image at the chat's width),
- * comparable. The header is drawn in canvas pixels, so it is the same in every image; the terminal
- * grid is scaled into the rest. At most `MAX_CONTENT_ROWS` rows are captured and the rest of the
- * grid stays in the terminal background; wider content is scaled down instead of cut.
+ * Every image is this size, whatever the terminal, so two pi windows and the phone (which shows an
+ * image at the chat's width) stay comparable; wider content is scaled down instead of cut.
  */
 export const TARGET_PNG_WIDTH = 1600;
 export const TARGET_PNG_HEIGHT = 2150;
@@ -299,7 +277,6 @@ export function cellMetrics(metrics: FontMetrics, fontSize = FONT_SIZE, lineHeig
 	const height = Math.round(fontSize * (lineHeight ?? Math.min(1.6, Math.max(1.15, natural))));
 	const ascent = metrics.ascent || 0.8;
 	const descent = metrics.descent || 0.2;
-	// Centre the font's ascent+descent box in the line.
 	const baseline = (height - fontSize * (ascent + descent)) / 2 + fontSize * ascent;
 	return { width, height, baseline };
 }
@@ -311,11 +288,7 @@ interface Placed {
 	bg?: string;
 }
 
-/**
- * The whole image as SVG on the fixed canvas: the header at its pixel size, then the terminal grid
- * scaled (aspect kept) into the space below it, both on the terminal background. `rows` is never
- * empty (renderScreenPng refuses an empty screen) and a terminal has at least one column.
- */
+/** `rows` is never empty (renderScreenPng refuses an empty screen) and a terminal has at least one column. */
 export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions): string {
 	const width = TARGET_PNG_WIDTH;
 	const height = TARGET_PNG_HEIGHT;
@@ -332,7 +305,6 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 	].join("");
 }
 
-/** The terminal grid in its own units, origin at the first cell; the canvas positions and scales it. */
 function gridSvg(
 	rows: Cell[][],
 	columns: number,
@@ -356,7 +328,6 @@ function gridSvg(
 			return at;
 		});
 	});
-	// A row filled edge to edge over one background belongs to a block: a message or tool output.
 	const blockColor = placed.map((cells) => {
 		const first = cells[0];
 		const last = cells.at(-1);
@@ -365,7 +336,6 @@ function gridSvg(
 			: undefined;
 	});
 	const out: string[] = [];
-	// Consecutive block rows of one colour become one rounded rectangle.
 	for (let row = 0; row < rows.length; ) {
 		const color = blockColor[row];
 		let end = row + 1;
@@ -376,7 +346,6 @@ function gridSvg(
 			);
 		row = end;
 	}
-	// Other backgrounds, merged per colour within a row.
 	placed.forEach((cells, row) => {
 		for (let i = 0; i < cells.length; ) {
 			const bg = cells[i].bg;
@@ -398,7 +367,6 @@ function gridSvg(
 	out.push(`<g font-family="${escapeXml(fontFamilyList(options.families))}" font-size="${fontSize}">`);
 	placed.forEach((cells, row) => {
 		const baseline = round(y(row) + cell.baseline);
-		// Underline and strike-through as thin bars.
 		for (const p of cells) {
 			if (p.c.hidden) continue;
 			if (p.c.underline)
@@ -410,7 +378,6 @@ function gridSvg(
 					`<rect x="${x(p.col)}" y="${round(baseline - fontSize * 0.3)}" width="${round(p.c.width * cell.width)}" height="1" fill="${p.fg}"/>`,
 				);
 		}
-		// Text: narrow single-unit characters share one element with explicit positions; others stand alone, centred.
 		for (let i = 0; i < cells.length; ) {
 			const p = cells[i];
 			if (p.c.hidden || p.c.text.trim() === "") {
@@ -451,14 +418,10 @@ function gridSvg(
 	return { body: out.join(""), width: used * cell.width, height: rows.length * cell.height };
 }
 
-/**
- * Header sizes in canvas pixels, the same for every image. The three rows share one size and style;
- * the pill is centred on the first row, the pi tile on the three rows.
- */
+/** Header sizes in canvas pixels. */
 const HEADER = {
 	top: 30,
 	bottom: 30,
-	/** The status strip along the top edge. */
 	strip: 6,
 	/** The rule between the header and the terminal grid. */
 	rule: 3,
@@ -473,7 +436,6 @@ const HEADER = {
 	logo: 64,
 	tileGap: 26,
 	pill: { height: 64, text: 32, icon: 32, padX: 26, gap: 12 },
-	/** Space kept between the first two rows and the pill. */
 	pillGap: 28,
 } as const;
 /** Pi's mark (pi.dev/logo-auto.svg), in its three brand colours. */
@@ -483,11 +445,6 @@ const PI_LOGO = [
 	'<path fill="#F1BE58" d="M517.36 400H634.72V634.72H517.36Z"/>',
 ].join("");
 
-/**
- * A full-width band tinted from the terminal's own colours, so it suits light and dark themes: a
- * status strip on top, the pi mark on a neutral tile, three rows (working directory, provider ·
- * model, session) each led by a line icon, the status pill at the top right, and a rule underneath.
- */
 function headerSvg(header: ScreenHeader, width: number, options: SvgOptions): { svg: string; height: number } {
 	const colors = headerColors(options, header.tone);
 	const sans = escapeXml(fontFamilyList([...new Set([...(options.sansFamilies ?? []), ...options.families])]));
@@ -553,10 +510,9 @@ function fitPair(prefix: string, value: string, limit: number, size: number): [s
 }
 
 /**
- * Header colours from the terminal's own foreground, background and theme palette. Every text and
- * icon colour is pushed toward white (dark themes) or black (light ones) until it reaches its floor
- * against the band: 7:1 for the rows' values, 4.5:1 for prefixes and pill text, 3:1 for icons and
- * the rule. pi's built-in themes already meet the floors except light theme values, which darken.
+ * Every text and icon colour is pushed toward white or black until it reaches its floor against the
+ * band: 7:1 for values, 4.5:1 for prefixes and pill text, 3:1 for icons and the rule. Of pi's built-in
+ * themes only the light theme's values need it.
  */
 export function headerColors(
 	options: Pick<SvgOptions, "foreground" | "background" | "palette">,
@@ -572,12 +528,10 @@ export function headerColors(
 	return {
 		band,
 		tone: toneColor,
-		// The band's own colour pushed toward the text colour: a clear line in the theme's grey.
 		rule: withContrast(band, band, contrast(fg, band) >= 3 ? fg : ink, 3),
 		tile: dark ? mix(fg, band, 0.12) : bg,
 		tileStroke: dark ? undefined : mix(fg, bg, 0.14),
 		prefix: withContrast(palette.muted, band, ink, 4.5),
-		/** Directory, model, session. */
 		values: [
 			withContrast(fg, band, ink, 7),
 			withContrast(palette.link, band, ink, 7),
@@ -618,13 +572,11 @@ function luminance(color: string): number {
 	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
-/** WCAG contrast ratio of two colours, 1 to 21. */
 export function contrast(a: string, b: string): number {
 	const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
 	return (light + 0.05) / (dark + 0.05);
 }
 
-/** `color`, mixed toward `ink` in 2.5% steps until it reaches `min`:1 against `background`. */
 function withContrast(color: string, background: string, ink: string, min: number): string {
 	for (let step = 0; step <= 40; step++) {
 		const candidate = mix(ink, color, step / 40);
@@ -635,10 +587,7 @@ function withContrast(color: string, background: string, ink: string, min: numbe
 
 type Measure = (segment: string) => number;
 
-/**
- * An estimate for proportional text: wide glyphs (and the ellipsis, full-width in CJK fonts) one em,
- * others about half, a little wider in bold.
- */
+/** An estimate for proportional text; the ellipsis counts one em because CJK fonts draw it full-width. */
 function sansMeasure(size: number, bold = false): Measure {
 	return (segment) =>
 		size *
@@ -659,7 +608,6 @@ function fitWidth(text: string, measure: Measure): number {
 	return width;
 }
 
-/** The text, or as much of it as fits followed by an ellipsis. */
 export function fitText(text: string, max: number, measure: Measure): string {
 	if (fitWidth(text, measure) <= max) return text;
 	const budget = max - measure("…");
@@ -695,7 +643,7 @@ function fontFamilyList(families: readonly string[]): string {
 	return families.map((family) => (family === "monospace" ? family : `'${family.replace(/['\\]/g, "")}'`)).join(", ");
 }
 
-// ---------------------------------------------------------------- fonts
+// ---------------------------------------------------------------- SVG → PNG
 
 const CJK = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/;
 
@@ -706,7 +654,7 @@ interface ResvgModule {
 
 let resvg: Promise<ResvgModule> | undefined;
 
-/** Load and initialise resvg once per process; a reload reuses the initialised module. */
+/** Once per process; a reload reuses the initialised module. */
 function loadResvg(): Promise<ResvgModule> {
 	resvg ??= (async () => {
 		const require = createRequire(import.meta.url);
@@ -727,20 +675,16 @@ function loadResvg(): Promise<ResvgModule> {
 }
 
 export interface RenderOptions {
-	/** Values masked in the image, header included. */
 	secrets?: readonly string[];
 	/** Overrides for tests. */
 	fonts?: FontSet;
-	/** A card header above the terminal content. */
 	header?: ScreenHeader;
 	fontSize?: number;
 	lineHeight?: number;
 }
 
-/** The header's text fields, all masked and all checked for CJK glyphs. */
 const HEADER_TEXT = ["directory", "provider", "model", "session", "badge"] as const;
 
-/** Render the captured screen to a PNG of the fixed canvas size. */
 export async function renderScreenPng(screen: CapturedScreen, options: RenderOptions = {}): Promise<Uint8Array> {
 	const secrets = options.secrets ?? [];
 	const rows = trimBlankRows(maskSecrets(screen.lines.map(parseAnsiLine), secrets));
@@ -783,7 +727,6 @@ export async function renderScreenPng(screen: CapturedScreen, options: RenderOpt
 	}
 }
 
-/** Header text is masked like the screen: plain text through the same cell parser. */
 function maskHeader(header: ScreenHeader, secrets: readonly string[]): ScreenHeader {
 	const masked = { ...header };
 	for (const key of HEADER_TEXT) {
@@ -794,7 +737,6 @@ function maskHeader(header: ScreenHeader, secrets: readonly string[]): ScreenHea
 	return masked;
 }
 
-/** Blank lines at the top and bottom carry nothing. */
 function trimBlankRows(rows: Cell[][]): Cell[][] {
 	const blank = (cells: Cell[]) => cells.every((cell) => !cell.text.trim() && !cell.bg && !cell.inverse);
 	let start = 0;

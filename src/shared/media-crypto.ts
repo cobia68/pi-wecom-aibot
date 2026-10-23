@@ -1,8 +1,6 @@
 /**
  * WeCom long-connection media encryption, shared by pi (attachments) and the gateway (quoted images).
- *
- * Each image/file/video URL carries its own aeskey. The payload is AES-256-CBC encrypted with
- * PKCS#7 padding to 32 bytes; the IV is the first 16 bytes of the AES key.
+ * Each URL has its own aeskey: AES-256-CBC, IV = the key's first 16 bytes, PKCS#7 padding to 32 bytes.
  */
 import { createDecipheriv } from "node:crypto";
 
@@ -34,9 +32,8 @@ export function decryptAes256Cbc(data: Buffer, key: Buffer): Buffer {
 }
 
 /**
- * The plaintext of the leading whole AES blocks of an encrypted download. A CBC block depends only on
- * the ciphertext before it, so a file's header can be read without the rest of the file; the padding
- * lives at the end and is never seen here.
+ * Leading whole blocks only: a CBC block depends only on the ciphertext before it, so a file's header
+ * decrypts without the rest of the file. The padding lives at the end and is never seen here.
  */
 export function decryptAes256CbcPrefix(data: Buffer, key: Buffer): Buffer {
 	if (key.length !== 32) throw new Error("invalid aeskey length");

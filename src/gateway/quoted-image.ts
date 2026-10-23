@@ -1,11 +1,7 @@
 /**
- * The session a quoted image names. WeCom's quote carries only a short-lived download link, never the
- * message it quotes, so the name has to be in the file: every image the gateway sends carries its
- * session marker (see png-marker.ts).
- *
- * Measured against a real quote: the link serves our own bytes under the quote's aeskey, marker
- * intact, so reading a prefix is enough — no OCR, and nothing remembered about what was sent. Only
- * byte facts and field names are reported, never the signed link or the key.
+ * The session a quoted image names, read from the marker png-marker.ts puts in every image sent.
+ * Measured against a real quote: the link serves our own bytes under the quote's aeskey, marker intact,
+ * so reading a prefix is enough. Only byte facts and field names are reported, never the signed link or the key.
  */
 import { decryptAes256CbcPrefix, parseAesKey } from "../shared/media-crypto.ts";
 import type { QuotedImage } from "../shared/wecom-protocol.ts";
@@ -16,13 +12,11 @@ export const QUOTED_IMAGE_BYTES = 4096;
 const READ_TIMEOUT_MS = 15_000;
 
 export interface QuotedImageReading {
-	/** The pi session that sent the quoted image, when its marker survived the round trip. */
 	sessionId?: string;
-	/** One line for the log: what the quote held, and what it named. */
 	report: string;
 }
 
-/** Reads what a quoted image says about itself. Never throws: a quote is not worth failing a message over. */
+/** Never throws: a quote is not worth failing a message over. */
 export async function readQuotedImage(image: QuotedImage): Promise<QuotedImageReading> {
 	const facts = [
 		`引用类型 ${display(image.msgtype, 40) || "无"}`,
@@ -80,7 +74,6 @@ function format(bytes: Buffer): "PNG" | "JPEG" | "GIF" | "WEBP" | undefined {
 	return undefined;
 }
 
-/** Status, declared length and the first bytes of the body; the rest is never downloaded. */
 async function readPrefix(url: URL, maxBytes: number): Promise<{ status: number; length?: string; bytes: Buffer }> {
 	const response = await fetch(url, { signal: AbortSignal.timeout(READ_TIMEOUT_MS) });
 	const declared = response.headers.get("content-length");
@@ -101,7 +94,6 @@ async function readPrefix(url: URL, maxBytes: number): Promise<{ status: number;
 	return { status: response.status, length, bytes: Buffer.concat(chunks).subarray(0, maxBytes) };
 }
 
-/** Error text without the signed link or the key that produced it. */
 function scrub(error: unknown, secret: string): string {
 	const base = error instanceof Error ? error.message : String(error);
 	const cause = error instanceof Error && error.cause instanceof Error ? `（${error.cause.message}）` : "";

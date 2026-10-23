@@ -303,7 +303,7 @@ test("a refused registration stops that pi's bridge, so status and connect see i
 	await c.command("connect");
 	await until(() => notices.some((notice) => notice.includes("另一个 pi 注册")), "duplicate refused");
 	await c.command("status");
-	assert.match(notices.at(-1)!, /当前 pi：未连接/);
+	assert.match(notices.at(-1)!, /^❌ 企业微信智能机器人：已停止（该完整 session ID 已由另一个 pi 注册/);
 	assert.equal(server.gateway.size, 2);
 	c.state.sessionId = "session-C";
 	await c.command("connect");
@@ -328,7 +328,10 @@ function chatMessage(body: Record<string, unknown>) {
 	});
 }
 
-/** Dialogs: whoami's wait stays open until it closes itself; `answer` picks the cancel option for matching titles, `menu` a setup menu entry. */
+/**
+ * Dialogs: config whoami's wait stays open until it closes itself, and `codes` collects the one-time codes it
+ * shows; `answer` picks the cancel option for matching titles, `menu` a setup menu entry.
+ */
 function dialogs(
 	pi: ReturnType<typeof piHarness>,
 	options: { answer?: RegExp; inputs?: (string | undefined)[]; menu?: RegExp } = {},
@@ -338,6 +341,7 @@ function dialogs(
 		prompts: [] as string[],
 		notices: [] as string[],
 		confirms: [] as string[],
+		codes: [] as string[],
 		waiting: undefined as Promise<void> | undefined,
 	};
 	let opened!: () => void;
@@ -357,7 +361,11 @@ function dialogs(
 		},
 		select(title: string, choices: string[], opts?: { signal?: AbortSignal }) {
 			ui.titles.push(title);
-			if (/等待你/.test(title)) opened();
+			const code = /把 (\d{6}) 发给机器人/.exec(title)?.[1];
+			if (code) {
+				ui.codes.push(code);
+				opened();
+			}
 			if (title === "默认推送目标" && options.menu)
 				return Promise.resolve(choices.find((choice) => options.menu!.test(choice)));
 			if (options.answer?.test(title)) return Promise.resolve(choices[0]);
@@ -369,20 +377,24 @@ function dialogs(
 	return ui;
 }
 
-test("/wecom-aibot whoami identifies the sender's chat, saves it as the default after confirmation and routes nothing", async () => {
+test("config whoami identifies the chat that sends the code, saves it after confirmation and routes nothing", async () => {
 	const { a, b } = await pair();
 	const ui = dialogs(a);
-	const running = a.command("whoami");
+	const running = a.command("config whoami --scope global");
 	await ui.waiting;
-	// An acknowledged send orders this test after the watch request on A's IPC channel, like a human's delay.
-	await a.notification({ chatid: "user", content: "barrier" });
-	chatMessage({ from: { userid: "user_one" }, chattype: "group", chatid: "group_chat", text: { content: "@bot hi" } });
+	chatMessage({
+		from: { userid: "user_one" },
+		chattype: "group",
+		chatid: "group_chat",
+		text: { content: `@bot ${ui.codes[0]}` },
+	});
 	await running;
-	assert.deepEqual(ui.titles, ["等待你给机器人发消息（群聊需 @机器人），最多 120 秒"]);
+	assert.deepEqual(ui.titles, [`在要识别的聊天里把 ${ui.codes[0]} 发给机器人（群聊需 @机器人），最多 300 秒`]);
 	assert.match(ui.confirms[0], /chatid=group_chat　chat_type=2　userid=user_one/);
 	assert.equal(readLayer("global")?.defaultChatId, "group_chat");
 	assert.equal(readLayer("global")?.defaultChatType, 2);
-	assert.match(ui.notices.at(-1)!, /全局默认推送目标已保存：group_chat（群聊）。当前接入仍使用旧目标/);
+	assert.match(ui.notices.at(-1)!, /^已保存全局配置：defaultChatId：.* → group_chat（global）/);
+	assert.match(ui.notices.at(-1)!, /当前接入仍使用旧配置/);
 	assert.match(
 		ui.notices.at(-1)!,
 		/allowedUserIds.*\["user_one"\]/,
@@ -403,41 +415,50 @@ test("/wecom-aibot whoami identifies the sender's chat, saves it as the default 
 	assert.equal(push.body.chat_type, 2);
 });
 
-test("offline whoami identifies through a hidden temporary registration and never formally connects", async () => {
+test("offline config whoami identifies through a hidden temporary registration and never formally connects", async () => {
 	const { a, b } = await pair();
 	await a.command("disconnect");
 	await until(() => server.gateway.size === 1, "A disconnected");
 	const ui = dialogs(a);
-	const running = a.command("whoami");
+	const running = a.command("config whoami --scope global");
 	await ui.waiting;
-	await b.notification({ chatid: "user", content: "barrier" });
 	await until(() => server.gateway.size === 2, "temporary identity registration plus B");
 	await assert.rejects(a.notification({ chatid: "user", content: "must not push" }), /未正式接入/);
-	chatMessage({ from: { userid: "user_one" }, chattype: "group", chatid: "group_chat", text: { content: "@bot hi" } });
+	chatMessage({
+		from: { userid: "user_one" },
+		chattype: "group",
+		chatid: "group_chat",
+		text: { content: `@bot ${ui.codes[0]}` },
+	});
 	await running;
 	assert.equal(ui.confirms.length, 1);
 	assert.match(ui.confirms[0], /chatid=group_chat　chat_type=2　userid=user_one/);
+	assert.match(ui.confirms[0], /保存后运行 \/wecom-aibot connect 正式接入/);
 	assert.equal(readLayer("global")?.defaultChatId, "group_chat");
 	assert.equal(readLayer("global")?.defaultChatType, 2);
-	assert.match(ui.notices.at(-1)!, /全局默认推送目标已保存：group_chat（群聊）。尚未正式接入/);
+	assert.match(ui.notices.at(-1)!, /^已保存全局配置：/);
+	assert.match(ui.notices.at(-1)!, /配置不等于接入，需要时运行 \/wecom-aibot connect/);
 	assert.equal(a.state.sent.length + b.state.sent.length, 0, "the identifying message is not a pi task");
 	await until(() => server.gateway.size === 1, "temporary A registration disposed");
 	assert.equal(a.ready(), false);
 	assert.equal(b.ready(), true);
 });
 
-test("whoami honours --wait; Esc keeps the configuration and the connection, and releases the next message", async () => {
+test("config whoami honours --wait; Esc keeps the configuration and the connection, and retires the code", async () => {
 	const { a } = await pair();
-	const ui = dialogs(a, { answer: /等待你/ });
+	const ui = dialogs(a, { answer: /发给机器人/ });
 	const before = await readFile(CONFIG_FILE, "utf8");
-	await a.command("whoami --wait 300");
-	assert.ok(ui.titles.includes("等待你给机器人发消息（群聊需 @机器人），最多 300 秒"), "the wait uses --wait");
+	await a.command("config whoami --scope global --wait 120");
+	assert.match(ui.titles[0], /最多 120 秒$/, "the wait uses --wait");
 	assert.match(ui.notices.at(-1)!, /已取消 whoami/);
 	assert.equal(ui.confirms.length, 0);
 	assert.equal(await readFile(CONFIG_FILE, "utf8"), before);
 	assert.equal(a.ready(), true, "cancelling whoami keeps the formal registration");
-	// The watch was released: A receives a new task.
+	// The cancel reached the gateway before this acknowledged send: the old code identifies nothing now.
 	await a.notification({ chatid: "user", content: "barrier" });
+	chatMessage({ text: { content: ui.codes[0] } });
 	inbound("session-A", "task after cancel");
 	await until(() => a.state.sent.length === 1, "task routed after whoami was cancelled");
+	const receipts = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg");
+	assert.ok(receipts.every((frame) => !/whoami 已识别/.test(frame.body.stream?.content ?? "")));
 });

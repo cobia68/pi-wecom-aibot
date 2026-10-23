@@ -80,6 +80,10 @@ test("every server frame the extension consumes is validated before use", () => 
 	);
 	assert.equal(parseServerFrame({ type: "nonsense" }).ok, false);
 	assert.equal(parseServerFrame("pong").ok, false);
+	const target = { instanceId: "i", registrationId: "r", sessionId: "s" };
+	for (const action of ["screen", "cancel", "state"])
+		assert.equal(parseServerFrame({ type: "request", id: "1", request: { action, target } }).ok, true, action);
+	assert.equal(parseServerFrame({ type: "request", id: "1", request: { action: "prompt", target } }).ok, false);
 });
 
 test("every client frame the gateway consumes is validated before use", () => {
@@ -149,6 +153,8 @@ test("every client frame the gateway consumes is validated before use", () => {
 		}).ok,
 		false,
 	);
+	assert.equal(parseClientFrame({ type: "response", id: "1", response: { ok: true, busy: true } }).ok, true);
+	assert.equal(parseClientFrame({ type: "response", id: "1", response: { ok: true, busy: "yes" } }).ok, false);
 	assert.equal(parseClientFrame({ type: "nonsense" }).ok, false);
 });
 

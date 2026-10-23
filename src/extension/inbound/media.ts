@@ -1,11 +1,4 @@
-/**
- * Media helpers for the WeCom 智能机器人 长连接 API.
- *
- * In long-connection mode, image/file/video callbacks carry
- *   { url, aeskey }
- * where `url` is a short-lived (5 min) download link and the payload is encrypted with
- * that aeskey (see shared/media-crypto.ts).
- */
+/** WeCom media callbacks carry { url, aeskey }: a 5-minute download link to a payload encrypted with that key. */
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";

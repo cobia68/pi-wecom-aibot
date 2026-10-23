@@ -30,7 +30,10 @@ export class LoopbackClient implements BridgeClient {
 	private registered = false;
 	private state: WeComState = "disconnected";
 	private detail: string | undefined;
-	private readonly watches = new Map<string, (error?: Error, identity?: ChatIdentity) => void>();
+	private readonly watches = new Map<
+		string,
+		{ finish: (error?: Error, identity?: ChatIdentity) => void; onCode?: (code: string) => void }
+	>();
 
 	constructor(options: GatewayClientOptions, createWebSocket: (url: string) => WeComSocket) {
 		this.options = options;
@@ -74,7 +77,7 @@ export class LoopbackClient implements BridgeClient {
 			gateway.unregister(this.registration.instanceId, peer);
 			gateway.stop();
 		}
-		for (const finish of [...this.watches.values()]) finish(new Error(`连接已断开：${reason}`));
+		for (const watch of [...this.watches.values()]) watch.finish(new Error(`连接已断开：${reason}`));
 		this.setState("disconnected", reason);
 	}
 
@@ -108,7 +111,7 @@ export class LoopbackClient implements BridgeClient {
 		return this.gateway!.notify(this.registration.instanceId, chat, notification);
 	}
 
-	watchIdentity(timeoutMs: number, signal?: AbortSignal): Promise<ChatIdentity> {
+	watchIdentity(timeoutMs: number, signal?: AbortSignal, onCode?: (code: string) => void): Promise<ChatIdentity> {
 		if (!this.isReady()) return Promise.reject(new Error("共享网关或企微连接未就绪"));
 		const id = randomUUID();
 		return new Promise((resolve, reject) => {
@@ -126,7 +129,7 @@ export class LoopbackClient implements BridgeClient {
 				() => finish(Object.assign(new Error("whoami 超时"), { name: "TimeoutError" })),
 				timeoutMs,
 			);
-			this.watches.set(id, finish);
+			this.watches.set(id, { finish, onCode });
 			signal?.addEventListener("abort", onAbort, { once: true });
 			this.gateway!.watch(this.registration.instanceId, id, timeoutMs);
 		});
@@ -149,7 +152,10 @@ export class LoopbackClient implements BridgeClient {
 					this.options.onRequest?.(frame.id, frame.request);
 				return;
 			case "identity":
-				this.watches.get(frame.id)?.(undefined, frame.identity);
+				this.watches.get(frame.id)?.finish(undefined, frame.identity);
+				return;
+			case "watching":
+				this.watches.get(frame.id)?.onCode?.(frame.code);
 				return;
 			case "log":
 				this.options.log?.(frame.message);

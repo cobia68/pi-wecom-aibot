@@ -1,5 +1,7 @@
 /** /wecom-aibot command table, argument parsing, help text and completion: pure functions without pi state. */
 import { join } from "node:path";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { sentences } from "../shared/text.ts";
 import {
 	CONFIG_FILE,
 	chatIdProblem,
@@ -14,108 +16,122 @@ import {
 	SETTABLE,
 } from "./config.ts";
 
-export const WHOAMI_WAIT_SECONDS = 120;
+export const WHOAMI_WAIT_SECONDS = 300;
 
-/** An option takes one value: `--name value` or `--name=value`. */
+const SCOPES = ["global", "session"] as const;
+export type ConfigScope = (typeof SCOPES)[number];
+
 interface WeComOption {
 	name: string;
 	value: string;
 	description: string;
+	choices?: readonly (readonly [value: string, description: string])[];
+	/** The option written where it belongs, without its value: shown when it is given without a subcommand. */
+	example: string;
 }
 
 export interface WeComCommand {
 	name: string;
 	usage: string;
 	description: string;
-	/** Positional arguments: the object the command acts on. */
 	maxArgs: number;
-	/** Shown when there are too many positional arguments, e.g. to point at an option. */
 	argsHint?: string;
 	options: WeComOption[];
 	details: string[];
 }
 
-/** `config` has a grammar of its own (scope, action, 字段=值), parsed by parseConfigArgs. */
+/** `config` has a grammar of its own (action, --scope, 字段=值), parsed by parseConfigArgs. */
 const CONFIG_COMMAND: WeComCommand = {
 	name: "config",
-	usage: "config [global|session] <show|edit|set|unset> [字段=值 …]",
+	usage: "config <动作> [--scope <global|session>] [字段=值 …]",
 	description: "查看或修改配置：机器人凭据、默认推送目标、通知与截图设置",
 	maxArgs: 0,
-	options: [],
+	options: [
+		{
+			name: "scope",
+			value: "<global|session>",
+			description: "global 为全局配置，session 为当前 session 的覆盖；edit、set、unset 必填",
+			choices: [
+				["global", "全局配置"],
+				["session", "当前 session 的覆盖"],
+			],
+			example: "config show --scope",
+		},
+		{
+			name: "wait",
+			value: "<秒>",
+			description: `只用于 whoami：最多等待的秒数，10～600，默认 ${WHOAMI_WAIT_SECONDS}`,
+			example: "config whoami --wait",
+		},
+	],
 	details: [
-		"两层配置：global 是全局默认，session 是当前 pi 会话的显式覆盖；session 始终指当前会话，不需要填写 ID。优先级：内置默认值 < global < session。",
-		"写操作必须写明 session 或 global；不带动作的 config、config global、config session 列出子命令供选择，不执行任何动作。",
-		"set 写成 字段=值，可一次给多个：先全部校验再一次保存，有错误时一项都不写。unset 删除 session 覆盖，使其重新继承全局值或内置默认值。",
-		"botId 与 secret、defaultChatId 与 defaultChatType 各为一组，成组保存、成组删除。botId、secret 只能用 edit 输入（命令会留在输入历史中）；输入时屏幕上会显示 Secret，查看时只显示是否已配置。",
-		"保存配置不会断开或重连：通知方式、通知范围、截图主题在下次使用时生效；凭据、默认目标或白名单变化后显示「待重新接入」，运行 /wecom-aibot connect 才切换。配置不等于接入：每个 session 都需手动 /wecom-aibot connect。",
-		"fork／clone 出的会话首次启动时复制一次父会话的覆盖项，之后各自独立。",
-		"allowedUserIds（允许发任务的企微 userid 列表）不由 config 管理，请直接编辑全局配置文件。",
+		"两层配置：global 是全局默认，session 是当前 pi 会话的显式覆盖。优先级：内置默认值 < global < session",
+		"写操作必须写明 --scope global 或 --scope session，位置不限；不写作用域时只读：show 显示合并结果，whoami 只识别不保存",
+		"set 写成 字段=值，可一次给多个：先全部校验再一次保存，有错误时一项都不写",
+		"botId 与 secret、defaultChatId 与 defaultChatType 各为一组，成组保存、成组删除。botId、secret 只能用 edit 输入（命令会留在输入历史中）；输入时屏幕上会显示 Secret",
+		"whoami：在要识别的聊天里把 pi 显示的 6 位验证码发给机器人（群聊需 @机器人）。识别不受白名单限制；没有接入时临时连接，不出现在在线会话列表，也不接收任务",
+		"保存配置不会断开或重连：通知设置下次使用时生效，凭据、默认目标或白名单要运行 /wecom-aibot connect 才切换；每个 session 都需手动 /wecom-aibot connect",
+		"allowedUserIds（允许发任务的企微 userid 列表）不由 config 管理，请直接编辑全局配置文件",
 	],
 };
 
 const WECOM_COMMANDS: WeComCommand[] = [
 	{
 		name: "status",
-		usage: "[status]",
+		usage: "status",
 		description: "查看当前 pi 的接入状态、会话来源和配置路径",
 		maxArgs: 0,
 		options: [],
-		details: ["省略子命令时默认显示 status。"],
+		details: [],
 	},
 	CONFIG_COMMAND,
 	{
-		name: "whoami",
-		usage: "whoami [--wait <秒>]",
-		description: "等你给机器人发一条消息，识别 chatid / chat_type / userid",
-		maxArgs: 0,
-		argsHint: "等待时间用 --wait 给出，例如 /wecom-aibot whoami --wait 180。",
-		options: [{ name: "wait", value: "<秒>", description: `最多等待的秒数，10～600，默认 ${WHOAMI_WAIT_SECONDS}` }],
-		details: [
-			"运行后在企微给机器人发一条消息：单聊直接发，群聊需 @机器人。这条消息只用于识别，不会交给 pi 处理。",
-			"单聊的 chatid 就是你的 userid，chat_type 为 1；群聊为群 chatid，chat_type 为 2。",
-			"识别后经你确认，保存为全局默认推送目标 defaultChatId / defaultChatType；等待期间按 Esc 取消。",
-			"离线时只需先用 /wecom-aibot config global edit 保存 BotID/Secret；whoami 自动临时连接以识别，不出现在在线会话列表，也不接收任务，完成、取消或超时后关闭临时接入。",
-			"已接入时复用当前连接识别；保存不会断开当前接入，运行 /wecom-aibot connect 后改用新目标。",
-			"配置了 allowedUserIds 时只识别名单内的 userid。",
-		],
-	},
-	{
 		name: "connect",
 		usage: "connect",
-		description: "当前 session 手动接入企微；共享网关不存在时自动启动",
+		description: "当前 session 接入企微",
 		maxArgs: 0,
 		options: [],
 		details: [
-			"重新读取配置，仅连接当前 session，不修改配置；接入配置不变时保留当前任务和待发通知。通知方式等设置在使用时读取，不需要 connect。",
-			"BotID、Secret 和默认推送目标必须齐全；目标可通过 whoami 识别确认，也可用 /wecom-aibot config <session|global> set defaultChatId=<ID> 填写。",
-			"注册与企微订阅均成功后，按通知方式向默认目标发送一次可引用的会话入口通知；已在线重复 connect、网络自动重连不重复发送，通知失败不撤销连接。",
-			"每个 session 都需手动 /wecom-aibot connect，包括新建、恢复、分叉和重载；退出或切换会话时自动断开。",
-			"首次连接中不显示标签或静态注册提示，注册和订阅均可用后才显示绿色 wecom-aibot；超过 30 秒未就绪会提醒一次。",
-			"凭据、白名单或默认目标变化后，connect 经确认撤销旧注册及其待处理工作；没有交互界面且有待处理工作时拒绝切换。其他 pi 共用一个网关，不会各自再连一条企业微信长连接。",
+			"重新读取配置，仅连接当前 session，不修改配置；接入配置不变时保留当前任务和待发通知",
+			"BotID、Secret 和默认推送目标必须齐全；目标可用 /wecom-aibot config whoami --scope <global|session> 识别保存，也可用 /wecom-aibot config set --scope <global|session> defaultChatId=<ID> 填写",
+			"注册与企微订阅均成功后，按通知方式向默认目标发送一次可引用的会话入口通知；已在线重复 connect、网络自动重连不重复发送，通知失败不撤销连接",
+			"每个 session 都需手动 /wecom-aibot connect，包括新建、恢复、分叉和重载；退出或切换会话时自动断开",
+			"凭据、白名单或默认目标变化后，connect 经确认撤销旧注册及其待处理工作；没有交互界面且有待处理工作时拒绝切换",
 		],
 	},
 	{
 		name: "disconnect",
 		usage: "disconnect",
-		description: "仅注销当前 pi；最后一个 pi 注销后共享网关自动退出",
+		description: "当前 session 断开接入",
 		maxArgs: 0,
 		options: [],
 		details: [
-			"取消当前 pi 的转发队列和待发通知，已开始的本地任务继续运行。",
-			"不停止 pi 进程，不修改配置；其他 pi 继续接入，最后一个 pi 注销后共享网关约 1.5 秒后自动退出。",
-			"连接状态不会保存或继承；每个 session 都需手动 /wecom-aibot connect。",
+			"取消当前 pi 的转发队列和待发通知，已开始的本地任务继续运行",
+			"不修改配置；其他 pi 继续接入",
+			"连接状态不会保存或继承；每个 session 都需手动 /wecom-aibot connect",
 		],
 	},
 	{
 		name: "test",
 		usage: "test [chatid] [--chat-type <1|2>]",
-		description: "发送部署测试；省略目标时使用默认推送配置",
+		description: "发送一条部署测试通知",
 		maxArgs: 1,
-		argsHint: "聊天类型用 --chat-type 给出，例如 /wecom-aibot test your-group-chatid --chat-type 2。",
-		options: [{ name: "chat-type", value: "<1|2>", description: "1 单聊，2 群聊；需同时给出 chatid，省略时为 1" }],
+		argsHint: "聊天类型用 --chat-type 给出，例如 /wecom-aibot test your-group-chatid --chat-type 2",
+		options: [
+			{
+				name: "chat-type",
+				value: "<1|2>",
+				description: "1 单聊，2 群聊；需同时给出 chatid，省略时为 1",
+				choices: [
+					["1", "单聊"],
+					["2", "群聊"],
+				],
+				example: "test <chatid> --chat-type",
+			},
+		],
 		details: [
-			"chatid 是位置参数，直接写值；省略时发到当前接入的默认推送目标。",
-			"需要正式 connect；测试通知与其他通知一样跟随通知方式，screenshot 为当前终端截图。",
+			"省略 chatid 时发到当前接入的默认推送目标",
+			"需要正式 connect；测试通知与其他通知一样跟随通知方式，screenshot 为当前终端截图",
 		],
 	},
 	{ name: "log", usage: "log", description: "查看最近 20 条日志", maxArgs: 0, options: [], details: [] },
@@ -126,26 +142,25 @@ const WECOM_COMMANDS: WeComCommand[] = [
 		maxArgs: 0,
 		options: [],
 		details: [
-			"删除同一 pi 用户目录共用的全局配置文件：BotID、Secret、默认推送目标、通知设置和白名单一起删除，之后需要重新 /wecom-aibot config global edit。各 session 的覆盖文件保留。",
-			"需要交互确认，没有界面时不删除。只停止当前 pi 的接入；其他 pi 若已连接，仍会继续接收，直到它们各自 disconnect 或退出。",
+			"删除同一 pi 用户目录共用的全局配置文件：BotID、Secret、默认推送目标、通知设置和白名单一起删除。各 session 的覆盖文件保留",
+			"需要交互确认，没有界面时不删除。只停止当前 pi 的接入；其他 pi 若已连接，仍会继续接收，直到它们各自 disconnect 或退出",
 		],
 	},
 ];
 
-export type ConfigScope = "global" | "session";
+const MOVED: Record<string, string> = { whoami: "config whoami" };
 
 export type ConfigInvocation =
-	/** No action given: list the subcommands, all of them or one scope's. */
+	/** No action given: list the forms, all of them or one scope's. */
 	| { action: "choose"; scope?: ConfigScope }
 	| { action: "show"; scope?: ConfigScope }
 	| { action: "edit"; scope: ConfigScope }
 	| { action: "set"; scope: ConfigScope; set: Partial<ManagedFields> }
-	| { action: "unset"; scope: "session"; remove: FieldName[] };
+	| { action: "unset"; scope: ConfigScope; remove: FieldName[] }
+	/** Identify a chat by its one-time code; with a scope, save it as that layer's default target. */
+	| { action: "whoami"; scope?: ConfigScope; seconds: number };
 
-/**
- * The subcommands, in menu order: help, the chooser and its no-UI listing all read this table. One
- * that needs values (`args`) is not run from the menu but put in the editor to be completed.
- */
+/** The forms of config in menu order; one with `args` is put in the editor to be completed, not run. */
 export type ConfigSubcommand = { usage: string; description: string; scope?: ConfigScope } & (
 	| { run: ConfigInvocation }
 	| { args: string }
@@ -158,73 +173,93 @@ const CONFIG_SUBCOMMANDS: readonly ConfigSubcommand[] = [
 		run: { action: "show" },
 	},
 	{
-		usage: "global show",
+		usage: "show --scope global",
 		description: "查看全局显式保存的配置",
 		scope: "global",
 		run: { action: "show", scope: "global" },
 	},
 	{
-		usage: "global edit",
-		description: "交互编辑全局配置；还没有凭据时引导填写 BotID、Secret 和默认推送目标",
-		scope: "global",
-		run: { action: "edit", scope: "global" },
-	},
-	{
-		usage: "global set",
-		args: "字段=值 …",
-		description: "修改全局字段，未给出的字段保持不变",
-		scope: "global",
-	},
-	{
-		usage: "session show",
+		usage: "show --scope session",
 		description: "查看当前 session 显式保存的覆盖项",
 		scope: "session",
 		run: { action: "show", scope: "session" },
 	},
 	{
-		usage: "session edit",
+		usage: "edit --scope global",
+		description: "交互编辑全局配置；还没有凭据时引导填写 BotID、Secret 和默认推送目标",
+		scope: "global",
+		run: { action: "edit", scope: "global" },
+	},
+	{
+		usage: "edit --scope session",
 		description: "交互编辑当前 session 的覆盖项",
 		scope: "session",
 		run: { action: "edit", scope: "session" },
 	},
+	{ usage: "set --scope global", args: "字段=值 …", description: "修改全局字段", scope: "global" },
+	{ usage: "set --scope session", args: "字段=值 …", description: "修改当前 session 的覆盖项", scope: "session" },
 	{
-		usage: "session set",
-		args: "字段=值 …",
-		description: "修改当前 session 的覆盖项，未给出的字段保持不变",
+		usage: "unset --scope global",
+		args: "字段 …",
+		description: "删除全局字段，回到内置默认值",
+		scope: "global",
+	},
+	{
+		usage: "unset --scope session",
+		args: "字段 …",
+		description: "删除 session 覆盖，重新继承全局值或内置默认值",
 		scope: "session",
 	},
 	{
-		usage: "session unset",
-		args: "字段 …",
-		description: "删除 session 覆盖，重新继承全局值或内置默认值；关联组整组删除",
+		usage: "whoami",
+		description: "发验证码识别聊天，只显示 chatid、chat_type 和 userid",
+		run: { action: "whoami", seconds: WHOAMI_WAIT_SECONDS },
+	},
+	{
+		usage: "whoami --scope global",
+		description: "识别聊天，设为全局默认推送目标",
+		scope: "global",
+		run: { action: "whoami", scope: "global", seconds: WHOAMI_WAIT_SECONDS },
+	},
+	{
+		usage: "whoami --scope session",
+		description: "识别聊天，设为当前 session 的默认推送目标",
 		scope: "session",
+		run: { action: "whoami", scope: "session", seconds: WHOAMI_WAIT_SECONDS },
 	},
 ];
 
-/** All subcommands, or one scope's. */
+const CONFIG_ACTION_ROWS: [usage: string, description: string][] = [
+	["show [--scope <global|session>]", "查看配置；不写作用域时显示合并结果并标明来源"],
+	["edit --scope <global|session>", "交互编辑一层；还没有凭据时引导填写 BotID、Secret 和默认推送目标"],
+	["set --scope <global|session> 字段=值 …", "修改字段，未给出的字段保持不变"],
+	["unset --scope <global|session> 字段 …", "删除字段，重新继承下一层；关联组整组删除"],
+	["whoami [--scope <global|session>]", "发验证码识别聊天；写了作用域时确认后设为这一层的默认推送目标"],
+];
+const CONFIG_ACTIONS = ["show", "edit", "set", "unset", "whoami"];
+
 export function configSubcommands(scope?: ConfigScope): readonly ConfigSubcommand[] {
 	return CONFIG_SUBCOMMANDS.filter((item) => !scope || item.scope === scope);
 }
 
-/** How a subcommand is written after `config`, its values included. */
 export function subcommandUsage(item: ConfigSubcommand): string {
 	return "args" in item ? `${item.usage} ${item.args}` : item.usage;
 }
 
-/** The subcommands as aligned `usage  description` lines. */
 export function configSubcommandLines(scope?: ConfigScope): string[] {
 	return alignedRows(configSubcommands(scope).map((item) => [subcommandUsage(item), item.description]));
 }
 
 export type WeComInvocation =
 	| { kind: "help"; topic?: WeComCommand }
+	| { kind: "choose" }
 	| { kind: "run"; command: WeComCommand; args: string[]; options: Map<string, string> }
 	| { kind: "config"; config: ConfigInvocation }
 	| { kind: "error"; message: string };
 
-const HELP_OPTION: WeComOption = { name: "help", value: "", description: "显示帮助" };
+const HELP_OPTION: WeComOption = { name: "help", value: "", description: "显示帮助", example: "<子命令> --help" };
 
-/** Tokens split into positionals and --options; option names are checked against every command, values validated later. */
+/** Option names are checked against every command; values are validated later. */
 function scanWecomArgs(input: string): {
 	positional: string[];
 	options: Map<string, string>;
@@ -249,7 +284,7 @@ function scanWecomArgs(input: string): {
 			optionsEnded = true;
 			continue;
 		}
-		if (token === "--help" || token === "-h") {
+		if (token === "--help") {
 			help = true;
 			continue;
 		}
@@ -264,10 +299,10 @@ function scanWecomArgs(input: string): {
 					options,
 					unknown,
 					help,
-					error: `--${name} 缺少值；写成 --${name} <值>，值以 - 开头时写成 --${name}=<值>。`,
+					error: `--${name} 缺少值；写成 --${name} <值>，值以 - 开头时写成 --${name}=<值>`,
 				};
 			}
-			if (options.has(name)) return { positional, options, unknown, help, error: `--${name} 重复给出。` };
+			if (options.has(name)) return { positional, options, unknown, help, error: `--${name} 重复给出` };
 			options.set(name, value);
 			continue;
 		}
@@ -280,6 +315,8 @@ function scanWecomArgs(input: string): {
 	return { positional, options, unknown, help };
 }
 
+type Scan = ReturnType<typeof scanWecomArgs>;
+
 function commandNamed(name: string | undefined): WeComCommand | undefined {
 	return name === undefined ? undefined : WECOM_COMMANDS.find((command) => command.name === name.toLowerCase());
 }
@@ -287,150 +324,220 @@ function commandNamed(name: string | undefined): WeComCommand | undefined {
 export function parseWecomInvocation(input: string): WeComInvocation {
 	const scan = scanWecomArgs(input);
 	if (scan.error) return { kind: "error", message: scan.error };
-	const command = commandNamed(scan.positional[0] ?? "status");
-	// An action written as an option: `--connect`.
 	for (const token of scan.unknown) {
 		const action = commandNamed(token.replace(/^--?/, ""));
 		if (action)
 			return {
 				kind: "error",
-				message: `${action.name} 是子命令，不带 --；请使用 /wecom-aibot ${action.name}。查看用法用 /wecom-aibot ${action.name} --help。`,
+				message: sentences(
+					`${action.name} 是子命令，不带 --；请使用 /wecom-aibot ${action.name}`,
+					`查看用法用 /wecom-aibot ${action.name} --help`,
+				),
 			};
 	}
-	if (!command) return { kind: "error", message: "未知子命令，请使用 /wecom-aibot --help 查看用法。" };
-	if (command === CONFIG_COMMAND && (scan.unknown.length || scan.options.size)) {
-		const given = scan.unknown[0] ?? `--${[...scan.options.keys()][0]}`;
+	if (scan.positional[0] === undefined) return bareInvocation(scan);
+	const command = commandNamed(scan.positional[0]);
+	if (!command) {
+		const moved = MOVED[scan.positional[0].toLowerCase()];
 		return {
 			kind: "error",
-			message: `config 的参数写成 字段=值，不用 --选项（${given}）。查看帮助：/wecom-aibot config --help。`,
+			message: moved
+				? `${scan.positional[0]} 已移到 config 下：/wecom-aibot ${moved}`
+				: "未知子命令，请使用 /wecom-aibot --help 查看用法",
 		};
+	}
+	if (command === CONFIG_COMMAND) {
+		const misplaced = [
+			...scan.unknown,
+			...[...scan.options.keys()]
+				.filter((name) => !command.options.some((option) => option.name === name))
+				.map((name) => `--${name}`),
+		][0];
+		if (misplaced) return { kind: "error", message: configOptionProblem(misplaced) };
+		if (scan.help) return { kind: "help", topic: command };
+		return parseConfigArgs(scan.positional.slice(1), scan.options);
 	}
 	if (scan.unknown.length) {
-		const positional = command.maxArgs ? "位置参数以 - 开头时，先用单独的 -- 分隔。" : "";
+		const positional = command.maxArgs ? "位置参数以 - 开头时，先用单独的 -- 分隔" : "";
 		return {
 			kind: "error",
-			message: `未知选项 ${scan.unknown[0]}。${supportedOptions(command)}子命令（如 connect）不带 --。${positional}`,
+			message: sentences(
+				`未知选项 ${scan.unknown[0]}`,
+				supportedOptions(command),
+				"子命令（如 connect）不带 --",
+				positional,
+			),
 		};
 	}
-	if (scan.help) return { kind: "help", topic: scan.positional.length ? command : undefined };
+	if (scan.help) return { kind: "help", topic: command };
 	const args = scan.positional.slice(1);
-	if (command === CONFIG_COMMAND) return parseConfigArgs(args);
 	for (const option of scan.options.keys()) {
 		if (!command.options.some((item) => item.name === option))
-			return { kind: "error", message: `${command.name} 不支持 --${option}。${supportedOptions(command)}` };
+			return { kind: "error", message: sentences(`${command.name} 不支持 --${option}`, supportedOptions(command)) };
 	}
 	if (args.length > command.maxArgs) {
 		const action = command.maxArgs ? undefined : commandNamed(args[0]);
 		const hint = action
-			? `${command.name} 后面不能再接其他动作，${action.name} 请单独运行。`
-			: (command.argsHint ?? `用法：/wecom-aibot ${command.usage}。`);
-		return { kind: "error", message: `参数过多。${hint}查看帮助：/wecom-aibot ${command.name} --help。` };
+			? `${command.name} 后面不能再接其他动作，${action.name} 请单独运行`
+			: (command.argsHint ?? `用法：/wecom-aibot ${command.usage}`);
+		return { kind: "error", message: sentences("参数过多", hint, `查看帮助：/wecom-aibot ${command.name} --help`) };
 	}
 	const invalid = invalidOptionValues(command, args, scan.options);
-	if (invalid) return { kind: "error", message: `${invalid}查看帮助：/wecom-aibot ${command.name} --help。` };
+	if (invalid) return { kind: "error", message: sentences(invalid, `查看帮助：/wecom-aibot ${command.name} --help`) };
 	return { kind: "run", command, args, options: scan.options };
 }
 
-const CONFIG_ACTIONS = ["show", "edit", "set", "unset"];
+/** A bare invocation never stands for status. */
+function bareInvocation(scan: Scan): WeComInvocation {
+	if (scan.unknown.length)
+		return {
+			kind: "error",
+			message: sentences(`未知选项 ${scan.unknown[0]}`, "查看用法：/wecom-aibot --help；选项写在子命令后面"),
+		};
+	if (scan.help) return { kind: "help" };
+	const [name, value] = [...scan.options][0] ?? [];
+	if (name === undefined) return { kind: "choose" };
+	const option = WECOM_COMMANDS.flatMap((command) => command.options).find((item) => item.name === name);
+	return {
+		kind: "error",
+		message: sentences(
+			`--${name} 要写在子命令后面${option ? `，例如 /wecom-aibot ${option.example} ${value}` : ""}`,
+			"查看用法：/wecom-aibot --help",
+		),
+	};
+}
 
-/** `[global|session] [show|edit|set|unset] [字段=值 …]`: only showing may omit the scope; no action lists the choices. */
-function parseConfigArgs(args: string[]): WeComInvocation {
+function configOptionProblem(token: string): string {
+	const name = token.replace(/^--?/, "").split("=")[0];
+	const lower = name.toLowerCase();
+	if (isScope(lower)) return `未知选项 ${token}。作用域写成 --scope ${lower}`;
+	if (CONFIG_ACTIONS.includes(lower)) return `${lower} 是动作，不带 --：/wecom-aibot config ${lower}`;
+	const field = fieldNamed(name);
+	if (field) return `字段写成 ${field.name}=…，不用 --`;
+	return sentences(`未知选项 ${token}`, `${supportedOptions(CONFIG_COMMAND)}；字段写成 字段=值`);
+}
+
+function isScope(word: string | undefined): word is ConfigScope {
+	return SCOPES.includes(word as ConfigScope);
+}
+
+function parseConfigArgs(args: string[], options: Map<string, string>): WeComInvocation {
 	const error = (message: string): WeComInvocation => ({
 		kind: "error",
-		message: `${message}查看帮助：/wecom-aibot config --help。`,
+		message: sentences(message, "查看帮助：/wecom-aibot config --help"),
 	});
 	const rejected = (problems: string[]) =>
-		error(`${problems.map((problem) => problem.replace(/。$/, "")).join("；")}。未做任何修改。`);
-	const [scope, action] = args.map((arg) => arg.toLowerCase());
-	if (scope === undefined) return { kind: "config", config: { action: "choose" } };
-	if (scope === "show")
-		return args.length > 1 ? error("config show 不接受参数。") : { kind: "config", config: { action: "show" } };
-	if (scope !== "global" && scope !== "session")
-		return error(
-			CONFIG_ACTIONS.includes(scope)
-				? `${scope} 需要写明作用域，例如 /wecom-aibot config session ${scope}。`
-				: `未知作用域 ${args[0]}；可用 global、session，或只读的 show。`,
-		);
-	const values = args.slice(2);
+		error(sentences(problems.map((problem) => problem.replace(/。$/, "")).join("；"), "未做任何修改"));
+	const words = args.map((arg) => arg.toLowerCase());
+	const given = options.get("scope")?.toLowerCase();
+	if (given !== undefined && !isScope(given)) return error("--scope 只能是 global 或 session");
+	const scope = given as ConfigScope | undefined;
+	// The earlier spelling with the scope as a word, `config global set …` or `config set global …`: say the new one.
+	if (scope === undefined) {
+		const at = isScope(words[0]) ? 0 : isScope(words[1]) ? 1 : -1;
+		if (at >= 0) {
+			const rest = args.filter((_, index) => index !== at);
+			const head = rest[0]?.toLowerCase() ?? "";
+			const spelled = !rest.length
+				? ["--scope", words[at]]
+				: CONFIG_ACTIONS.includes(head)
+					? [head, "--scope", words[at], ...rest.slice(1)]
+					: ["<动作>", "--scope", words[at]];
+			return error(`作用域改为 --scope：/wecom-aibot config ${spelled.join(" ")}`);
+		}
+	}
+	const [action] = words;
+	const values = args.slice(1);
+	const wait = options.get("wait");
+	if (wait !== undefined && action !== "whoami")
+		return error("--wait 只用于 whoami，例如 /wecom-aibot config whoami --wait 300");
+	// Only a given scope is part of the result: reading without one is a different request, not an empty scope.
+	const scoped = scope ? { scope } : {};
+	if (action === undefined) return { kind: "config", config: { action: "choose", ...scoped } };
+	if (!CONFIG_ACTIONS.includes(action)) return error(`未知动作 ${args[0]}；可用 show、edit、set、unset、whoami`);
+	const needsScope = (example: string) =>
+		error(`${action} 需要 --scope：/wecom-aibot config ${action} --scope session${example}，或 --scope global`);
 	switch (action) {
-		case undefined:
-			return { kind: "config", config: { action: "choose", scope } };
 		case "show":
+			return values.length ? error("config show 不接受参数") : { kind: "config", config: { action, ...scoped } };
 		case "edit":
-			return values.length
-				? error(`config ${scope} ${action} 不接受参数。`)
-				: { kind: "config", config: { action, scope } };
+			if (values.length) return error("config edit 不接受参数");
+			return scope ? { kind: "config", config: { action, scope } } : needsScope("");
 		case "set": {
+			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " screenshotTheme=light");
 			if (!values.length)
-				return error(`set 需要至少一个 字段=值，例如 /wecom-aibot config ${scope} set screenshotTheme=light。`);
+				return error(
+					`set 需要至少一个 字段=值，例如 /wecom-aibot config set --scope ${scope} screenshotTheme=light`,
+				);
 			const parsed = parseAssignments(values);
 			return "problems" in parsed
 				? rejected(parsed.problems)
 				: { kind: "config", config: { action, scope, set: parsed.set } };
 		}
 		case "unset": {
-			if (scope === "global") return error(`config global unset 暂不支持；全局字段请直接编辑 ${CONFIG_FILE}。`);
-			if (!values.length) return error("unset 需要字段名，例如 /wecom-aibot config session unset screenshotTheme。");
+			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " screenshotTheme");
+			if (!values.length)
+				return error(`unset 需要字段名，例如 /wecom-aibot config unset --scope ${scope} screenshotTheme`);
 			const parsed = parseRemovals(values);
 			return "problems" in parsed
 				? rejected(parsed.problems)
 				: { kind: "config", config: { action, scope, remove: parsed.remove } };
 		}
-		default:
-			return error(`未知动作 ${args[1]}；可用 show、edit、set${scope === "session" ? "、unset" : ""}。`);
+		default: {
+			if (values.length) return error("config whoami 不接受参数");
+			if (wait !== undefined && (!/^\d+$/.test(wait) || Number(wait) < 10 || Number(wait) > 600))
+				return error("--wait 须为 10～600 的整数秒，例如 --wait 300");
+			return {
+				kind: "config",
+				config: { action: "whoami", ...scoped, seconds: wait === undefined ? WHOAMI_WAIT_SECONDS : Number(wait) },
+			};
+		}
 	}
 }
 
 function supportedOptions(command: WeComCommand): string {
 	const names = command.options.map((option) => `--${option.name}`);
 	const usage = `/wecom-aibot ${command.name}`;
-	// A bare action has no options to list, so point at its usage instead of offering `--help`.
 	return names.length
-		? `${usage} 支持的选项：${[...names, "--help"].join("、")}。`
-		: `${usage} 不接受选项，用法：${usage}。`;
+		? `${usage} 支持的选项：${[...names, "--help"].join("、")}`
+		: `${usage} 不接受选项，用法：${usage}`;
 }
 
 /** Value checks, so a command never starts with a value it would reject halfway. */
 function invalidOptionValues(command: WeComCommand, args: string[], options: Map<string, string>): string | undefined {
 	const chatType = options.get("chat-type");
 	if (chatType !== undefined && chatType !== "1" && chatType !== "2")
-		return "--chat-type 只能是 1（单聊）或 2（群聊）。";
-	const wait = options.get("wait");
-	if (wait !== undefined && (!/^\d+$/.test(wait) || Number(wait) < 10 || Number(wait) > 600))
-		return "--wait 须为 10～600 的整数秒，例如 --wait 180。";
+		return "--chat-type 只能是 1（单聊）或 2（群聊）";
 	const chatId = command.name === "test" ? args[0] : undefined;
 	const problem = chatId === undefined ? undefined : chatIdProblem(chatId);
 	if (problem) return problem;
 	if (chatType !== undefined && chatId === undefined)
-		return `--chat-type 需要和 chatid 一起使用，例如 /wecom-aibot ${command.name} your-group-chatid --chat-type 2。`;
+		return `--chat-type 需要和 chatid 一起使用，例如 /wecom-aibot ${command.name} your-group-chatid --chat-type 2`;
 	return undefined;
 }
 
-/** Terminal display width: CJK, fullwidth forms and CJK punctuation take two columns. */
-function displayWidth(text: string): number {
-	return [...text].reduce((sum, char) => sum + (/[\u2e80-\uffef]/.test(char) ? 2 : 1), 0);
-}
-
-/**
- * `key  value` rows aligned by display width and indented two spaces. A value may contain newlines;
- * continuation lines are indented to the value column, so a wrapped explanation keeps its shape.
- */
 function alignedRows(rows: [string, string][]): string[] {
-	const width = Math.max(0, ...rows.map(([key]) => displayWidth(key)));
+	const width = Math.max(0, ...rows.map(([key]) => visibleWidth(key)));
 	const gap = " ".repeat(width + 2);
 	return rows.flatMap(([key, value]) => {
 		const [first, ...rest] = value.split("\n");
-		const head = first ? `  ${key}${" ".repeat(width - displayWidth(key))}  ${first}` : `  ${key}`;
+		const head = first ? `  ${key}${" ".repeat(width - visibleWidth(key))}  ${first}` : `  ${key}`;
 		return [head, ...rest.map((line) => `  ${gap}${line}`)];
 	});
 }
 
-/** A blank line, the section title, then the body: sections are separated by exactly one blank line. */
+/** Width is taken over the whole list, so filtering it keeps the column still. */
+export function columns(rows: readonly (readonly [name: string, description: string])[]): string[] {
+	const width = Math.max(0, ...rows.map(([name]) => visibleWidth(name)));
+	return rows.map(([name, description]) =>
+		description ? `${name}${" ".repeat(width - visibleWidth(name))}  ${description}` : name,
+	);
+}
+
 function section(title: string, body: string[]): string[] {
 	return ["", title, ...body];
 }
 
-/** A command worth asking for help about: it has options of its own, or it takes arguments. */
 function hasOptionsOrArgs(command: WeComCommand): boolean {
 	return command.options.length > 0 || command.maxArgs > 0 || command === CONFIG_COMMAND;
 }
@@ -442,95 +549,67 @@ function configPaths(): string[] {
 	]);
 }
 
-/** The shared help layout: a title line, `用法：…`, then titled sections with aligned rows. */
 export function wecomHelpText(topic?: WeComCommand): string {
 	if (topic === CONFIG_COMMAND) return configHelpText();
-	const optionRows: [string, string][] = (topic?.options ?? []).map((option) => [
+	return topic ? topicHelpText(topic) : totalHelpText();
+}
+
+function totalHelpText(): string {
+	return [
+		"企业微信智能机器人 — /wecom-aibot 命令帮助",
+		"用法：/wecom-aibot [子命令] [参数] [--选项 值]",
+		...section("子命令", [
+			...alignedRows(WECOM_COMMANDS.map((command) => [command.name, command.description])),
+			"",
+			"  不带子命令时弹出子命令菜单",
+			"  子命令的用法与选项：/wecom-aibot <子命令> --help（只显示帮助，不执行动作）",
+			"  企微侧另有 sessions、send、screen、cancel，在企微中发 /wecom-aibot --help 查看",
+		]),
+		...section("配置", [...configPaths(), "  字段、作用域与示例：/wecom-aibot config --help"]),
+		...section("生命周期", [
+			"  connect、disconnect 只控制当前 session，不修改配置",
+			"  config 只保存配置，不正式接入也不断开；whoami 识别时会临时连接",
+			"  每个 session 都需手动 /wecom-aibot connect",
+			"  退出、切换、新建、恢复、分叉或重载会话时自动断开，连接状态不继承",
+		]),
+	].join("\n");
+}
+
+function optionRows(command: WeComCommand): string[] {
+	const rows: [string, string][] = command.options.map((option) => [
 		`--${option.name} ${option.value}`.trim(),
 		option.description,
 	]);
-	// A bare action such as `connect` has nothing to list, so it gets no option table and no `--help`.
-	const showOptions = !topic || hasOptionsOrArgs(topic);
-	if (showOptions) {
-		optionRows.push(["-h, --help", "显示当前命令的帮助，不执行动作"]);
-		// `--` only matters for commands that take positional arguments.
-		if (!topic || topic.maxArgs) optionRows.push(["--", "结束选项解析，后面的值都作为位置参数"]);
-	}
+	rows.push(["--help", "显示当前命令的帮助，不执行动作"]);
+	if (command.maxArgs) rows.push(["--", "结束选项解析，后面的值都作为位置参数"]);
+	return alignedRows(rows);
+}
 
-	const lines = topic
-		? [`${topic.name} — ${topic.description}`, `用法：/wecom-aibot ${topic.usage}`]
-		: ["企业微信智能机器人 — /wecom-aibot 命令帮助", "用法：/wecom-aibot [子命令] [位置参数] [--选项 值]"];
-
-	if (topic) {
-		if (topic.details.length)
-			lines.push(
-				...section(
-					"说明",
-					topic.details.map((detail) => `  ${detail}`),
-				),
-			);
-		if (showOptions) lines.push(...section("选项", alignedRows(optionRows)));
-	} else {
+function topicHelpText(topic: WeComCommand): string {
+	const lines = [`${topic.name} — ${topic.description}`, `用法：/wecom-aibot ${topic.usage}`];
+	if (topic.details.length)
 		lines.push(
-			...section("说明", [
-				"  子命令是动作，不带 --（如 connect）；位置参数是命令作用的对象，直接写值。",
-				"  可选设置写成 --选项 值 或 --选项=值；config 的参数写成 字段=值，例如 /wecom-aibot config session set screenshotTheme=light。",
-				"  企业微信聊天里另有 sessions / send / screen / cancel 四个子命令（用完整 session ID 指定目标），它们只在企微中解析，pi 里没有。",
-			]),
-			...section("子命令", [
-				...alignedRows(WECOM_COMMANDS.map((command) => [command.name, command.description])),
-				"",
-				"  子命令的用法与选项：/wecom-aibot <子命令> --help，例如 /wecom-aibot config --help。",
-			]),
-			...section("通用选项", alignedRows(optionRows)),
+			...section(
+				"说明",
+				topic.details.map((detail) => `  ${detail}`),
+			),
 		);
-	}
-
-	// The target rules belong to the commands that take a target; the total help keeps only the essentials.
-	if (!topic || topic.name === "test") {
-		const target: string[] = [
-			...alignedRows([
-				["chatid", "单聊填企微 userid，群聊填群 chatid；与 pi 的 session ID 是不同的标识。"],
-				["chat_type", "1 = 单聊，2 = 群聊；用 --chat-type 指定，显式给出 chatid 时默认单聊。"],
-				[
-					"默认目标",
-					"/wecom-aibot test 省略目标时使用 defaultChatId / defaultChatType；wecom_send 在企微任务中优先发回来源聊天，本地任务才用默认目标。",
-				],
-			]),
-			topic
-				? "  不清楚 chatid：运行 /wecom-aibot whoami，再在企微给机器人发一条消息"
-				: "  识别目标：运行 /wecom-aibot whoami，再给机器人发一条消息；也可以用 /wecom-aibot config <session|global> set defaultChatId=<ID> 直接填写。",
-		];
-		if (topic)
-			target.push(
-				"  （群聊需 @机器人），即可识别 chatid、chat_type 和 userid，确认后保存为默认推送目标。",
+	if (hasOptionsOrArgs(topic)) lines.push(...section("选项", optionRows(topic)));
+	if (topic.name === "test")
+		lines.push(
+			...section("推送目标", [
+				...alignedRows([["chatid", "单聊填企微 userid，群聊填群 chatid；与 pi 的 session ID 是不同的标识"]]),
+				"  不清楚 chatid：运行 /wecom-aibot config whoami，再把显示的验证码发给机器人（群聊需 @机器人）",
 				"  示例",
 				"    /wecom-aibot test your-userid",
 				"    /wecom-aibot test your-group-chatid --chat-type 2",
-			);
-		lines.push(...section("推送目标", target));
-	}
-
-	// Every help ends with the config paths; the field reference lives in `config --help` and the README.
-	const pointer = topic
-		? "全部命令与配置说明：/wecom-aibot --help。"
-		: "字段、作用域与示例：/wecom-aibot config --help。";
-	lines.push(...section("配置", [...configPaths(), `  ${pointer}`]));
-
-	if (!topic)
-		lines.push(
-			...section("生命周期", [
-				"  connect / disconnect 只控制当前 session，不修改配置；每个 session 都需手动 /wecom-aibot connect。",
-				"  退出、切换、新建、恢复、分叉或重载会话时自动断开，连接状态不会继承。",
-				"  config 只保存配置，不连接也不断开；whoami 必要时临时识别。默认目标齐全后，每个 session 都需手动 /wecom-aibot connect 正式接入。",
-				"  共享网关由第一个正式或临时接入的 pi 自动启动，最后一个 pi 注销后约 1.5 秒自动退出。",
-				"  在企微聊天中发送 /wecom-aibot sessions 查看会话；引用通知回复，或用 send --sessionid <完整 session ID> --prompt <正文> 指定目标。",
 			]),
 		);
+	// Only the help of the command that deletes the file names it; /wecom-aibot status shows the paths too.
+	if (topic.name === "reset") lines.push(...section("配置", configPaths()));
 	return lines.join("\n");
 }
 
-/** config takes actions and fields rather than options, so its help lists those instead. */
 function configHelpText(): string {
 	const command = CONFIG_COMMAND;
 	return [
@@ -540,17 +619,17 @@ function configHelpText(): string {
 			"说明",
 			command.details.map((detail) => `  ${detail}`),
 		),
-		...section("动作", configSubcommandLines()),
+		...section("动作", alignedRows(CONFIG_ACTION_ROWS)),
 		...section("字段", alignedRows(FIELDS.map((spec) => [spec.name, fieldText(spec)]))),
-		...section("选项", alignedRows([["-h, --help", "显示当前命令的帮助，不执行动作"]])),
+		...section("选项", optionRows(command)),
 		...section("示例", [
-			"  /wecom-aibot config global edit",
-			"  /wecom-aibot config session set screenshotTheme=light",
-			"  /wecom-aibot config global set notificationMode=screenshot notificationScope=all-runs",
-			"  /wecom-aibot config session set defaultChatId=<群 chatid> defaultChatType=2",
-			"  /wecom-aibot config session unset defaultChatId",
+			"  /wecom-aibot config edit --scope global",
+			"  /wecom-aibot config set --scope session screenshotTheme=light",
+			"  /wecom-aibot config set --scope global notificationMode=screenshot notificationScope=all-runs",
+			"  /wecom-aibot config unset --scope session defaultChatId",
+			"  /wecom-aibot config whoami --scope global",
 		]),
-		...section("配置", [...configPaths(), "  全部命令与配置说明：/wecom-aibot --help。"]),
+		...section("配置", configPaths()),
 	].join("\n");
 }
 
@@ -558,14 +637,20 @@ function fieldText(spec: FieldSpec): string {
 	const choices = (spec.choices ?? []).map(
 		(choice) => `${choice.value}：${choice.description}${choice.value === spec.default ? "（默认）" : ""}`,
 	);
-	return [`${spec.label}：${spec.description}`, ...choices].join("\n");
+	const label = spec.label.toLowerCase() === spec.name.toLowerCase() ? "" : `${spec.label}：`;
+	return [`${label}${spec.description}`, ...choices].join("\n");
+}
+
+interface Candidate {
+	value: string;
+	name?: string;
+	description: string;
 }
 
 /**
- * Completions for the text after "/wecom-aibot "; the returned value replaces all of it.
- * A token that is already complete gets no list, so Enter runs the command instead of applying a completion.
+ * Each returned value replaces all text after "/wecom-aibot ". Options are offered only after `-`, and a
+ * complete token gets no list, so Enter runs the command instead of applying a completion.
  */
-/** `themes`: pi's theme names, read only when screenshotTheme is being completed. */
 export function completeWecom(
 	prefix: string,
 	themes: () => readonly string[],
@@ -573,69 +658,86 @@ export function completeWecom(
 	const tokens = prefix.trimStart().split(/\s+/);
 	const current = (tokens.pop() ?? "").toLowerCase();
 	const head = tokens.length ? `${tokens.join(" ")} ` : "";
-	const offer = (items: { value: string; label: string }[]) =>
-		items.length && !items.some((item) => item.value.trim().toLowerCase() === current)
-			? items.map((item) => ({ ...item, value: head + item.value }))
+	const offer = (all: readonly Candidate[]) => {
+		const labels = columns(all.map((item) => [item.name ?? item.value, item.description] as const));
+		const shown = all.flatMap((item, index) =>
+			item.value.toLowerCase().startsWith(current) ? [{ value: item.value, label: labels[index] }] : [],
+		);
+		return shown.length && !shown.some((item) => item.value.trim().toLowerCase() === current)
+			? shown.map((item) => ({ ...item, value: head + item.value }))
 			: null;
-	const describe = (command: WeComCommand) => ({
-		value: command.name,
-		label: `${command.name} — ${command.description}`,
-	});
-	if (!tokens.length) {
-		const candidates = [
-			...WECOM_COMMANDS.map(describe),
-			{ value: "--help", label: "--help — 显示帮助" },
-			{ value: "-h", label: "-h — 显示帮助" },
-		];
-		return offer(candidates.filter((item) => item.value.startsWith(current)));
-	}
+	};
+	if (!tokens.length) return offer(topLevel());
 	const command = commandNamed(tokens[0]);
 	if (!command) return null;
+	const words = positionals(command, tokens.slice(1));
+	const previous = tokens.at(-1)?.toLowerCase();
+	const pending = command.options.find((option) => previous === `--${option.name}`);
+	if (pending)
+		return pending.choices ? offer(pending.choices.map(([value, description]) => ({ value, description }))) : null;
 	if (!current.startsWith("-"))
-		return command === CONFIG_COMMAND ? offer(configCompletions(tokens.slice(1), current, themes)) : null;
+		return command === CONFIG_COMMAND ? offer(configCandidates(words, current, themes)) : null;
 	const used = new Set(
 		tokens.filter((token) => token.startsWith("--")).map((token) => token.slice(2).split("=")[0].toLowerCase()),
 	);
-	const candidates = [...command.options, ...(hasOptionsOrArgs(command) ? [HELP_OPTION] : [])].filter(
+	const options = [...applicableOptions(command, words), ...(hasOptionsOrArgs(command) ? [HELP_OPTION] : [])].filter(
 		(option) => !used.has(option.name),
 	);
 	return offer(
-		candidates
-			.filter((option) => `--${option.name}`.startsWith(current))
-			.map((option) => ({
-				value: option.value ? `--${option.name} ` : `--${option.name}`,
-				label: `--${option.name}${option.value ? ` ${option.value}` : ""} — ${option.description}`,
-			})),
+		options.map((option) => ({
+			value: option.value ? `--${option.name} ` : `--${option.name}`,
+			name: `--${option.name}${option.value ? ` ${option.value}` : ""}`,
+			description: option.description,
+		})),
 	);
 }
 
-/** The words after `config`: scope, action, then fields and values; matching ignores case. */
-function configCompletions(
-	words: string[],
-	current: string,
-	themes: () => readonly string[],
-): { value: string; label: string }[] {
-	const [scope, action, ...rest] = words.map((word) => word.toLowerCase());
-	const starting = (items: [string, string][]) =>
-		items
-			.filter(([value]) => value.toLowerCase().startsWith(current))
-			.map(([value, label]) => ({ value, label: `${value} — ${label}` }));
-	if (scope === undefined)
-		return starting([
-			["show", "查看当前 session 合并后的配置"],
-			["global", "全局默认"],
-			["session", "当前 session 的覆盖"],
-		]);
-	if (scope !== "global" && scope !== "session") return [];
-	if (action === undefined) {
-		const actions: [string, string][] = [
-			["show", "查看这一层"],
-			["edit", "交互编辑"],
-			["set", "修改字段：字段=值"],
-		];
-		if (scope === "session") actions.push(["unset", "删除覆盖，重新继承"]);
-		return starting(actions);
+function applicableOptions(command: WeComCommand, words: string[]): WeComOption[] {
+	if (command !== CONFIG_COMMAND) return command.options;
+	const action = words[0]?.toLowerCase();
+	if (!action || !CONFIG_ACTIONS.includes(action)) return [];
+	return command.options.filter((option) => option.name !== "wait" || action === "whoami");
+}
+
+function positionals(command: WeComCommand, tokens: string[]): string[] {
+	const words: string[] = [];
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (token.startsWith("-")) {
+			const takesValue = command.options.some((option) => token.toLowerCase() === `--${option.name}`);
+			if (takesValue) i++;
+			continue;
+		}
+		words.push(token);
 	}
+	return words;
+}
+
+function topLevel(): Candidate[] {
+	return [
+		...WECOM_COMMANDS.map((command) => ({ value: command.name, description: command.description })),
+		{ value: "--help", description: HELP_OPTION.description },
+	];
+}
+
+export function wecomMenu(): { label: string; input: string }[] {
+	const items = topLevel();
+	const labels = columns(items.map((item) => [item.value, item.description] as const));
+	return items.map((item, index) => ({ label: labels[index], input: item.value }));
+}
+
+function configCandidates(words: string[], current: string, themes: () => readonly string[]): Candidate[] {
+	const [action, ...rest] = words.map((word) => word.toLowerCase());
+	const candidates = (items: [value: string, description: string][]): Candidate[] =>
+		items.map(([value, description]) => ({ value, description }));
+	if (action === undefined)
+		return candidates([
+			["show", "查看配置"],
+			["edit", "交互编辑一层"],
+			["set", "修改字段：字段=值"],
+			["unset", "删除字段，重新继承"],
+			["whoami", "发验证码识别聊天"],
+		]);
 	const used = new Set(rest.map((word) => word.split("=")[0]));
 	if (action === "set") {
 		const equals = current.indexOf("=");
@@ -643,20 +745,24 @@ function configCompletions(
 		if (spec) {
 			const values: [string, string][] =
 				spec.name === "screenshotTheme"
-					? themes().map((name) => [name, "pi 主题"])
-					: (spec.choices ?? []).map((choice) => [String(choice.value), choice.description]);
-			return starting(values.map(([value, label]) => [`${spec.name}=${value}`, label]));
+					? themes().map((name): [string, string] => [name, "pi 主题"])
+					: (spec.choices ?? []).map((choice): [string, string] => [String(choice.value), choice.description]);
+			return candidates(
+				values.map(([value, description]): [string, string] => [`${spec.name}=${value}`, description]),
+			);
 		}
-		return starting(
-			FIELDS.filter((item) => SETTABLE.includes(item.name) && !used.has(item.name.toLowerCase())).map((item) => [
-				`${item.name}=`,
-				item.label,
-			]),
+		return candidates(
+			FIELDS.filter((item) => SETTABLE.includes(item.name) && !used.has(item.name.toLowerCase())).map(
+				(item): [string, string] => [`${item.name}=`, item.label],
+			),
 		);
 	}
-	if (action === "unset" && scope === "session")
-		return starting(
-			FIELDS.filter((item) => !used.has(item.name.toLowerCase())).map((item) => [item.name, item.label]),
+	if (action === "unset")
+		return candidates(
+			FIELDS.filter((item) => !used.has(item.name.toLowerCase())).map((item): [string, string] => [
+				item.name,
+				item.label,
+			]),
 		);
 	return [];
 }

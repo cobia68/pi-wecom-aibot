@@ -2,9 +2,7 @@
  * The source marker inside every PNG the gateway sends. WeCom's quote of an image carries only a
  * short-lived download link, never the message it quotes; if that link serves our own bytes, the marker
  * names the session without OCR and without the gateway remembering anything.
- *
- * The marker is a tEXt chunk directly after IHDR. Viewers ignore it and the pixels stay unchanged; in
- * the file as sent it always starts at byte 33 (8-byte signature + 25-byte IHDR chunk).
+ * Format: a tEXt chunk directly after IHDR, at byte 33 of the file as sent; viewers ignore it.
  */
 import { crc32 } from "node:zlib";
 
@@ -23,7 +21,6 @@ export interface PngInspection {
 	chunks: string[];
 	/** Set only from a complete marker with a valid CRC. */
 	session?: string;
-	/** A marker was seen but cannot be trusted. */
 	markerProblem?: string;
 }
 
@@ -31,7 +28,6 @@ export function isPng(data: Buffer): boolean {
 	return data.length >= SIGNATURE.length && data.subarray(0, SIGNATURE.length).equals(SIGNATURE);
 }
 
-/** A copy of the PNG with this session's marker after IHDR; throws for anything that is not a PNG. */
 export function stampPng(png: Buffer, sessionId: string): Buffer {
 	if (!isPng(png) || png.length < IHDR_END || png.readUInt32BE(8) !== 13 || png.toString("latin1", 12, 16) !== "IHDR")
 		throw new Error("不是有效的 PNG");
@@ -39,7 +35,6 @@ export function stampPng(png: Buffer, sessionId: string): Buffer {
 	return Buffer.concat([png.subarray(0, IHDR_END), marker, png.subarray(IHDR_END)]);
 }
 
-/** Read what a PNG prefix says about itself; undefined when the bytes are not a PNG. */
 export function inspectPng(data: Buffer): PngInspection | undefined {
 	if (!isPng(data) || data.length < 24 || data.toString("latin1", 12, 16) !== "IHDR") return undefined;
 	const report: PngInspection = { width: data.readUInt32BE(16), height: data.readUInt32BE(20), chunks: [] };

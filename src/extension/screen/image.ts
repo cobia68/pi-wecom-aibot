@@ -19,7 +19,6 @@ export interface ScreenImageOptions {
 	directory?: string;
 }
 
-/** The pill's icon for each kind; an aborted run uses circle-stop instead. */
 const BADGE_ICONS: Record<NotificationKind, IconName> = {
 	notification: "bell",
 	completion: "bell",
@@ -28,11 +27,7 @@ const BADGE_ICONS: Record<NotificationKind, IconName> = {
 	test: "flask-conical",
 };
 
-/**
- * Three rows of one size and style: the working directory, provider · model, and the session. The
- * status pill says what this is; an aborted run says so in the warning colour (pill and top strip)
- * instead of a line under the screen.
- */
+/** An aborted run shows in the pill and warning colour instead of a line under the screen. */
 export function screenImageHeader(notification: GatewayNotification): ScreenHeader {
 	const { directory, title, provider, model, session } = notificationHeader(notification.source, notification.kind);
 	return {
@@ -47,9 +42,8 @@ export function screenImageHeader(notification: GatewayNotification): ScreenHead
 }
 
 /**
- * Capture synchronously, render header + screen, write a private PNG for the gateway. The pi editor,
- * widgets below it and the footer/status bar are never included. Failures (RPC mode, missing fonts,
- * rasteriser) keep the Markdown fallback and never cancel the notification.
+ * Capture synchronously, render, write a private PNG for the gateway. Failures (RPC mode, missing
+ * fonts, rasteriser) keep the Markdown fallback and never cancel the notification.
  */
 export async function prepareScreenImage(
 	notification: GatewayNotification,

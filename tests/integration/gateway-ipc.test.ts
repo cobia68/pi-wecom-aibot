@@ -98,11 +98,15 @@ function client(
 	const states: string[] = [];
 	const logs: string[] = [];
 	const errors: string[] = [];
-	const connection = new GatewayClient({
+	const connection: GatewayClient = new GatewayClient({
 		config: { ...config, ...overrides },
 		source: source(id),
 		onTask: (task) => tasks.push(task),
 		onState: (state, detail) => states.push(`${state} ${detail ?? ""}`),
+		// Session lists ask every pi whether it is busy; these clients are idle.
+		onRequest: (requestId, request) => {
+			if (request.action === "state") connection.respond(requestId, { ok: true, busy: false });
+		},
 		log: (message) => logs.push(message),
 		onError: (message) => errors.push(message),
 		launch: () => {
@@ -229,9 +233,12 @@ test("a temporary IPC registration is hidden and only watches identities while o
 	inbound("cannot run", {}, "session-I");
 	await assert.rejects(identifying.connection.notify(user, notification("I")), /临时识别连接/);
 	assert.equal(identifying.tasks.length, 0);
-	const identity = identifying.connection.watchIdentity(60_000);
-	await a.connection.notify(user, notification("A", "IPC barrier"));
-	messageFor("I", "identify");
+	let code: string | undefined;
+	const identity = identifying.connection.watchIdentity(60_000, undefined, (issued) => {
+		code = issued;
+	});
+	await until(() => code !== undefined, "one-time code");
+	messageFor("I", code!);
 	assert.deepEqual(await identity, { chatId: "user", chatType: 1, userid: "user" });
 	assert.equal(identifying.tasks.length, 0);
 	identifying.connection.stop();
@@ -438,8 +445,10 @@ test("model metadata updates reach the session list", async () => {
 	// The acknowledged send follows the metadata update in the same ordered IPC channel.
 	await a.connection.notify(user, notification("A"));
 	messageFor("A", "/wecom-aibot sessions");
-	const text = FakeWebSocket.instances[0].sent.at(-1).body.stream.content;
-	assert.match(text, /new-directory · new-provider · new-model/);
+	const replies = () => FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg");
+	await until(() => replies().some((frame) => /在线会话/.test(frame.body.stream.content)), "session listing");
+	const text = replies().at(-1).body.stream.content;
+	assert.match(text, /new-directory · new-provider · new-model · 空闲/);
 });
 
 test("clients re-register the same identity after a gateway crash", async () => {
@@ -608,37 +617,51 @@ test("a captured gateway hello cannot be replayed: a fake gateway without the Se
 	assert.equal(victim.connection.isReady(), false);
 });
 
-test("whoami over IPC resolves with the next message's conversation and does not deliver it as a task", async () => {
+test("whoami over IPC hands out a one-time code; only that code identifies the chat, a task is still a task", async () => {
 	await startServer();
 	const a = client("A");
 	a.connection.start();
 	await until(() => a.connection.isReady(), "A ready");
-	const identity = a.connection.watchIdentity(60_000);
-	// The acknowledged send follows the watch request in the same ordered IPC channel.
-	await a.connection.notify(user, notification("A"));
-	inbound("any text", { from: { userid: "user_one" } });
+	let code: string | undefined;
+	const identity = a.connection.watchIdentity(60_000, undefined, (issued) => {
+		code = issued;
+	});
+	await until(() => code !== undefined, "one-time code");
+	assert.match(code!, /^\d{6}$/);
+	// While the code waits, other messages are routed as usual.
+	inbound("a real task");
+	await until(() => a.tasks.length === 1, "a task during the wait");
+	const id = randomUUID();
+	FakeWebSocket.instances.at(-1)!.receive({
+		cmd: "aibot_msg_callback",
+		headers: { req_id: id },
+		body: { msgid: id, from: { userid: "user_one" }, chattype: "single", msgtype: "text", text: { content: code } },
+	});
 	assert.deepEqual(await identity, { chatId: "user_one", chatType: 1, userid: "user_one" });
-	assert.equal(a.tasks.length, 0);
+	assert.equal(a.tasks.length, 1);
 	const receipt = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
 	assert.match(receipt.body.stream.content, /whoami 已识别当前单聊/);
-	inbound("a real task");
-	await until(() => a.tasks.length === 1, "later message routed normally");
 });
 
-test("cancelling or timing out whoami releases the gateway's hold on the next message", async () => {
+test("cancelling or timing out whoami retires its code", async () => {
 	await startServer();
 	const a = client("A");
 	a.connection.start();
 	await until(() => a.connection.isReady(), "A ready");
 	const cancel = new AbortController();
-	const cancelled = a.connection.watchIdentity(60_000, cancel.signal);
+	let code: string | undefined;
+	const cancelled = a.connection.watchIdentity(60_000, cancel.signal, (issued) => {
+		code = issued;
+	});
+	await until(() => code !== undefined, "one-time code");
 	cancel.abort();
 	await assert.rejects(cancelled, { name: "AbortError" });
 	await assert.rejects(a.connection.watchIdentity(50), { name: "TimeoutError" });
-	// The server keeps a watch for at least one second; only the client's cancellation can release it early.
+	// The unwatch travels the same ordered IPC channel as this acknowledged send.
 	await a.connection.notify(user, notification("A"));
-	inbound("task after cancellation");
-	await until(() => a.tasks.length === 1, "routed after cancel and timeout");
+	const later = a.connection.watchIdentity(200);
+	messageFor("A", code!);
+	await assert.rejects(later, { name: "TimeoutError" }, "a retired code identifies nothing");
 });
 
 test("whoami ends when the gateway connection is lost", async () => {

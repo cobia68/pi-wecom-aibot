@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -78,6 +78,13 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
 	const statuses = new Map<string, string>([["another-extension", "Other status"]]);
 	const changes: (string | undefined)[] = [];
 	const notices: string[] = [];
+	/** Dialogs: each select records its menu and takes the next queued pick (none = Esc); confirm takes the next answer. */
+	const dialogs = {
+		menus: [] as { title: string; options: string[] }[],
+		picks: [] as (RegExp | undefined)[],
+		confirms: 0,
+		answers: [] as boolean[],
+	};
 	const state = { sessionId: `session-${instances.length}` };
 	let command!: (input: string, ctx: ExtensionContext) => Promise<void>;
 	const ctx = {
@@ -94,7 +101,15 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
 		},
 		ui: {
 			notify: (message: string) => notices.push(message),
-			confirm: async () => true,
+			confirm: async () => {
+				dialogs.confirms++;
+				return dialogs.answers.shift() ?? true;
+			},
+			select: async (title: string, options: string[]) => {
+				dialogs.menus.push({ title, options });
+				const pick = dialogs.picks.shift();
+				return pick && options.find((option) => pick.test(option));
+			},
 			getAllThemes: fixtureThemes,
 			setWidget() {},
 			setStatus(statusKey: string, text: string | undefined) {
@@ -134,6 +149,7 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
 		statuses,
 		changes,
 		notices,
+		dialogs,
 		command: (input: string) => command(input, ctx),
 		async emit(name: string, event: Record<string, unknown> = {}) {
 			for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx);
@@ -176,7 +192,7 @@ test("a stored configuration never opts a session into receiving tasks; querying
 	await h.emit("agent_start");
 	assert.equal(h.clients.length, 0, "the configuration cannot opt a session into receiving tasks");
 	assert.deepEqual(h.changes, []);
-	assert.match(h.notices[0], /当前 pi：未连接/);
+	assert.match(h.notices[0], /^⚪ 企业微信智能机器人：未接入，每个 session 需运行 \/wecom-aibot connect\n/);
 	assert.doesNotMatch(h.notices[0], /自动连接：开|已启动/);
 	assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved);
 });
@@ -210,7 +226,7 @@ test("the footer stays empty when unconfigured; connect explains that configurat
 	await h.command("connect");
 	assert.equal(h.clients.length, 0);
 	assert.deepEqual(h.changes, []);
-	assert.match(h.notices.at(-1)!, /尚未配置.*\/wecom-aibot config global edit/);
+	assert.match(h.notices.at(-1)!, /尚未配置.*\/wecom-aibot config edit --scope global/);
 });
 
 test("a saved connection change keeps the name green and adds a pending reconnection until connect", async () => {
@@ -218,14 +234,14 @@ test("a saved connection change keeps the name green and adds a pending reconnec
 	const client = await connect(h);
 	client.publish({ state: "subscribed", sessions: 1 });
 	assert.equal(h.statuses.get(key), label("success"));
-	await h.command("config global set defaultChatId=new-user");
+	await h.command("config set --scope global defaultChatId=new-user");
 	assert.equal(h.statuses.get(key), `${label("success")}${theme.fg("warning", "（待重新接入）")}`);
 	assert.equal(client.stopped.length, 0, "saving never disconnects");
 	// A setting is no connection change: nothing waits for connect.
-	await h.command("config global set defaultChatId=private-user");
-	await h.command("config session set screenshotTheme=light");
+	await h.command("config set --scope global defaultChatId=private-user");
+	await h.command("config set --scope session screenshotTheme=light");
 	assert.equal(h.statuses.get(key), label("success"));
-	await h.command("config global set defaultChatId=new-user");
+	await h.command("config set --scope global defaultChatId=new-user");
 	await h.command("connect");
 	assert.equal(h.clients.length, 2, "connect adopts the saved target with a new registration");
 	h.clients[1].publish({ state: "subscribed", sessions: 1 });
@@ -274,6 +290,97 @@ test("a refused first subscription explains the failure without installing a con
 	client.publish({ state: "subscribed", sessions: 1 });
 	assert.equal(h.statuses.get(key), label("success"));
 	assert.ok(h.notices.every((message) => !/已通过共享网关|已恢复|正在向共享网关注册/.test(message)));
+});
+
+test("status names each connection state with its own icon, driven by the real session wiring", async () => {
+	const h = harness();
+	const client = await connect(h);
+	const headline = async () => {
+		await h.command("status");
+		return h.notices.at(-1)!.split("\n")[0];
+	};
+	assert.equal(await headline(), "⏳ 企业微信智能机器人：正在连接");
+	// Refused before any subscription: the footer has no label yet, the status still says why.
+	client.publish({ state: "disconnected", sessions: 1, stopped: true, detail: "subscribe refused" });
+	assert.equal(await headline(), "❌ 企业微信智能机器人：已停止（subscribe refused），运行 /wecom-aibot connect 恢复");
+	await h.command("connect");
+	client.publish({ state: "subscribed", sessions: 2 });
+	assert.equal(await headline(), "✅ 企业微信智能机器人：已接入");
+	assert.ok(h.notices.at(-1)!.split("\n").includes("  共享网关  2 个 pi 已注册"));
+	client.publish({ state: "disconnected", sessions: 2, detail: "outage" });
+	assert.equal(await headline(), "⏳ 企业微信智能机器人：正在重连（outage）");
+	await h.command("disconnect");
+	assert.equal(
+		await headline(),
+		"⚪ 企业微信智能机器人：未接入（已由用户断开），每个 session 需运行 /wecom-aibot connect",
+	);
+	await h.command("connect");
+	h.clients[1].fail("registration rejected");
+	assert.equal(
+		await headline(),
+		"❌ 企业微信智能机器人：已停止（registration rejected），运行 /wecom-aibot connect 恢复",
+	);
+});
+
+test("a bare /wecom-aibot opens the subcommand menu under the connection state; Esc runs nothing", async () => {
+	const saved = readFileSync(CONFIG_FILE, "utf8");
+	const h = harness();
+	await h.emit("session_start");
+	await h.command("");
+	assert.equal(h.dialogs.menus.length, 1);
+	const [menu] = h.dialogs.menus;
+	assert.equal(menu.title, "⚪ 企业微信智能机器人：未接入");
+	assert.deepEqual(
+		menu.options.map((option) => option.split(/ {2,}/)[0]),
+		["status", "config", "connect", "disconnect", "test", "log", "reset", "--help"],
+	);
+	assert.deepEqual(h.notices, [], "Esc says nothing");
+	assert.equal(h.clients.length, 0, "opening the menu never connects");
+	assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved);
+});
+
+test("a menu choice runs exactly like the typed subcommand, confirmations included", async () => {
+	const h = harness();
+	await h.emit("session_start");
+	await h.command("status");
+	const typed = h.notices.at(-1);
+	h.dialogs.picks.push(/^status /);
+	await h.command("");
+	assert.equal(h.notices.at(-1), typed, "the same report as /wecom-aibot status");
+	h.dialogs.picks.push(/^connect /);
+	await h.command("");
+	assert.equal(h.clients.length, 1, "connect from the menu registers like the typed command");
+	h.clients[0].publish({ state: "subscribed", sessions: 1 });
+	await h.command("");
+	assert.equal(h.dialogs.menus.at(-1)?.title, "✅ 企业微信智能机器人：已接入");
+	// config opens its own chooser; Esc there changes nothing.
+	h.dialogs.picks.push(/^config /);
+	await h.command("");
+	assert.equal(h.dialogs.menus.at(-1)?.title, "企业微信配置");
+	h.dialogs.picks.push(/^--help /);
+	await h.command("");
+	assert.match(h.notices.at(-1)!, /^企业微信智能机器人 — \/wecom-aibot 命令帮助/);
+	// reset still asks: declining keeps the file, confirming deletes it.
+	h.dialogs.picks.push(/^reset /);
+	h.dialogs.answers.push(false);
+	await h.command("");
+	assert.equal(h.dialogs.confirms, 1);
+	assert.ok(existsSync(CONFIG_FILE));
+	h.dialogs.picks.push(/^reset /);
+	await h.command("");
+	assert.equal(h.dialogs.confirms, 2);
+	assert.equal(existsSync(CONFIG_FILE), false);
+});
+
+test("without an interactive UI a bare /wecom-aibot lists the subcommands instead of opening a menu", async () => {
+	const h = harness("print");
+	await h.emit("session_start");
+	await h.command("");
+	assert.equal(h.dialogs.menus.length, 0);
+	assert.equal(h.notices.length, 1);
+	assert.match(h.notices[0], /^\/wecom-aibot 需要写明子命令，例如 \/wecom-aibot status：\n {2}status {2,}查看/);
+	assert.match(h.notices[0], /^ {2}--help {2,}显示帮助$/m);
+	assert.equal(h.clients.length, 0);
 });
 
 test("an initial connection taking over 30 seconds reports once, without stale progress or a recovery notice", async (t) => {
@@ -351,7 +458,7 @@ test("a changed session ID revokes the old registration even before a lifecycle 
 	assert.equal(h.statuses.has(key), false);
 	assert.equal(old.stopped.length, 1, "hiding an old registration is not sufficient; it must be revoked");
 	await h.command("status");
-	assert.match(h.notices.at(-1)!, /当前 pi：未连接/);
+	assert.match(h.notices.at(-1)!, /^⚪ 企业微信智能机器人：未接入（目标会话已切换）/);
 });
 
 for (const end of ["reset", "session_shutdown", "fatal"] as const) {

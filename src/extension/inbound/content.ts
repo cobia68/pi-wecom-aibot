@@ -36,7 +36,6 @@ export class InboundContentPreparer {
 	private imageBytes = 0;
 	private readonly waiting: (() => void)[] = [];
 
-	/** The limits are constants in production; tests use smaller ones to observe the bounds. */
 	constructor(limits: { concurrency?: number; maxImageBytes?: number } = {}) {
 		this.concurrency = limits.concurrency ?? 2;
 		// Base64 payload bytes retained by this plugin, not pi's own active run or conversation history.

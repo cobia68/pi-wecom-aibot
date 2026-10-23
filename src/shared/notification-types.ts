@@ -8,8 +8,6 @@ export interface NotificationSource {
 
 export type NotificationKind = "notification" | "completion" | "reply" | "test" | "connect";
 
-/** A notification snapshot; the gateway adds the source header and applies WeCom's byte limit. */
-/** A file the gateway uploads and sends as a native WeCom image message. */
 export interface GatewayImage {
 	mime: "image/png";
 	filename: string;
@@ -17,6 +15,7 @@ export interface GatewayImage {
 	path: string;
 }
 
+/** A notification snapshot; the gateway adds the source header and applies WeCom's byte limit. */
 export interface GatewayNotification {
 	kind: NotificationKind;
 	source: NotificationSource;

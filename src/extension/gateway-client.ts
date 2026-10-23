@@ -29,30 +29,28 @@ import {
 	writeFrame,
 } from "../shared/gateway-protocol.ts";
 import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
+import { sentences } from "../shared/text.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 import type { Connection } from "./config.ts";
 
-const AUTH_FAILED =
-	"共享网关认证失败：本机运行中的网关使用不同的 BotID/Secret 或插件版本。" +
-	"请在仍用旧配置的 pi 中运行 /wecom-aibot connect 或 /wecom-aibot disconnect，再在这里运行 /wecom-aibot connect。";
+const AUTH_FAILED = sentences(
+	"共享网关认证失败：本机运行中的网关使用不同的 BotID/Secret 或插件版本",
+	"请在仍用旧配置的 pi 中运行 /wecom-aibot connect 或 /wecom-aibot disconnect，再在这里运行 /wecom-aibot connect",
+);
 
 export interface GatewayClientOptions {
-	/** The credentials and allowlist this registration is made with. */
 	config: Pick<Connection, "botId" | "secret" | "allowedUserIds">;
 	source: NotificationSource;
 	instanceId?: string;
-	/** Temporary whoami registration, hidden from routing and the online session list. */
 	identifyOnly?: boolean;
 	onState?: (state: WeComState, detail?: string) => void;
 	onStatus?: (status: GatewayStatus) => void;
 	onTask?: (task: GatewayTask) => void;
-	/** A read-only request from the gateway (screen or cancel). */
 	onRequest?: (id: string, request: BridgeRequest) => void;
 	onError?: (message: string) => void;
 	log?: (message: string) => void;
 	/** Process boundary override for offline tests. */
 	launch?: (endpoint: string, credentials: GatewayCredentials) => void;
-	/** How long an incompatible gateway may hold the endpoint before onError; default GATEWAY_RETRY_MS. */
 	retryMs?: number;
 }
 
@@ -72,13 +70,15 @@ export class GatewayClient implements BridgeClient {
 	private nextLaunchAt = 0;
 	private attempts = 0;
 	private lastReceived = 0;
-	/** Since when an incompatible gateway has held the endpoint, and which kind. */
 	private blocked: { since: number; message: string } | undefined;
 	private readonly pending = new Map<
 		string,
 		{ resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
 	>();
-	private readonly watches = new Map<string, (error?: Error, identity?: ChatIdentity) => void>();
+	private readonly watches = new Map<
+		string,
+		{ finish: (error?: Error, identity?: ChatIdentity) => void; onCode?: (code: string) => void }
+	>();
 
 	constructor(options: GatewayClientOptions) {
 		this.options = options;
@@ -174,8 +174,8 @@ export class GatewayClient implements BridgeClient {
 		});
 	}
 
-	/** Rejects with name "TimeoutError" when no permitted message arrives, "AbortError" when cancelled. */
-	watchIdentity(timeoutMs: number, signal?: AbortSignal): Promise<ChatIdentity> {
+	/** Rejects with name "TimeoutError" when the code is not sent in time, "AbortError" when cancelled. */
+	watchIdentity(timeoutMs: number, signal?: AbortSignal, onCode?: (code: string) => void): Promise<ChatIdentity> {
 		if (!this.isReady()) return Promise.reject(new Error("共享网关或企微连接未就绪"));
 		if (signal?.aborted) return Promise.reject(named("AbortError", "whoami 已取消"));
 		const id = randomUUID();
@@ -185,7 +185,7 @@ export class GatewayClient implements BridgeClient {
 				clearTimeout(timer);
 				signal?.removeEventListener("abort", onAbort);
 				if (error) {
-					// Release the gateway's hold so a later message is routed normally again.
+					// Release the gateway's code so it can no longer identify a chat.
 					if (this.registered && this.socket) writeFrame(this.socket, { type: "unwatch", id });
 					reject(error);
 				} else if (identity) resolve(identity);
@@ -193,10 +193,10 @@ export class GatewayClient implements BridgeClient {
 			};
 			const onAbort = () => finish(named("AbortError", "whoami 已取消"));
 			const timer = setTimeout(
-				() => finish(named("TimeoutError", `${Math.round(timeoutMs / 1000)} 秒内没有收到可识别的消息`)),
+				() => finish(named("TimeoutError", `${Math.round(timeoutMs / 1000)} 秒内没有收到验证码`)),
 				timeoutMs,
 			);
-			this.watches.set(id, finish);
+			this.watches.set(id, { finish, onCode });
 			signal?.addEventListener("abort", onAbort, { once: true });
 			const socket = this.socket;
 			if (!socket || !writeFrame(socket, { type: "watch", id, timeoutMs }))
@@ -233,7 +233,6 @@ export class GatewayClient implements BridgeClient {
 			}
 			this.retry();
 		});
-		// The client speaks first; the gateway proves the Secret over this nonce before it learns anything.
 		socket.once("connect", () => writeFrame(socket, { type: "hello", version: GATEWAY_PROTOCOL_VERSION, nonce }));
 		readFrames(
 			socket,
@@ -243,8 +242,7 @@ export class GatewayClient implements BridgeClient {
 				const parsed = parseServerFrame(value);
 				if (!parsed.ok) {
 					this.options.log?.(`共享网关发送了无效数据：${parsed.reason}`);
-					// Before the handshake an unreadable frame means an incompatible gateway; later frames are
-					// independent, so drop only the one that cannot be trusted and keep the connection.
+					// Before the handshake an unreadable frame means an incompatible gateway; later, drop only that frame.
 					if (!handshake) {
 						rejected = true;
 						socket.destroy();
@@ -269,7 +267,6 @@ export class GatewayClient implements BridgeClient {
 					}
 					handshake = true;
 					this.blocked = undefined;
-					// Credentials reach a new daemon only through the private bootstrap pipe.
 					writeFrame(socket, {
 						type: "register",
 						registration: this.registration,
@@ -332,22 +329,22 @@ export class GatewayClient implements BridgeClient {
 						return;
 					}
 					case "identity": {
-						this.watches.get(frame.id)?.(undefined, frame.identity);
+						this.watches.get(frame.id)?.finish(undefined, frame.identity);
+						return;
+					}
+					case "watching": {
+						this.watches.get(frame.id)?.onCode?.(frame.code);
 						return;
 					}
 				}
 			},
 			(error) => {
-				// A handler bug must reach pi's log; otherwise it becomes a silent reconnect loop.
 				this.options.log?.(`共享网关数据未处理：${error instanceof Error ? error.message : String(error)}`);
 			},
 		);
 	}
 
-	/**
-	 * An incompatible gateway holds the endpoint, typically until its idle exit after the last pi left.
-	 * true once it has done so for the whole retry window: then the error is reported and retrying ends.
-	 */
+	/** An incompatible gateway holds the endpoint: true once that outlasts the retry window, after reporting it. */
 	private block(message: string): boolean {
 		if (this.blocked?.message !== message) this.blocked = { since: Date.now(), message };
 		if (Date.now() - this.blocked.since < (this.options.retryMs ?? GATEWAY_RETRY_MS)) return false;
@@ -402,7 +399,7 @@ export class GatewayClient implements BridgeClient {
 		}
 		this.pending.clear();
 		// The gateway forgets a closed connection's whoami, so the local wait ends too.
-		for (const finish of [...this.watches.values()]) finish(new Error(`连接已断开：${reason}`));
+		for (const watch of [...this.watches.values()]) watch.finish(new Error(`连接已断开：${reason}`));
 	}
 }
 
@@ -442,7 +439,6 @@ export function launchGateway(
 		// The daemon outlives pi: its diagnostic pipe must not hold pi's event loop open.
 		if (isUnrefable(diagnostic)) diagnostic.unref();
 	}
-	// A short private pipe bootstraps credentials without files, environment variables or argv.
 	child.on("error", (error) => log?.(`gateway launch failed: ${error.message}`));
 	child.on("exit", (code, signal) => {
 		if (!code && !signal) return;

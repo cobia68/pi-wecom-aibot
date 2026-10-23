@@ -4,7 +4,6 @@ import type { BridgeConnectionStatus } from "./connection-notices.ts";
 
 export const WECOM_STATUS_KEY = "wecom-aibot";
 const THEME_WIDGET_KEY = "wecom-aibot-theme";
-/** How long a user disconnect stays visible in the error colour before the name is removed. */
 export const FLASH_MS = 1_500;
 
 const COLOR: Record<BridgeConnectionStatus, ThemeColor> = {

@@ -1,15 +1,11 @@
 /**
- * Configuration of the WeCom 智能机器人 extension: one table of fields shared by validation, help,
- * completion and the interactive editor; a global file and per-session override files; and the merge
- * that turns both into what the current session uses.
+ * WeCom 智能机器人 configuration: one field table shared by validation, help, completion and the editor,
+ * and the merge of a global file with per-session override files.
  *
  *   <agent-dir>/wecom-aibot/config.json              global defaults; allowedUserIds lives only here
  *   <agent-dir>/wecom-aibot/sessions/<session>.json  one session's explicit overrides
  *
- * Precedence: built-in default < global < session. The credentials (botId + secret) and the default
- * target (defaultChatId + defaultChatType) are each taken from one layer as a whole, so a session's
- * BotID never meets another bot's Secret. Files are private (0600 on POSIX) and replaced atomically;
- * a missing file means "no values here", an unreadable one is an error and never an empty layer.
+ * A missing file means "no values here"; an unreadable one is an error, never an empty layer.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -27,12 +23,12 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { pluginDirectory } from "../shared/agent-path.ts";
+import { sentences } from "../shared/text.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
 
 export type NotificationMode = "text" | "screenshot";
 export type NotificationScope = "wecom-tasks" | "all-runs";
 
-/** The fields `/wecom-aibot config` manages. */
 export interface ManagedFields {
 	botId: string;
 	secret: string;
@@ -40,16 +36,13 @@ export interface ManagedFields {
 	defaultChatType: 1 | 2;
 	notificationMode: NotificationMode;
 	notificationScope: NotificationScope;
-	/** A pi theme name; without one the screenshot is what pi shows. */
 	screenshotTheme: string;
 }
 export type FieldName = keyof ManagedFields;
 /** Read where they are used, so a change applies without a new registration. */
 export type Settings = Pick<ManagedFields, "notificationMode" | "notificationScope"> &
 	Partial<Pick<ManagedFields, "screenshotTheme">>;
-/** One layer's explicit values. The hand-edited allowlist exists only in the global layer. */
 export type Layer = Partial<ManagedFields> & { allowedUserIds?: string[] };
-/** A change to one layer: values to save and fields to remove. */
 export interface LayerChange {
 	set?: Partial<ManagedFields>;
 	remove?: readonly FieldName[];
@@ -61,7 +54,6 @@ interface Choice<Value> {
 }
 
 interface FieldBase {
-	/** What the field is called in the editor and in help. */
 	label: string;
 	description: string;
 }
@@ -70,12 +62,10 @@ interface FieldBase {
 export interface ConnectionField extends FieldBase {
 	effect: "connection";
 	name: Exclude<FieldName, keyof Settings>;
-	/** The only valid values; without them the field takes non-empty text. */
 	choices?: readonly Choice<ManagedFields[FieldName]>[];
 	default?: undefined;
 }
 
-/** A setting with fixed values: always one of its choices, with a built-in default. */
 export interface ChoiceField extends FieldBase {
 	effect: "setting";
 	name: "notificationMode" | "notificationScope";
@@ -91,7 +81,6 @@ export interface ThemeField extends FieldBase {
 	default?: undefined;
 }
 
-/** Read again wherever it is used, so a change applies without a new registration. */
 export type SettingField = ChoiceField | ThemeField;
 
 export type FieldSpec = ConnectionField | SettingField;
@@ -160,7 +149,6 @@ const PAIRED: readonly (readonly FieldName[])[] = [
 	["defaultChatId", "defaultChatType"],
 ];
 
-/** The field's group, or just the field. */
 export function fieldsWith(name: FieldName): readonly FieldName[] {
 	return PAIRED.find((group) => group.includes(name)) ?? [name];
 }
@@ -171,22 +159,17 @@ export function fieldNamed(name: string): FieldSpec | undefined {
 }
 
 const ALL = FIELDS.map((spec) => spec.name);
-/** Every group once, as listed by its first field. */
 const GROUPS = ALL.filter((name) => fieldsWith(name)[0] === name).map(fieldsWith);
 /** The credentials are typed only in `config edit`: a typed command stays in the input history. */
 export const SETTABLE: readonly FieldName[] = ALL.filter((name) => name !== "botId" && name !== "secret");
 
-/**
- * Fields earlier versions wrote and this one no longer reads. They are not migrated: reading ignores
- * them like any unknown field, and the next save of their layer drops them. Any other unknown field,
- * such as a newer version's, is kept.
- */
+/** Written by earlier versions: reads ignore them, the next save drops them. Other unknown fields are kept. */
 const OBSOLETE = ["sendMode", "notifyEveryRun", "enabled", "welcome", "screenMode", "imageHosts", "fontFiles"];
 
 /** Values are used as given; a userid or chatid never contains quotes or spaces, so such a value was pasted with something else. */
 export function chatIdProblem(chatId: string): string | undefined {
 	return /["'“”‘’`\s]/.test(chatId)
-		? `chatid「${chatId}」含引号或空格；企微的 userid 和 chatid 不含这些字符，请只写 ID 本身。`
+		? `chatid「${chatId}」含引号或空格；企微的 userid 和 chatid 不含这些字符，请只写 ID 本身`
 		: undefined;
 }
 
@@ -196,7 +179,6 @@ export function chatIdProblem(chatId: string): string | undefined {
 export const CONFIG_FILE = join(pluginDirectory(), "config.json");
 export const SESSIONS_DIR = join(pluginDirectory(), "sessions");
 
-/** Which layer: the global file, or one session's overrides. */
 export type Scope = "global" | { session: string };
 
 export function layerFile(scope: Scope): string {
@@ -210,10 +192,6 @@ function sessionFileName(sessionId: string): string {
 		: `id-${createHash("sha256").update(sessionId).digest("hex").slice(0, 32)}`;
 }
 
-/**
- * One layer as stored. Every known field is checked with its name and file, groups are checked as
- * groups, and any other field is ignored.
- */
 function parseLayer(raw: Record<string, unknown>, scope: Scope): Layer {
 	const file = layerFile(scope);
 	const invalid = (field: string, problem: string) => new Error(`配置文件 ${file} 的字段 ${field} 无效：${problem}`);
@@ -247,23 +225,17 @@ function parseLayer(raw: Record<string, unknown>, scope: Scope): Layer {
 	return layer as Layer;
 }
 
-/** The layer as stored, or undefined when its file does not exist. */
 export function readLayer(scope: Scope): Layer | undefined {
 	const raw = readObject(layerFile(scope));
 	return raw && parseLayer(raw, scope);
 }
 
-/** Replace one layer's file with exactly these values, validated first. */
 export function writeLayer(scope: Scope, layer: Layer): void {
 	parseLayer({ ...layer }, scope);
 	writeJson(layerFile(scope), layer, scope !== "global");
 }
 
-/**
- * Change one layer as it is on disk now, not as it was when pi started: other windows and hand edits
- * survive, unknown fields are kept and obsolete ones dropped. `guard` sees the current layer and may
- * refuse; the result is validated before anything is written.
- */
+/** Patches the layer as it is on disk now, so other windows' and hand edits survive; `guard` may refuse first. */
 export function patchLayer(scope: Scope, change: LayerChange, guard?: (current: Layer | undefined) => void): Layer {
 	const file = layerFile(scope);
 	const raw = readObject(file);
@@ -276,19 +248,17 @@ export function patchLayer(scope: Scope, change: LayerChange, guard?: (current: 
 	return layer;
 }
 
-/** Delete the global file. Session override files are left alone: they belong to their sessions. */
+/** Session override files are left alone: they belong to their sessions. */
 export function clearConfig(): void {
 	// force only tolerates a missing file; permissions, sharing violations, etc. must reach the caller.
 	rmSync(CONFIG_FILE, { force: true });
 }
 
-/** A file's JSON object, or undefined when the file does not exist. */
 function readObject(file: string): Record<string, unknown> | undefined {
 	const text = readIfExists(file, (path) => readFileSync(path, "utf8"));
 	return text === undefined ? undefined : parseObject(text, file);
 }
 
-/** `what` names the text in the error, e.g. its file. */
 function parseObject(text: string, what: string): Record<string, unknown> {
 	let value: unknown;
 	try {
@@ -300,7 +270,6 @@ function parseObject(text: string, what: string): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
-/** What `read` returns, or undefined when the file does not exist; every other failure names the file. */
 function readIfExists<T>(file: string, read: (file: string) => T): T | undefined {
 	try {
 		return read(file);
@@ -310,7 +279,6 @@ function readIfExists<T>(file: string, read: (file: string) => T): T | undefined
 	}
 }
 
-/** Write a private temporary file and rename it over the target: a reader never sees a partial file. */
 function writeJson(file: string, value: object, privateDirectory: boolean): void {
 	// The agent directory belongs to pi; only our files, and the folder named after session IDs, are private.
 	mkdirSync(dirname(file), { recursive: true, mode: privateDirectory ? 0o700 : undefined });
@@ -329,7 +297,6 @@ function writeJson(file: string, value: object, privateDirectory: boolean): void
 
 export type Source = "session" | "global" | "default";
 
-/** What the current session uses: each field's value and the layer it came from. */
 export interface Resolved {
 	values: Partial<ManagedFields> & Settings;
 	sources: Partial<Record<FieldName, Source>>;
@@ -341,7 +308,6 @@ export function mergeLayers(global: Layer | undefined, session: Layer | undefine
 	const values: Record<string, unknown> = {};
 	const sources: Partial<Record<FieldName, Source>> = {};
 	for (const spec of SETTING_FIELDS) {
-		// A field without a built-in value (the screenshot theme) is simply absent: pi's own is used.
 		if (spec.default !== undefined) values[spec.name] = spec.default;
 		sources[spec.name] = "default";
 	}
@@ -374,7 +340,6 @@ export interface Connection {
 	target?: ChatRef;
 }
 
-/** The connection the merged files describe, or undefined without credentials. */
 export function connectionOf(resolved: Resolved): Connection | undefined {
 	const { botId, secret, defaultChatId: chatId, defaultChatType: chatType } = resolved.values;
 	if (!botId || !secret) return undefined;
@@ -397,11 +362,8 @@ export function connectionKey(connection: Connection | undefined): string {
 // ---------------------------------------------------------------- the current session
 
 /**
- * The current session's view of both layers. Every read goes to disk, so another window's change or a
- * hand edit is seen at the next use. A fork (or clone) takes over a snapshot of its parent's overrides
- * the first time its layer is touched: its file is then always written, `{}` when the parent had none,
- * so a resume never copies again and the two sessions evolve independently. A broken parent layer is
- * an error, never a silent fall back to the global bot or target.
+ * Every read goes to disk, so other windows' and hand edits apply at the next use. A fork snapshots its
+ * parent's overrides once (its file is written even when empty), then the two evolve independently.
  */
 export class SessionConfig {
 	private lastGood: Resolved | undefined;
@@ -414,7 +376,6 @@ export class SessionConfig {
 		private readonly report: (message: string, type: "info" | "warning") => void,
 	) {}
 
-	/** Both layers as they are on disk now; throws when one cannot be used. */
 	read(): Resolved {
 		const resolved = mergeLayers(readLayer("global"), this.ensure());
 		this.lastGood = resolved;
@@ -422,35 +383,30 @@ export class SessionConfig {
 		return resolved;
 	}
 
-	/** The last result read successfully, without reading again. */
 	get latest(): Resolved | undefined {
 		return this.lastGood;
 	}
 
-	/**
-	 * For the places a value is used while connected: fresh when possible, otherwise the result the
-	 * connection was made with, warning once until a read succeeds again. Before any good read it throws.
-	 */
+	/** While connected: falls back to the last good read, warning once until a read succeeds; throws before any. */
 	current(): Resolved {
 		try {
 			return this.read();
 		} catch (error) {
 			if (!this.lastGood) throw error;
-			if (!this.warned) this.report(`企业微信配置无法使用：${errMsg(error)}。继续使用上一次有效的配置。`, "warning");
+			if (!this.warned)
+				this.report(sentences(`企业微信配置无法使用：${errMsg(error)}`, "继续使用上一次有效的配置"), "warning");
 			this.warned = true;
 			return this.lastGood;
 		}
 	}
 
-	/** This session's own layer. */
 	layer(): Layer | undefined {
 		return this.ensure();
 	}
 
-	/** Change this session's layer; a fork takes over its parent's overrides first, so none are lost. */
-	patch(change: LayerChange): Layer {
+	patch(change: LayerChange, guard?: (current: Layer | undefined) => void): Layer {
 		this.ensure();
-		return patchLayer({ session: this.sessionId }, change);
+		return patchLayer({ session: this.sessionId }, change, guard);
 	}
 
 	private ensure(): Layer | undefined {
@@ -462,17 +418,17 @@ export class SessionConfig {
 		writeLayer(scope, inherited);
 		const copied = FIELDS.filter((spec) => inherited[spec.name] !== undefined).map((spec) => spec.name);
 		if (parentId === undefined)
-			this.report("父会话文件已不存在，没有可继承的企业微信覆盖项；本 session 使用全局配置。", "info");
+			this.report("父会话文件已不存在，没有可继承的企业微信覆盖项；本 session 使用全局配置", "info");
 		else if (copied.length)
 			this.report(
-				`已从父会话继承企业微信覆盖项：${copied.join("、")}。这是一次性快照，之后两个 session 各自独立；不需要时运行 /wecom-aibot config session unset <字段>。`,
+				`已从父会话继承企业微信覆盖项：${copied.join("、")}。这是一次性快照，之后两个 session 各自独立；不需要时运行 /wecom-aibot config unset --scope session <字段>`,
 				"info",
 			);
 		return inherited;
 	}
 }
 
-/** The session ID in the header line of a pi session file; undefined when the file does not exist. */
+/** The session ID in the header line of a pi session file. */
 function sessionIdIn(sessionFile: string): string | undefined {
 	const head = readIfExists(sessionFile, firstLine);
 	if (head === undefined) return undefined;
@@ -482,7 +438,6 @@ function sessionIdIn(sessionFile: string): string | undefined {
 	return id;
 }
 
-/** The first line only: a long session's history is never read. */
 function firstLine(file: string): string {
 	const fd = openSync(file, "r");
 	try {
@@ -495,7 +450,6 @@ function firstLine(file: string): string {
 
 // ---------------------------------------------------------------- command values
 
-/** `config … set` tokens: the values to save, or every problem found (then nothing is saved). */
 export function parseAssignments(tokens: readonly string[]): { set: Partial<ManagedFields> } | { problems: string[] } {
 	const problems: string[] = [];
 	const set: Record<string, unknown> = {};
@@ -514,7 +468,9 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 			continue;
 		}
 		if (!SETTABLE.includes(spec.name)) {
-			problems.push(`${spec.name} 只能用 /wecom-aibot config <session|global> edit 输入：命令会留在输入历史中`);
+			problems.push(
+				`${spec.name} 只能用 /wecom-aibot config edit --scope <global|session> 输入：命令会留在输入历史中`,
+			);
 			continue;
 		}
 		if (seen.has(spec.name)) {
@@ -523,7 +479,9 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 		}
 		seen.add(spec.name);
 		if (!text) {
-			problems.push(`${spec.name} 缺少值；清除 session 覆盖请用 /wecom-aibot config session unset ${spec.name}`);
+			problems.push(
+				`${spec.name} 缺少值；删除字段请用 /wecom-aibot config unset --scope <global|session> ${spec.name}`,
+			);
 			continue;
 		}
 		const choice = spec.choices?.find((item) => String(item.value).toLowerCase() === text.toLowerCase());
@@ -544,7 +502,6 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 	return problems.length ? { problems } : { set: set as Partial<ManagedFields> };
 }
 
-/** `config session unset` tokens: field names, each expanded to its whole group. */
 export function parseRemovals(tokens: readonly string[]): { remove: FieldName[] } | { problems: string[] } {
 	const problems: string[] = [];
 	const remove = new Set<FieldName>();

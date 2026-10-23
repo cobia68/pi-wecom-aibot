@@ -1,12 +1,8 @@
 /**
- * Local IPC between pi and the shared gateway: no credentials in command lines and no public listening port.
- *
- * Handshake (protocol 5): the client sends hello{nonce}; the gateway answers hello{nonce, proof}; the client
- * checks the proof and only then sends register{proof}. Both proofs are HMAC(Secret) over both nonces and the
- * endpoint, so a captured hello cannot be replayed, and a peer without the Secret learns nothing about the pi.
- *
- * The gateway owns the WeCom format: message parsing, stream ids and deadlines, wording, byte limits. pi sends
- * task states and notification snapshots, and receives parsed messages.
+ * Local IPC between pi and the shared gateway; no public listening port. Handshake: client hello{nonce};
+ * gateway hello{nonce, proof}; the client checks the proof and only then sends register{proof}, so a peer
+ * without the Secret learns nothing about the pi. The gateway owns the WeCom format (parsing, stream ids,
+ * deadlines, wording, byte limits); pi sends task states and notification snapshots, receives parsed messages.
  */
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { Socket } from "node:net";
@@ -17,24 +13,22 @@ import type { DeliveryFailure } from "./delivery.ts";
 import type { GatewayImage, GatewayNotification, NotificationSource } from "./notification-types.ts";
 import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComState } from "./wecom-protocol.ts";
 
-export const GATEWAY_PROTOCOL_VERSION = 5;
+export const GATEWAY_PROTOCOL_VERSION = 6;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;
 export const IPC_MAX_BYTES = 1_048_576;
-/** A notification's IPC result follows WeCom's acknowledgement (or its timeout). */
 export const IPC_SEND_TIMEOUT_MS = WECOM_ACK_TIMEOUT_MS + 2_000;
-/** After the last pi leaves, the gateway waits this long for another before it exits. */
 export const GATEWAY_IDLE_MS = 1_500;
 /** An incompatible gateway (other Secret, other protocol) may hold the endpoint this long, e.g. its idle exit, before a pi reports it. */
 export const GATEWAY_RETRY_MS = 10_000;
 
-/** What a pi registers: never the Secret, and only the fields the gateway uses. */
+/** Never the Secret. */
 export interface RegistrationConfig {
 	botId: string;
 	allowedUserIds?: string[];
 }
 
-/** The gateway's own credentials; given to a new daemon only through its private stdin. */
+/** The gateway's own credentials; a new daemon gets them only on its private stdin, never via files, env or argv. */
 export interface GatewayCredentials {
 	botId: string;
 	secret: string;
@@ -55,22 +49,22 @@ export interface SessionTarget {
 	sessionId: string;
 }
 
-/** What the gateway may ask one pi to do. Both are read-only with respect to the conversation. */
-export type BridgeRequestAction = "screen" | "cancel";
+/** What the gateway may ask one pi; none of them starts a turn. */
+export type BridgeRequestAction = "screen" | "cancel" | "state";
+const BRIDGE_REQUEST_ACTIONS: readonly string[] = ["screen", "cancel", "state"] satisfies BridgeRequestAction[];
 
 export interface BridgeRequest {
 	action: BridgeRequestAction;
 	target: SessionTarget;
 }
 
-/** A pi's answer to one request; `image` is a private PNG only a screen request produces. */
 export interface BridgeResponse {
 	ok: boolean;
 	error?: string;
 	image?: GatewayImage;
+	busy?: boolean;
 }
 
-/** The conversation of a message, as /wecom-aibot whoami reports it: chatid is the userid in a single chat. */
 export interface ChatIdentity {
 	chatId: string;
 	chatType: 1 | 2;
@@ -86,16 +80,15 @@ export interface GatewayStatus {
 	stopped?: boolean;
 }
 
-/** A message routed to one pi; its id is the WeCom callback's req_id. */
+/** id is the WeCom callback's req_id. */
 export interface GatewayTask {
 	id: string;
 	message: InboundMessage;
 }
 
 /**
- * The state of a task, as pi reports it. The gateway shows it in the task's status message:
- * running opens the stream; settled may replace it with text, notifying closes it for a separate result.
- * busy/failed mean the task was not accepted; stopped revokes forwarding.
+ * Shown in the task's status message: running opens the stream; settled may replace it with text, notifying
+ * closes it for a separate result. busy/failed: the task was not accepted; stopped revokes forwarding.
  */
 export type TaskState = "running" | "settled" | "notifying" | "stopped" | "busy" | "failed";
 
@@ -119,32 +112,26 @@ export type ServerFrame =
 	| { type: "request"; id: string; request: BridgeRequest }
 	| { type: "result"; id: string; error?: string; outcome?: DeliveryFailure }
 	| { type: "identity"; id: string; identity: ChatIdentity }
+	| { type: "watching"; id: string; code: string }
 	| { type: "log"; message: string }
 	| { type: "fatal"; message: string };
 
-/** The bridge can be tested separately from process management. */
 export interface BridgeClient {
 	start(): void;
 	stop(reason?: string): void;
 	isReady(): boolean;
 	updateSource(source: NotificationSource): void;
-	/** Answer a gateway request: the screen image, or the outcome of a cancel. */
 	respond(id: string, response: BridgeResponse): void;
-	/** Restart a stopped upstream connection, e.g. after another client took it over. */
 	resume(): void;
 	/** false when the state could not be handed to the gateway; the gateway ignores tasks it no longer knows. */
 	taskStatus(taskId: string, state: TaskState): boolean;
 	/** Resolves once WeCom acknowledged the push; only a DeliveryError with not_sent is safe to retry. */
 	notify(chat: ChatRef, notification: GatewayNotification): Promise<void>;
-	/** /wecom-aibot whoami: resolve with the next permitted message's conversation instead of routing it. */
-	watchIdentity(timeoutMs: number, signal?: AbortSignal): Promise<ChatIdentity>;
+	/** /wecom-aibot config whoami: only the message that is exactly the one-time code (`onCode`) resolves, unrouted. */
+	watchIdentity(timeoutMs: number, signal?: AbortSignal, onCode?: (code: string) => void): Promise<ChatIdentity>;
 }
 
-/**
- * The shared gateway's endpoint for one agent directory and BotID. Multiple pi windows in the same
- * agent directory meet here; POSIX keeps the socket in a private 0700 directory, so other local users
- * can neither connect nor take the name.
- */
+/** One per agent directory and BotID; POSIX uses a 0700 directory, so other users can't connect or take the name. */
 export function gatewayEndpoint(botId: string): string {
 	const key = endpointKey(botId);
 	if (process.platform === "win32") return `\\\\.\\pipe\\pi-wecom-aibot-${key}`;
@@ -246,7 +233,6 @@ export function validChat(value: unknown): value is ChatRef {
 	);
 }
 
-/** pi checks what an authenticated gateway sends, too: a malformed task is dropped, not half-processed. */
 export function validTask(value: unknown): value is GatewayTask {
 	const task = value as GatewayTask | undefined;
 	const message = task?.message;
@@ -313,7 +299,6 @@ export function verifyProof(proof: unknown, expected: string): boolean {
 	return timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(expected, "hex"));
 }
 
-/** A frame is either accepted as its typed form or rejected with the reason; callers never guess. */
 export type FrameParse<Frame> = { ok: true; frame: Frame } | { ok: false; reason: string };
 
 export function isTaskState(value: unknown): value is TaskState {
@@ -359,6 +344,7 @@ export function parseClientFrame(value: unknown): FrameParse<ClientFrame> {
 				return reject("无效的请求应答");
 			if (response.error !== undefined && typeof response.error !== "string") return reject("无效的错误说明");
 			if (response.image !== undefined && !validImage(response.image)) return reject("无效的图片");
+			if (response.busy !== undefined && typeof response.busy !== "boolean") return reject("无效的忙闲状态");
 			return accept({ type: "response", id: frame.id, response });
 		}
 		case "status":
@@ -387,7 +373,7 @@ export function parseClientFrame(value: unknown): FrameParse<ClientFrame> {
 	}
 }
 
-/** The only reader of what the gateway sends; the gateway is authenticated, but its bugs stay contained too. */
+/** The only reader of what the gateway sends: authenticated, yet a malformed frame is dropped, not half-processed. */
 export function parseServerFrame(value: unknown): FrameParse<ServerFrame> {
 	const frame = value as (ServerFrame & Record<string, unknown>) | undefined;
 	if (!frame || typeof frame !== "object") return reject("帧必须是 JSON 对象");
@@ -417,7 +403,7 @@ export function parseServerFrame(value: unknown): FrameParse<ServerFrame> {
 		case "request": {
 			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
 			const request = frame.request as BridgeRequest | undefined;
-			if (!request || typeof request !== "object" || (request.action !== "screen" && request.action !== "cancel"))
+			if (!request || typeof request !== "object" || !BRIDGE_REQUEST_ACTIONS.includes(request.action))
 				return reject("无效的网关请求");
 			if (!validTarget(request.target)) return reject("无效的请求目标");
 			return accept({ type: "request", id: frame.id, request });
@@ -437,6 +423,10 @@ export function parseServerFrame(value: unknown): FrameParse<ServerFrame> {
 			if (!validRequestId(frame.id)) return reject("无效的 whoami 请求");
 			if (!validIdentity(frame.identity)) return reject("无效的会话标识");
 			return accept({ type: "identity", id: frame.id, identity: frame.identity });
+		case "watching":
+			if (!validRequestId(frame.id)) return reject("无效的 whoami 请求");
+			if (typeof frame.code !== "string" || !/^\d{6}$/.test(frame.code)) return reject("无效的验证码");
+			return accept({ type: "watching", id: frame.id, code: frame.code });
 		case "log":
 			if (typeof frame.message !== "string") return reject("无效的网关日志");
 			return accept({ type: "log", message: frame.message });
@@ -517,7 +507,6 @@ export function readFrames(
 				return;
 			}
 			let frame: unknown;
-			// Only a malformed line is expected to throw here: it ends the connection.
 			try {
 				frame = JSON.parse(line);
 				if (!frame || typeof frame !== "object" || Array.isArray(frame))

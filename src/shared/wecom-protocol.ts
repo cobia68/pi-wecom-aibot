@@ -1,10 +1,8 @@
 /**
- * WeCom callback bodies are parsed once, here, at the gateway boundary. pi receives
- * the result, so the raw platform format has exactly one reader.
+ * WeCom callback bodies are parsed only here, at the gateway boundary; pi receives the result.
  * Reference: https://developer.work.weixin.qq.com/document/path/101463
  */
 
-/** Connection state reported by the gateway and consumed by pi through IPC. */
 export type WeComState = "disconnected" | "connecting" | "connected" | "subscribed";
 
 /** A command such as aibot_send_msg is acknowledged within this time, or its outcome is unknown. */
@@ -14,7 +12,6 @@ export const WECOM_IMAGE_MIN_BYTES = 5;
 export const WECOM_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 /** A stream message must reach finish=true within 10 minutes of its first send. */
 export const WECOM_STREAM_LIFETIME_MS = 600_000;
-/** Replies to a message callback are accepted for 24 hours. */
 export const WECOM_REPLY_WINDOW_MS = 24 * 60 * 60_000;
 
 /** A conversation: chatId is the userid in a single chat (chatType 1), the group chatid otherwise. */
@@ -38,12 +35,11 @@ export interface InboundMessage {
 	userid: string;
 	/** Visible text; the leading @mention of a group message is removed. */
 	text: string;
-	/** Text the message quotes, when it says something in words; a quote that is only a picture leaves this unset. */
+	/** Words of the quoted message; unset for a picture-only quote. */
 	quoteText?: string;
 	attachments: Attachment[];
 }
 
-/** A JSON object from the platform; undefined for anything else. The one narrowing used at this boundary. */
 export function record(value: unknown): Record<string, unknown> | undefined {
 	return value !== null && typeof value === "object" && !Array.isArray(value)
 		? (value as Record<string, unknown>)
@@ -56,7 +52,6 @@ export function senderOf(value: unknown): string | undefined {
 	return typeof userid === "string" && userid ? userid : undefined;
 }
 
-/** undefined when the callback has no usable sender, conversation or text. */
 export function parseInbound(value: unknown): InboundMessage | undefined {
 	const body = record(value);
 	const userid = senderOf(body);
@@ -113,14 +108,9 @@ export function messageText(value: unknown): string | undefined {
 	}
 }
 
-/**
- * A quote that is not plainly text, so it may be an image this gateway sent: its type, field names and
- * any image download link. A quote never names the message it quotes; the gateway reads the image's own
- * marker to find out which session sent it.
- */
+/** A quote never names the message it quotes: the gateway reads an image's own marker to find its session. */
 export interface QuotedImage {
 	msgtype: string;
-	/** Top-level fields of the quote, names only. */
 	quoteFields: string[];
 	/** Fields of the quoted image, names only: whether WeCom sent an aeskey, or anything else. */
 	imageFields: string[];
@@ -128,7 +118,6 @@ export interface QuotedImage {
 	aeskey?: string;
 }
 
-/** undefined without a quote or for text, Markdown and voice quotes; an image may sit inside a mixed one. */
 export function quotedImage(value: unknown): QuotedImage | undefined {
 	const quote = record(record(value)?.quote);
 	const msgtype = typeof quote?.msgtype === "string" ? quote.msgtype : "";
@@ -148,14 +137,9 @@ export function quotedImage(value: unknown): QuotedImage | undefined {
 	};
 }
 
-/** A placeholder standing in for a picture, file or video: it names no target and is not something a person said. */
 const PLACEHOLDER = /^\[[^[\]\s]{1,20}\]$/;
 
-/**
- * The words of a quote. An image quote carries only a placeholder, and handing that to pi as if the user
- * had written "[图片]" makes the prompt look like it contains a statement it does not; a mixed quote keeps
- * its text and loses only the placeholders.
- */
+/** A quote's words without placeholders: "[图片]" handed to pi would read as something the user wrote. */
 function quotedWords(value: unknown): string | undefined {
 	const text = messageText(value);
 	if (text === undefined) return undefined;

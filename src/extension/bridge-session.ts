@@ -1,7 +1,6 @@
 /**
- * One pi session's connection through the shared gateway: its client, the WeCom messages it accepted and
- * the notifications it owes. A stop, a restart or a session change disposes it, and a disposed session
- * ignores everything that arrives late; nothing of it can reach the next one.
+ * One pi session's registration with the shared gateway. A stop, restart or session change disposes it;
+ * a disposed session ignores everything that arrives late, so nothing of it reaches the next one.
  */
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type {
@@ -33,15 +32,13 @@ import {
 	latestAssistantReply,
 } from "./notification-source.ts";
 
-/** WeCom messages accepted but not yet handed to pi: a bounded FIFO. */
 const MAX_QUEUE_SIZE = 50;
 const CONNECT_WAIT_MS = 30_000;
-/** pi refuses a prompt without telling extensions; only an idle session proves no run is coming. */
+/** pi refuses a prompt without telling extensions. */
 const DISPATCH_CHECK_MS = 5_000;
 const DISPATCH_REJECTED =
-	"pi 没有接受这条企微任务（可能未选择模型、缺少 API key、登录已过期或正在压缩），请在 pi 中处理后重新发送。";
+	"pi 没有接受这条企微任务（可能未选择模型、缺少 API key、登录已过期或正在压缩），请在 pi 中处理后重新发送";
 
-/** A WeCom message accepted by this pi; its status message belongs to the gateway. */
 interface BridgeRequest {
 	taskId: string;
 	source: NotificationSource;
@@ -57,23 +54,18 @@ interface BridgeRequest {
 	notificationQueued?: boolean;
 }
 
-/** What a session needs from the pi extension that owns it. */
 export interface BridgeHost {
-	/** The context of the latest pi event or command. */
 	context(): ExtensionContext | undefined;
-	/** The notification settings as they are now: read where they are used, never kept by the session. */
+	/** Read where used, never kept by the session, so another window's change applies. */
 	settings(): Settings;
 	/** pi is between agent_settled and its notification boundary: no queued task may start. */
 	settling(): boolean;
-	/** Hand a prepared prompt to pi; pi reports success only through before_agent_start. */
 	sendUserMessage(content: (TextContent | ImageContent)[]): void;
-	/** pi confirmed the run of this task, so its replies belong to that conversation. */
 	taskStarted?(chat: { chatId: string; chatType: 1 | 2; userid: string }): void;
-	/** false for a WeCom message this pi has already seen. */
 	firstSeen(msgId: string): boolean;
 	log(line: string): void;
 	notify(message: string, type?: "info" | "warning" | "error"): void;
-	/** The owner may update its display; late updates must not affect a replacement session. */
+	/** Late calls from a replaced session must not affect its replacement. */
 	connectionChanged?(session: BridgeSession): void;
 	/** Render this notification as a screen image; failures return the Markdown fallback. */
 	prepareImage(
@@ -81,33 +73,26 @@ export interface BridgeHost {
 		ctx: ExtensionContext,
 		signal: AbortSignal,
 	): Promise<GatewayNotification>;
-	/** A screen request: capture now, without starting a turn. */
 	captureScreen(ctx: ExtensionContext, signal: AbortSignal): Promise<GatewayImage | undefined>;
-	/** Abort the agent operation currently running in this session. */
 	abort(): void;
-	/** Dispose this session, e.g. after the client gave up or the pi session changed. */
 	stop(reason: string): void;
 }
 
 export class BridgeSession {
-	/** The pi session the gateway registration belongs to. */
 	readonly sessionId: string;
 	/** Credentials, permissions and the default target used by this registration; changes revoke it. */
 	readonly configKey: string;
 	state: WeComState = "disconnected";
 	detail: string | undefined;
 	gatewaySessions = 0;
-	/** The shared WeCom connection gave up and waits for /wecom-aibot connect (from the latest gateway status). */
 	private upstreamStopped = false;
 	private readonly host: BridgeHost;
 	private readonly client: BridgeClient;
 	private readonly contentPreparer = new InboundContentPreparer();
 	private readonly queue: BridgeRequest[] = [];
 	private readonly outbox: NotificationOutbox;
-	/** /wecom-aibot whoami waiting for this registration and subscription; an error ends the wait. */
 	private readonly readyWaiters = new Set<(error?: Error) => void>();
 	private active: BridgeRequest | undefined;
-	/** The prompt handed to pi; before_agent_start echoes it only for the run that really started. */
 	private dispatched: { request: BridgeRequest; text: string; images: number } | undefined;
 	/** The run this bridge started; undefined while the session's current run belongs to the user. */
 	private activeRun: BridgeRequest | undefined;
@@ -115,7 +100,6 @@ export class BridgeSession {
 	private streamText = "";
 	private finalText = "";
 	private drainTimer: ReturnType<typeof setTimeout> | undefined;
-	/** Aborts inbound media preparation, e.g. when this session is replaced. */
 	private readonly mediaAbort = new AbortController();
 	private disposed = false;
 	/** Detect a recovery that arrived before an earlier not-sent result was returned. */
@@ -124,7 +108,6 @@ export class BridgeSession {
 
 	constructor(
 		host: BridgeHost,
-		/** What this registration was made with; a different connection needs a new registration. */
 		readonly connection: Connection,
 		ctx: ExtensionContext,
 		createClient: (options: GatewayClientOptions) => BridgeClient,
@@ -151,7 +134,7 @@ export class BridgeSession {
 				kind: "connect",
 				...connection.target,
 				source: captureNotificationSource(ctx),
-				content: "引用本条消息回复，即可向这个会话发送任务。",
+				content: "引用本条消息回复，即可向这个会话发送任务",
 				afterEntryId: null,
 			});
 		}
@@ -187,6 +170,10 @@ export class BridgeSession {
 	get ready(): boolean {
 		return !this.disposed && this.state === "subscribed" && this.client.isReady();
 	}
+	/** The shared WeCom connection gave up, also before a first subscription; /wecom-aibot connect resumes it. */
+	get stopped(): boolean {
+		return !this.disposed && this.upstreamStopped && this.state === "disconnected";
+	}
 	get connectionStatus(): BridgeConnectionStatus | undefined {
 		return this.identifyOnly ? undefined : this.notices.connectionStatus;
 	}
@@ -195,6 +182,11 @@ export class BridgeSession {
 	}
 	get running(): boolean {
 		return !!this.active;
+	}
+	/** pi is running, or this bridge still holds a WeCom task: a task sent now would wait. */
+	get busy(): boolean {
+		const ctx = this.host.context();
+		return (ctx !== undefined && !ctx.isIdle()) || this.host.settling() || !!this.active || this.queue.length > 0;
 	}
 	get pendingNotifications(): number {
 		return this.outbox.size;
@@ -243,6 +235,10 @@ export class BridgeSession {
 			answer({ ok: false, error: "请求的 session 与当前 pi 不匹配" });
 			return;
 		}
+		if (request.action === "state") {
+			answer({ ok: true, busy: this.busy });
+			return;
+		}
 		if (request.action === "cancel") {
 			this.host.abort();
 			answer({ ok: true });
@@ -289,9 +285,8 @@ export class BridgeSession {
 	}
 
 	/**
-	 * pi started a run. Only the run that echoes the prompt this bridge handed over belongs to a WeCom
-	 * task; a different prompt means pi refused that task and the user started a local run, whose answer
-	 * must stay in the terminal.
+	 * pi confirms a dispatch only through before_agent_start: a run echoing the prompt handed over belongs
+	 * to the WeCom task; any other prompt means pi refused it and the user started a local run.
 	 */
 	promptStarted(prompt: string, images: number): boolean {
 		const dispatched = this.dispatched;
@@ -301,7 +296,6 @@ export class BridgeSession {
 		if (!dispatched || this.disposed || this.active !== dispatched.request) return false;
 		const request = dispatched.request;
 		if (dispatched.text !== prompt || dispatched.images !== images) {
-			// A different prompt started instead: pi never accepted this task's prompt.
 			this.failTask(request, DISPATCH_REJECTED);
 			return false;
 		}
@@ -310,7 +304,6 @@ export class BridgeSession {
 		return true;
 	}
 
-	/** The run ended: the active task's result and every completion notification are frozen and sent. */
 	settle(ctx: ExtensionContext, aborted: boolean): Promise<void> {
 		const run = this.activeRun;
 		this.activeRun = undefined;
@@ -320,18 +313,13 @@ export class BridgeSession {
 			run.aborted = aborted;
 			this.finishActive();
 		} else if (!run) {
-			// A run nobody scheduled through WeCom: only notificationScope=all-runs reports it, and its answer
-			// is read from the session branch because the task stream is not tracked for local runs.
+			// A local run: its answer is read from the session branch because its stream is not tracked.
 			this.queueLocalReply(ctx, aborted);
 		}
 		return this.outbox.prepare(ctx, aborted);
 	}
 
-	/**
-	 * notificationScope=all-runs: a run typed in this terminal reports its own result to the default
-	 * destination this registration adopted. A WeCom task already reports through its status message,
-	 * and an upload or a send without a destination stays silent instead of guessing one.
-	 */
+	/** notificationScope=all-runs: a terminal run reports to the adopted default target, never a guessed one. */
 	private queueLocalReply(ctx: ExtensionContext, aborted: boolean): void {
 		if (this.host.settings().notificationScope !== "all-runs" || this.identifyOnly) return;
 		const { target } = this.connection;
@@ -348,7 +336,6 @@ export class BridgeSession {
 	}
 
 	// ---------------------------------------------------------------- wecom_send
-	/** Send when the run ends; the latest call for the same conversation wins. */
 	schedule(request: CompletionRequest): void {
 		if (this.identifyOnly) throw new Error("临时识别连接不能安排通知，请运行 /wecom-aibot connect 正式接入");
 		this.outbox.schedule(request);
@@ -379,7 +366,6 @@ export class BridgeSession {
 	}
 
 	// ---------------------------------------------------------------- whoami
-	/** Resolve once this pi is registered and the bot is subscribed; stop, cancel or timeout reject. */
 	waitUntilReady(signal: AbortSignal): Promise<void> {
 		return new Promise((resolve, reject) => {
 			const finish = (error?: Error) => {
@@ -407,8 +393,8 @@ export class BridgeSession {
 		});
 	}
 
-	watchIdentity(timeoutMs: number, signal: AbortSignal): Promise<ChatIdentity> {
-		return this.client.watchIdentity(timeoutMs, signal);
+	watchIdentity(timeoutMs: number, signal: AbortSignal, onCode: (code: string) => void): Promise<ChatIdentity> {
+		return this.client.watchIdentity(timeoutMs, signal, onCode);
 	}
 
 	// ---------------------------------------------------------------- client events
@@ -419,7 +405,7 @@ export class BridgeSession {
 		const ready = this.ready;
 		const { becameReady, becameStopped } = this.notices.update({
 			ready,
-			stopped: this.upstreamStopped && next === "disconnected",
+			stopped: this.stopped,
 			detail,
 		});
 		if (ready) {
@@ -511,7 +497,7 @@ export class BridgeSession {
 		}, delay);
 	}
 
-	/** pi only reports where the task is; the gateway shows it, ends the message in time and words it. */
+	/** The gateway owns the status message: its wording, and ending it before WeCom's 10-minute limit. */
 	private report(request: BridgeRequest, taskState: TaskState): boolean {
 		return this.client.taskStatus(request.taskId, taskState);
 	}
@@ -534,7 +520,6 @@ export class BridgeSession {
 		this.active = request;
 		this.streamText = "";
 		this.finalText = "";
-		// The gateway ends the status message before WeCom's 10-minute limit; the result follows as a notification.
 		if (!this.report(request, "running")) {
 			this.active = undefined;
 			this.queue.unshift(request);
@@ -543,7 +528,6 @@ export class BridgeSession {
 		this.dispatched = { request, ...promptOf(prepared.content) };
 		try {
 			this.host.sendUserMessage(prepared.content);
-			// pi accepts the prompt asynchronously and swallows its own refusals, so confirm it later.
 			this.armDispatchCheck();
 		} catch (err) {
 			this.dispatched = undefined;
@@ -552,16 +536,12 @@ export class BridgeSession {
 			this.host.log(`sendUserMessage failed: ${errMsg(err)}`);
 			this.failTask(request, `pi 未能启动本次任务：${errMsg(err)}`);
 		} finally {
-			// pi now owns its input (or rejected it); this bridge retains no image payload for the active run.
 			prepared.release();
 			request.prepared = undefined;
 		}
 	}
 
-	/**
-	 * An idle session after a dispatch means pi refused the prompt: no run started and none is coming.
-	 * A busy session still has that run in preparation, so keep waiting for its before_agent_start.
-	 */
+	/** Idle after a dispatch means pi refused the prompt; busy means its run may still be preparing. */
 	private armDispatchCheck(): void {
 		if (this.dispatchTimer || !this.dispatched) return;
 		this.dispatchTimer = setTimeout(() => {
@@ -625,7 +605,7 @@ export function abortError(): Error {
 	return Object.assign(new Error("whoami 已取消"), { name: "AbortError" });
 }
 
-/** What before_agent_start reports for the prompt built here: pi's own text/image normalization. */
+/** Mirrors how before_agent_start reports the prompt (text parts joined by "\n", image count). */
 function promptOf(content: (TextContent | ImageContent)[]): { text: string; images: number } {
 	return {
 		text: content

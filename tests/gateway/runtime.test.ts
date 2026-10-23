@@ -19,9 +19,14 @@ let sequence = 0;
 class Peer implements GatewayPeer {
 	frames: ServerFrame[] = [];
 	closed = false;
+	/** The answer to a state question; undefined stays silent. */
+	busy: boolean | undefined = false;
+	constructor(private readonly instanceId: string) {}
 	send(frame: ServerFrame): boolean {
 		if (this.closed) return false;
 		this.frames.push(frame);
+		if (frame.type === "request" && frame.request.action === "state" && this.busy !== undefined)
+			gateway.response(this.instanceId, frame.id, { ok: true, busy: this.busy });
 		return true;
 	}
 	close(): void {
@@ -29,6 +34,15 @@ class Peer implements GatewayPeer {
 	}
 	messages() {
 		return this.frames.filter((frame) => frame.type === "task");
+	}
+	/** The one-time code of the watch with this id, as the gateway announced it. */
+	code(id: string): string {
+		const frame = this.frames.find((item) => item.type === "watching" && item.id === id);
+		assert.ok(frame?.type === "watching", `no code for ${id}`);
+		return frame.code;
+	}
+	identities() {
+		return this.frames.filter((frame) => frame.type === "identity");
 	}
 }
 
@@ -49,7 +63,7 @@ function registration(instanceId: string, sessionId = instanceId): GatewayRegist
 function add(instanceId: string, sessionId = instanceId, modify?: (value: GatewayRegistration) => void) {
 	const value = registration(instanceId, sessionId);
 	modify?.(value);
-	const peer = new Peer();
+	const peer = new Peer(instanceId);
 	gateway.register(value, peer);
 	const ws = FakeWebSocket.instances.at(-1)!;
 	ws.onSend = (frame) => {
@@ -88,8 +102,12 @@ function send(sessionId: string, text: string, body: Record<string, unknown> = {
 	return message(`/wecom-aibot send --sessionid ${sessionId} --prompt ${text}`, body);
 }
 
+/** Screen and cancel requests; the state questions of session lists are left out. */
 function requests(peer: Peer) {
-	return peer.frames.filter((frame) => frame.type === "request");
+	return peer.frames.filter(
+		(frame): frame is Extract<ServerFrame, { type: "request" }> =>
+			frame.type === "request" && frame.request.action !== "state",
+	);
 }
 
 function quote(sessionId: string) {
@@ -180,6 +198,32 @@ test("a task's text result replaces its status message instead of a second push"
 	assert.equal(frames.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "one bubble per task");
 });
 
+test("a result the status message refuses closes the status once, then is pushed", async () => {
+	const a = add("A", SESSION_A);
+	const frames: any[] = [];
+	a.ws.onSend = (frame: any) => {
+		frames.push(frame);
+		if (frame.cmd === "aibot_respond_msg" && /RESULT-BODY/.test(frame.body.stream.content))
+			a.ws.receive({ headers: frame.headers, errcode: 40008, errmsg: "refused" });
+		else a.ws.acknowledge(frame);
+	};
+	const id = send(SESSION_A, "task").headers.req_id;
+	gateway.taskStatus("A", id, "running");
+	gateway.taskStatus("A", id, "settled");
+	await gateway.notify(
+		"A",
+		{ chatId: "user", chatType: 1 },
+		{ kind: "reply", source: a.value.source, text: "RESULT-BODY", taskId: id },
+	);
+	const finishes = frames.filter((frame) => frame.cmd === "aibot_respond_msg" && frame.body.stream.finish);
+	assert.equal(finishes.length, 2, "the refused result, then one closing status");
+	assert.doesNotMatch(finishes[1].body.stream.content, /RESULT-BODY/);
+	const pushes = frames.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(pushes.length, 1);
+	assert.match(JSON.stringify(pushes[0].body), /RESULT-BODY/);
+	assert.ok(frames.indexOf(finishes[1]) < frames.indexOf(pushes[0]), "the status closes before the push");
+});
+
 test("a late result cannot finish another task's status message even in the same chat", async () => {
 	const a = add("A", SESSION_A);
 	a.ws.onSend = (frame) => {
@@ -235,8 +279,8 @@ test("temporary identity registrations are hidden and cannot be targeted or publ
 	);
 
 	gateway.watch("I", "identity-watch", 60_000);
-	message("identify me");
-	assert.equal(identifying.peer.frames.filter((frame) => frame.type === "identity").length, 1);
+	message(identifying.peer.code("identity-watch"));
+	assert.equal(identifying.peer.identities().length, 1);
 	assert.equal(a.peer.messages().length, 0);
 	gateway.unregister("I", identifying.peer);
 	send(SESSION_A, "A still works");
@@ -267,7 +311,7 @@ test("an unknown session ID gets an error plus the current list, never a guess",
 });
 
 test("sessions lists directory, model, state and the full session ID on its own line", () => {
-	const a = add("A", SESSION_A);
+	add("A", SESSION_A);
 	add("B", SESSION_B);
 	message("/wecom-aibot sessions");
 	const text = prompt();
@@ -275,12 +319,44 @@ test("sessions lists directory, model, state and the full session ID on its own 
 	assert.match(text, /project-A · provider-A · model-A · 空闲/);
 	assert.match(text, new RegExp(`session: ${SESSION_A}`));
 	assert.match(text, new RegExp(`session: ${SESSION_B}`));
-	// A running task is visible as busy.
-	send(SESSION_A, "long task");
-	const taskId = a.peer.messages()[0].task.id;
-	gateway.taskStatus("A", taskId, "running");
+});
+
+test("sessions shows what each pi says right now, not what the gateway saw of its tasks", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const a = add("A", SESSION_A);
+	// A run typed in pi itself: no WeCom task exists.
+	a.peer.busy = true;
 	message("/wecom-aibot sessions");
 	assert.match(prompt(), /project-A · provider-A · model-A · 执行中/);
+	// A WeCom task past its status deadline: the gateway closed the status message, pi still runs.
+	send(SESSION_A, "long task");
+	gateway.taskStatus("A", a.peer.messages()[0].task.id, "running");
+	t.mock.timers.tick(600_000);
+	message("/wecom-aibot sessions");
+	assert.match(prompt(), /project-A · provider-A · model-A · 执行中/);
+	a.peer.busy = false;
+	message("/wecom-aibot sessions");
+	assert.match(prompt(), /project-A · provider-A · model-A · 空闲/);
+});
+
+test("sessions waits a moment for a silent pi, then lists it as unknown", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const a = add("A", SESSION_A);
+	add("B", SESSION_B);
+	a.peer.busy = undefined;
+	const replies = () => a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").length;
+	const before = replies();
+	message("/wecom-aibot sessions");
+	assert.equal(replies(), before, "the list waits for A");
+	t.mock.timers.tick(2_000);
+	assert.equal(replies(), before + 1);
+	assert.match(prompt(), /project-A · provider-A · model-A · 状态未知/);
+	assert.match(prompt(), /project-B · provider-B · model-B · 空闲/);
+	// A pi that leaves while it is asked is answered for at once and not listed.
+	message("/wecom-aibot sessions");
+	gateway.unregister("A", a.peer);
+	assert.equal(replies(), before + 2);
+	assert.match(prompt(), /当前有 1 个在线会话/);
 });
 
 test("a quoted notification routes that one message, without remembering anything", () => {
@@ -451,7 +527,7 @@ test("switching sessions invalidates old callbacks and late disconnects cannot r
 	const inbound = send(SESSION_A, "task A");
 	const next = registration("A", SESSION_B);
 	next.registrationId = "new-registration";
-	const peer = new Peer();
+	const peer = new Peer("A");
 	gateway.register(next, peer);
 	assert.equal(a.peer.closed, true);
 	gateway.unregister("A", a.peer);
@@ -551,77 +627,76 @@ test("only a registered pi can wait for an identity, and registration needs this
 	assert.equal(gateway.size, 1);
 });
 
-test("whoami consumes only the next message for the waiting pi and reports its conversation", () => {
+test("only the message that is exactly a pi's one-time code identifies its chat; every other message is routed", () => {
 	const a = add("A", SESSION_A);
 	const b = add("B", SESSION_B);
-	gateway.watch("A", "watch-1", 60_000);
-	const frame = message("@bot 随便什么内容", {
-		from: { userid: "user_one" },
-		chattype: "group",
-		chatid: "group_chat",
-	});
-	assert.deepEqual(
-		a.peer.frames.filter((item) => item.type === "identity"),
-		[{ type: "identity", id: "watch-1", identity: { chatId: "group_chat", chatType: 2, userid: "user_one" } }],
-	);
-	assert.equal(
-		b.peer.frames.some((item) => item.type === "identity"),
-		false,
-	);
-	assert.equal(a.peer.messages().length + b.peer.messages().length, 0, "the identifying message is not a task");
+	const code = gateway.watch("A", "watch-a", 60_000);
+	gateway.watch("B", "watch-b", 60_000);
+	assert.match(code, /^\d{6}$/);
+	assert.equal(a.peer.code("watch-a"), code, "the code is announced to the pi that asked");
+	assert.notEqual(b.peer.code("watch-b"), code, "two waiting pi windows never share a code");
+	// Anything else, from anyone, is routed as usual while both wait: a colleague's task is not swallowed.
+	send(SESSION_A, "a real task");
+	assert.equal(a.peer.messages().length, 1);
+	message(`${code} and more`);
+	assert.deepEqual(a.peer.identities(), []);
+	const frame = message(`@bot ${code}`, { from: { userid: "user_one" }, chattype: "group", chatid: "group_chat" });
+	assert.deepEqual(a.peer.identities(), [
+		{ type: "identity", id: "watch-a", identity: { chatId: "group_chat", chatType: 2, userid: "user_one" } },
+	]);
+	assert.deepEqual(b.peer.identities(), [], "only the pi whose code it is learns the chat");
+	assert.equal(a.peer.messages().length + b.peer.messages().length, 1, "the code is not a task");
 	const receipt = a.ws.sent.at(-1);
 	assert.equal(receipt.cmd, "aibot_respond_msg");
 	assert.equal(receipt.headers.req_id, frame.headers.req_id);
 	assert.equal(receipt.body.stream.finish, true);
 	assert.match(receipt.body.stream.content, /chatid：`group_chat`　chat_type：2　userid：`user_one`/);
 	assert.match(receipt.body.stream.content, /不会交给 pi/);
-
-	// The hold is released after one message: the next one follows the normal command rules.
-	message("/wecom-aibot sessions", { from: { userid: "user_one" }, chattype: "group", chatid: "group_chat" });
-	assert.match(prompt(), /当前有 2 个在线会话/);
-	assert.equal(a.peer.frames.filter((item) => item.type === "identity").length, 1);
+	// A code is used once; B's code typed with full-width digits from a Chinese IME still counts.
+	const wide = b.peer.code("watch-b").replace(/\d/g, (digit) => String.fromCharCode(0xff10 + Number(digit)));
+	message(wide);
+	assert.equal(b.peer.identities().length, 1);
+	message(code);
+	assert.equal(a.peer.identities().length, 1);
 });
 
-test("a cancelled or expired whoami stops capturing, and a stale cancel cannot end a newer one", (t) => {
+test("a cancelled or expired code identifies nothing, and a stale cancel cannot end a newer one", (t) => {
 	t.mock.timers.enable({ apis: ["Date"] });
 	const a = add("A", SESSION_A);
-	gateway.watch("A", "watch-1", 60_000);
+	const first = gateway.watch("A", "watch-1", 60_000);
 	gateway.unwatch("A", "watch-1");
-	send(SESSION_A, "after cancel");
-	gateway.watch("A", "watch-2", 1000);
+	message(first);
+	const second = gateway.watch("A", "watch-2", 1000);
 	t.mock.timers.tick(1001);
-	send(SESSION_A, "after expiry");
-	assert.equal(a.peer.messages().length, 2);
-	gateway.watch("A", "watch-3", 60_000);
+	message(second);
+	assert.deepEqual(a.peer.identities(), []);
+	const third = gateway.watch("A", "watch-3", 60_000);
 	gateway.unwatch("A", "watch-2");
-	send(SESSION_A, "identified");
-	const identities = a.peer.frames.filter((item) => item.type === "identity");
+	message(third);
+	const identities = a.peer.identities();
 	assert.equal(identities.length, 1);
 	assert.ok(identities[0].type === "identity" && identities[0].id === "watch-3");
-	assert.equal(a.peer.messages().length, 2);
 });
 
-test("whoami follows the waiting pi's allowlist and belongs to the connection that asked", () => {
+test("the code identifies a sender outside the allowlist, who stays silent otherwise; it belongs to the connection that asked", () => {
 	const a = add("A", SESSION_A, (value) => {
 		value.config.allowedUserIds = ["alice"];
 	});
-	gateway.watch("A", "watch", 60_000);
+	const code = gateway.watch("A", "watch", 60_000);
 	const count = a.ws.sent.length;
-	message("stranger", { from: { userid: "stranger" } });
-	assert.equal(a.ws.sent.length, count, "a sender outside the allowlist gets no receipt");
-	assert.equal(
-		a.peer.frames.some((item) => item.type === "identity"),
-		false,
-	);
+	message("hello", { from: { userid: "stranger" } });
+	assert.equal(a.ws.sent.length, count, "a sender outside the allowlist gets no reply to anything else");
+	message(code, { from: { userid: "stranger" } });
+	assert.deepEqual(a.peer.identities(), [
+		{ type: "identity", id: "watch", identity: { chatId: "stranger", chatType: 1, userid: "stranger" } },
+	]);
+	assert.equal(a.peer.messages().length, 0, "being identified grants no task");
 
-	const replacement = new Peer();
+	const next = gateway.watch("A", "watch-next", 60_000);
+	const replacement = new Peer("A");
 	gateway.register(registration("A", SESSION_A), replacement);
-	send(SESSION_A, "alice", { from: { userid: "alice" } });
-	assert.equal(replacement.messages().length, 1, "a re-registered connection does not inherit the old whoami");
-	assert.equal(
-		replacement.frames.some((item) => item.type === "identity"),
-		false,
-	);
+	message(next, { from: { userid: "alice" } });
+	assert.deepEqual(replacement.identities(), [], "a re-registered connection does not inherit the old code");
 });
 
 test("duplicate callbacks cannot produce a second command reply or pi task", () => {

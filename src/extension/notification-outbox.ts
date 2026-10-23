@@ -1,10 +1,6 @@
 /**
- * The notifications one registration owes. An entry moves through explicit phases, so "may still be
- * prepared", "frozen and waiting for a connection" and "handed to the gateway, ACK pending" are never
- * inferred from a combination of optional fields.
- *
- * Delivery certainty is the point of this module: only a known not-sent result is retained and retried;
- * a rejection is reported, and an unknown ACK outcome is never pushed twice.
+ * The notifications one registration owes. Only a known not-sent result is retained and retried; a rejection
+ * is reported for user action, and an unknown ACK outcome is never pushed twice.
  */
 import { rmSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -19,7 +15,6 @@ const MAX_QUEUE_SIZE = 50;
 
 /** A wecom_send with after_settle, or the result of a finished task: content is read when the run ends. */
 export interface CompletionRequest {
-	/** The connection entry has its own outbox key; it cannot replace a task's final notification. */
 	kind?: "connect";
 	taskId?: string;
 	chatId: string;
@@ -35,15 +30,13 @@ export interface CompletionRequest {
 	afterEntryId: string | null;
 }
 
-/** What the outbox needs from the session that owns it. */
 export interface OutboxHost {
 	isReady(): boolean;
 	/** Counts subscriptions; a changed value during an attempt means a recovery must be re-checked. */
 	subscription(): number;
-	/** Read when a notification is prepared, so a frozen notification keeps the mode it was made with. */
 	notificationMode(): NotificationMode;
 	context(): ExtensionContext | undefined;
-	/** Render this notification as a screen image; failures return the Markdown fallback. */
+	/** Failures resolve to the Markdown fallback rather than rejecting. */
 	prepareImage(
 		notification: GatewayNotification,
 		ctx: ExtensionContext,
@@ -56,15 +49,12 @@ export interface OutboxHost {
 	signal: AbortSignal;
 }
 
-/** Where an entry is in its life; only these transitions exist. */
 type Phase =
-	/** Scheduled or created from a finished task; nothing is frozen yet. */
 	| { kind: "pending" }
 	/** An image is being rendered; settle and reconnect must not start a second capture. */
 	| { kind: "preparing"; promise: Promise<void> }
 	/** The payload is frozen; a reconnect sends exactly this. */
 	| { kind: "ready"; notification: GatewayNotification }
-	/** Handed to the gateway; concurrent settle/reconnect events share this attempt. */
 	| { kind: "delivering"; notification: GatewayNotification; promise: Promise<void> };
 
 interface Entry {
@@ -73,7 +63,6 @@ interface Entry {
 }
 
 export class NotificationOutbox {
-	/** Prepared but not yet handed over: pending, preparing or ready. */
 	private readonly waiting = new Map<string, Entry>();
 	/** Handed over at a ready connection: ready again after a known not-sent result, or delivering. */
 	private readonly handedOver = new Set<Entry>();
@@ -85,17 +74,13 @@ export class NotificationOutbox {
 		return this.waiting.size + this.handedOver.size;
 	}
 
-	/** Send when the run ends; the latest call for the same conversation wins. */
 	schedule(request: CompletionRequest): void {
 		const key = keyOf(request);
 		if (!this.waiting.has(key) && this.size >= MAX_QUEUE_SIZE) throw new Error("待发送通知过多，请稍后重试");
 		this.waiting.set(key, { request, phase: { kind: "pending" } });
 	}
 
-	/**
-	 * A finished task's result. A scheduled notification to the same conversation owns the final
-	 * delivery, and previous runs' attempted deliveries cannot swallow this newer result.
-	 */
+	/** A scheduled notification to the same conversation owns the final delivery; handed-over entries never absorb it. */
 	queueResult(request: CompletionRequest): void {
 		const key = keyOf(request);
 		const scheduled = this.waiting.get(key);
@@ -108,7 +93,6 @@ export class NotificationOutbox {
 		this.waiting.set(key, { request, phase: { kind: "pending" } });
 	}
 
-	/** Freeze every waiting result, render images where the mode asks for one, then deliver what is ready. */
 	async prepare(ctx: ExtensionContext, aborted: boolean, boundary: "settled" | "ready" = "settled"): Promise<void> {
 		if (this.disposed) return;
 		const images: Promise<void>[] = [];
@@ -144,7 +128,6 @@ export class NotificationOutbox {
 				// Validate the Markdown fallback before any image side effects; the gateway renders it once.
 				const problem = notificationProblem(ready.source, ready.text, ready);
 				if (problem) throw new Error(problem);
-				// All notifications follow the same mode; failure explanations must never leak a local screen.
 				if (request.textOnly || this.host.notificationMode() !== "screenshot") {
 					entry.phase = { kind: "ready", notification: ready };
 					continue;
@@ -174,11 +157,9 @@ export class NotificationOutbox {
 		else await flush;
 	}
 
-	/** Transfer ready entries at a live connection and deliver them, one attempt per entry at a time. */
 	async flush(): Promise<void> {
 		if (this.disposed) return;
-		// Transfer only at a ready connection: queueResult first needs to see any completion prepared
-		// while offline, so it does not create an extra automatic reply for that same run.
+		// Transfer only when ready: queueResult must still find a completion prepared offline, or the run gets two replies.
 		if (this.host.isReady())
 			for (const [key, entry] of this.waiting) {
 				if (entry.phase.kind !== "ready") continue;
@@ -192,7 +173,6 @@ export class NotificationOutbox {
 				continue;
 			}
 			if (!this.host.isReady() || entry.phase.kind !== "ready") continue;
-			// Content stays frozen through the ACK; a newer run has an independent entry.
 			const notification = entry.phase.notification;
 			const subscription = this.host.subscription();
 			let retained = false;
@@ -214,7 +194,6 @@ export class NotificationOutbox {
 					}
 					this.handedOver.delete(entry);
 					this.removeImage(notification);
-					// A rejection needs user action; an unknown ACK outcome must never trigger an automatic duplicate.
 					this.host.log(`notification failed (${outcome}): ${errMsg(error)}`);
 					this.host.notify(
 						`企微通知${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errMsg(error)}`,
@@ -224,7 +203,7 @@ export class NotificationOutbox {
 				.finally(() => {
 					if (this.handedOver.has(entry) && entry.phase.kind === "delivering")
 						entry.phase = { kind: "ready", notification };
-					// The subscribed event may have already visited this in-flight attempt. Do not miss that recovery.
+					// A resubscribe during this attempt already passed it by; retry here or that recovery is lost.
 					if (retained && !this.disposed && this.host.subscription() !== subscription && this.host.isReady()) {
 						void this.flush().catch((error: unknown) =>
 							this.host.log(`notification retry failed: ${errMsg(error)}`),
@@ -259,7 +238,6 @@ export class NotificationOutbox {
 	}
 }
 
-/** Delete a notification's temporary PNG; used for direct sends as well as queued ones. */
 export function removeNotificationImage(
 	notification: GatewayNotification | undefined,
 	log: (line: string) => void,

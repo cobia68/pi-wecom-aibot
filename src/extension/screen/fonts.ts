@@ -1,6 +1,6 @@
 /**
- * Font discovery and sfnt parsing for the screen renderer. WebAssembly cannot see system fonts, so the
- * fonts are found here and read into buffers, with a CJK font so Chinese text renders.
+ * Font discovery and sfnt parsing for the screen renderer: WebAssembly cannot see system fonts, so
+ * they are found and read into buffers here.
  */
 
 import { execFileSync } from "node:child_process";
@@ -20,14 +20,13 @@ export interface FontEnvironment {
 	env: Record<string, string | undefined>;
 	home: string;
 	exists(path: string): boolean;
-	/** Native font asset directories; an unreadable directory is an empty list. */
+	/** An unreadable directory is an empty list. */
 	list?(directory: string): string[];
 	/** Run a command and return stdout; undefined when it is missing or fails. */
 	run(command: string, args: string[]): string | undefined;
 }
 
 export interface FontSet {
-	/** The font host, when known, for platform-specific missing-font guidance. */
 	platform?: NodeJS.Platform;
 	buffers: Uint8Array[];
 	/** Font-family list: monospace first, then fallbacks for CJK and symbols. */
@@ -81,11 +80,11 @@ export function missingCjkFontMessage(platform: NodeJS.Platform = process.platfo
 	if (platform === "darwin")
 		return "没有找到可用的苹方（PingFang SC）中文字体；请在 macOS 字体册中启用或恢复系统苹方后重试";
 	if (platform === "linux")
-		return "Linux 没有找到可用的 CJK 中文字体，请安装系统字体后重试。Debian/Ubuntu：sudo apt install fonts-noto-cjk fontconfig；Arch：sudo pacman -S noto-fonts-cjk fontconfig。";
+		return "Linux 没有找到可用的 CJK 中文字体，请安装系统字体后重试。Debian/Ubuntu：sudo apt install fonts-noto-cjk fontconfig；Arch：sudo pacman -S noto-fonts-cjk fontconfig";
 	return "当前系统没有找到可用的 CJK 中文字体；请安装支持中文的系统字体后重试";
 }
 
-/** System fonts only: monospace for terminal alignment, YaHei/PingFang on Windows/macOS, installed CJK on Linux. */
+/** System fonts only. */
 export function findFonts(environment: FontEnvironment = systemEnvironment): { mono?: string; cjk?: string } {
 	const { platform, env, home, exists } = environment;
 	const firstIn = (join: (...parts: string[]) => string, dirs: string[], names: string[]) => {
@@ -171,8 +170,7 @@ export function findEmojiFont(environment: FontEnvironment = systemEnvironment):
 	if (platform === "win32") {
 		const dirs = [win32.join(env.WINDIR || env.SystemRoot || "C:\\Windows", "Fonts")];
 		if (env.LOCALAPPDATA) dirs.push(win32.join(env.LOCALAPPDATA, "Microsoft", "Windows", "Fonts"));
-		// Windows ships only the color Segoe UI Emoji; a manually installed Noto Emoji may use the
-		// variable-font file name, so look at what is actually in the font directories.
+		// Windows ships only the color Segoe UI Emoji; a manually installed Noto Emoji may use the variable-font file name.
 		const listed = dirs.flatMap((dir) =>
 			(environment.list?.(dir) ?? [])
 				.filter((name) => /^NotoEmoji.*\.(?:ttf|otf)$/i.test(name))
@@ -203,7 +201,6 @@ export function findEmojiFont(environment: FontEnvironment = systemEnvironment):
 	return listed.find((path) => !/color.*emoji|emoji.*color|seguiemj|apple color emoji/i.test(path));
 }
 
-/** Read the fonts discovered on this system, skipping any that do not parse as a font. */
 export function loadFonts(
 	environment: FontEnvironment = systemEnvironment,
 	read: (path: string) => Uint8Array = readFileSync,
@@ -281,10 +278,7 @@ export function loadFonts(
 /** PingFang contains multiple weights and regional families; keep parsing bounded without stopping at eight faces. */
 const MAX_FONT_FACES = 32;
 
-/**
- * Family names and monospace metrics from a TrueType/OpenType font or collection, read from the
- * sfnt tables. Malformed data yields what was read so far rather than an exception.
- */
+/** Malformed data yields what was read so far rather than an exception. */
 export function readFontInfo(data: Uint8Array): { families: string[]; metrics?: FontMetrics; hasCjk: boolean } {
 	const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 	const families: string[] = [];
@@ -317,7 +311,6 @@ export function readFontInfo(data: Uint8Array): { families: string[]; metrics?: 
 	return { families: [...new Set(families)], metrics, hasCjk };
 }
 
-/** The Unicode cmap formats used by modern TrueType/OpenType fonts (BMP and full Unicode). */
 function cmapHasGlyph(view: DataView, table: number, code: number): boolean {
 	for (let i = 0; i < view.getUint16(table + 2); i++) {
 		const record = table + 4 + i * 8;
@@ -396,5 +389,3 @@ function faceMetrics(view: DataView, tables: Map<string, number>): FontMetrics |
 		lineGap: Math.max(0, view.getInt16(hhea + 8)) / unitsPerEm,
 	};
 }
-
-// ---------------------------------------------------------------- PNG

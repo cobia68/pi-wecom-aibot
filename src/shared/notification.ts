@@ -9,12 +9,12 @@ const MAX_NOTIFICATION_BODY_BYTES = 256 * 1024;
 /** The second line of a task's status message. The gateway recognises quoted status messages by it. */
 const STATUS_TEXT = {
 	running: "执行中…",
-	settled: "本轮已结束。",
-	notifying: "本轮已结束，结果将另行通知。",
-	stopped: "转发已停止。",
-	waiting: "任务仍在执行，请等待会话通知。",
-	busy: "当前等待任务较多，请稍后重试。",
-	failed: "消息处理失败，请检查消息内容后重试。",
+	settled: "本轮已结束",
+	notifying: "本轮已结束，结果将另行通知",
+	stopped: "转发已停止",
+	waiting: "任务仍在执行，请等待会话通知",
+	busy: "当前等待任务较多，请稍后重试",
+	failed: "消息处理失败，请检查消息内容后重试",
 } as const;
 export type ProcessingState = keyof typeof STATUS_TEXT;
 
@@ -35,7 +35,6 @@ const TITLES: Record<NotificationKind, string> = {
 /** Markdown header line icons. The rendered image draws its own SVG line icons instead. */
 export const NOTIFICATION_ICONS = { title: "🔔", model: "🏷️", session: "🆔" } as const;
 
-/** The source fields of a rendered image, cleaned of control characters; the renderer adds the labels. */
 export function notificationHeader(source: NotificationSource, kind: NotificationKind) {
 	validateSessionId(source.sessionId);
 	const clean = (value: string) => metadataValue(value, true);
@@ -120,7 +119,6 @@ export function formatProcessingStatus(sessionId: string, state: ProcessingState
 	return `${NOTIFICATION_ICONS.session} session: ${metadataValue(sessionId, false)}  \n${STATUS_TEXT[state]}`;
 }
 
-/** One envelope for final notifications and deployment checks. */
 export function formatNotification(
 	source: NotificationSource,
 	text: string,
@@ -137,10 +135,7 @@ export function formatNotification(
 	});
 }
 
-/**
- * The gateway's half of formatNotification: the source header plus a body that is already excerpted.
- * An excerpt and a reply are cut to the byte limit; other text that does not fit is an error.
- */
+/** The gateway's half of formatNotification: the body arrives already excerpted. */
 export function renderNotification(
 	source: NotificationSource,
 	body: string,
@@ -151,10 +146,7 @@ export function renderNotification(
 	return layout.text;
 }
 
-/**
- * The same rules as renderNotification, returned instead of rendered: callers that only need to know
- * whether a notification is sendable do not render it, and the body is rendered exactly once.
- */
+/** renderNotification's rules as a returned reason, for callers that only ask whether it is sendable. */
 export function notificationProblem(
 	source: NotificationSource,
 	text: string,
@@ -209,10 +201,7 @@ function layoutNotification(
 	return { text: header + content + suffix };
 }
 
-/**
- * pi's half: excerpt here, where the full reply is, and bound the body for IPC. The gateway renders it.
- * formatNotification(source, text, options) is what the gateway will send.
- */
+/** pi's half: excerpt here, where the full reply is, and bound the body for IPC; the gateway renders it. */
 export function notificationPayload(
 	kind: GatewayNotification["kind"],
 	source: NotificationSource,
@@ -237,10 +226,7 @@ export function notificationPayload(
 	};
 }
 
-/**
- * The session IDs a quoted message routes to. A notification's or status message's source header is
- * authoritative; a damaged header yields "", which never matches, so routing asks instead of guessing.
- */
+/** The source header is authoritative; a damaged one yields "", which never matches, so routing asks, not guesses. */
 export function quotedSessions(text: string): string[] {
 	const lines = text
 		.trimStart()
@@ -259,7 +245,9 @@ export function quotedSessions(text: string): string[] {
 const titleAlternatives = [...new Set(Object.values(TITLES))].join("|");
 const TITLE_LINE = new RegExp(` · (?:${titleAlternatives})$`);
 const TITLE_ANYWHERE = new RegExp(` · (?:${titleAlternatives})(?:\\s|$)`);
-const STATUS_LINES = new Set<string>(Object.values(STATUS_TEXT));
+/** Status lines as sent now and as sent before they lost their final full stop: both may be quoted. */
+const OLD_FULL_STOP = "。";
+const STATUS_LINES = new Set<string>(Object.values(STATUS_TEXT).flatMap((line) => [line, `${line}${OLD_FULL_STOP}`]));
 
 function sessionInLine(line: string | undefined): string | undefined {
 	const id = /^(?:🆔 )?session: ([^\s]+)[ \t]*$/.exec(line ?? "")?.[1];

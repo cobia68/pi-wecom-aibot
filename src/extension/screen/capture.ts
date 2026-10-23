@@ -1,22 +1,16 @@
 /**
- * Capture pi's rendered terminal text, not the desktop. Pi 1.3 mounts seven containers:
- * document, pending messages, status, widgets-above, editor, widgets-below, footer.
- * There is no public screenshot API. Keep that internal layout dependency here and fail closed
- * when it changes; never fall back to rendering the whole TUI (which would expose editor drafts).
- * Only the first three are captured: a powerline footer renders into widgets-above as the status
- * bar, and that bar (like the editor and footer below it) is never part of a notification image.
- *
- * Without a screenshot theme the rows are exactly what pi shows. A named pi theme renders them in that
- * theme instead: components read pi's global theme while they render, so it is swapped for that one
- * synchronous render and restored before pi can draw a frame. That global is the second internal
- * dependency kept here, and only a named theme touches it.
+ * Capture pi's rendered terminal text, not the desktop; pi has no screenshot API. Two pi internals are
+ * kept here and fail closed when they change: pi 1.3's seven root containers (document, pending messages,
+ * status, widgets-above, editor, widgets-below, footer), of which only the first three are captured, and
+ * pi's global theme, swapped for one synchronous render when a named screenshot theme is set. Never fall
+ * back to rendering the whole TUI: it would expose editor drafts. A powerline footer renders its status
+ * bar into widgets-above, so that bar is never part of an image either.
  */
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, colorToHex, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { CapturedScreen } from "./render.ts";
 
 const WIDGET_KEY = "wecom-screen-capture";
-/** Document, pending messages and status; widgets-above is the status bar, the rest is the editor. */
 const CAPTURED_CONTAINERS = 3;
 const LAYOUT_ERROR = "无法识别当前 pi 的界面结构；屏幕图片暂不可用，请检查插件与 pi 版本是否兼容";
 const THEME_ERROR = "无法切换 pi 的截图主题；屏幕图片暂不可用，请检查插件与 pi 版本是否兼容";
@@ -27,7 +21,6 @@ const THEME_KEYS = [
 ] as const;
 
 type ScreenRoot = Pick<TUI, "children" | "terminal" | "hasOverlay">;
-/** Run `render` with every component seeing `theme`. */
 export type ThemedRender = <T>(theme: Theme, containers: readonly Component[], render: () => T) => T;
 
 function childrenOf(component: Component | undefined): Component[] | undefined {
@@ -66,8 +59,7 @@ export function captureScreen(
 	) {
 		throw new Error("终端尺寸不可用或过大（最多 500 列、300 行），请调整窗口后重试");
 	}
-	// Only measure what sits below the captured block (status bar, editor, widgets, footer); its text
-	// never enters the snapshot, it only tells how many rows are actually visible above it.
+	// Rows below the captured block are measured only, never captured: they tell how many rows are visible.
 	const excludedRows = children
 		.slice(CAPTURED_CONTAINERS)
 		.reduce((sum, child) => sum + child.render(columns).length, 0);
@@ -111,8 +103,8 @@ export function captureScreen(
 }
 
 /**
- * Swap pi's global theme for one synchronous render. The captured containers re-render from scratch in
- * that theme and again in pi's own afterwards, so no cached line of either theme reaches the other.
+ * The captured containers re-render from scratch in `theme` and again in pi's own afterwards, so no
+ * cached line of either theme reaches the other.
  */
 function withPiTheme<T>(theme: Theme, containers: readonly Component[], render: () => T): T {
 	const slots = globalThis as unknown as Record<symbol, unknown>;
@@ -159,7 +151,6 @@ export class ScreenCapture {
 		});
 	}
 
-	/** `themeName`: a pi theme to render in; undefined captures pi's current theme as it is. */
 	capture(ctx: ExtensionContext, themeName: string | undefined): CapturedScreen {
 		if (ctx.mode !== "tui") throw new Error("屏幕图片只支持 pi 终端界面；RPC、JSON 和 print 模式只发送文字");
 		const binding = this.binding;

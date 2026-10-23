@@ -99,7 +99,7 @@ function harness() {
 				pushes.push({ chat, notification });
 				if (control.failure) throw control.failure;
 			},
-			watchIdentity(timeout, signal) {
+			watchIdentity(timeout, signal, onCode) {
 				return new Promise((resolve, reject) => {
 					const timer = setTimeout(
 						() => finish(Object.assign(new Error("timeout"), { name: "TimeoutError" })),
@@ -115,6 +115,7 @@ function harness() {
 					};
 					finishIdentity = finish;
 					signal?.addEventListener("abort", abort, { once: true });
+					onCode?.("123456");
 				});
 			},
 		};
@@ -184,13 +185,13 @@ async function connected(h: ReturnType<typeof harness>) {
 	return c;
 }
 
-test("connect requires a default target but never requires having executed whoami", async () => {
+test("connect requires a default target but never requires having identified one", async () => {
 	writeLayer("global", { botId: "bot", secret: "secret" });
 	const h = harness();
 	await h.emit("session_start");
 	await h.command("connect");
 	assert.equal(h.clients.length, 0);
-	assert.match(h.notices.at(-1)!, /默认推送目标.*whoami/);
+	assert.match(h.notices.at(-1)!, /默认推送目标.*config whoami --scope/);
 	writeLayer("global", config);
 	await h.command("connect");
 	assert.equal(h.clients.length, 1, "a manually configured target is sufficient");
@@ -255,17 +256,17 @@ test("a known-unsent connection entry is retained and delivered after recovery",
 test("config with a manual target saves configuration without creating a client or entry", async () => {
 	const h = harness();
 	await h.emit("session_start");
-	await h.command("config global set defaultChatId=new-user");
+	await h.command("config set --scope global defaultChatId=new-user");
 	assert.equal(h.clients.length, 0);
 	assert.equal(readLayer("global")?.defaultChatId, "new-user");
 	assert.match(h.notices.at(-1)!, /配置不等于接入.*\/wecom-aibot connect/);
 });
 
-test("offline whoami uses a temporary registration then closes it without sending an entry", async () => {
+test("offline config whoami uses a temporary registration then closes it without sending an entry", async () => {
 	writeLayer("global", { botId: "bot", secret: "secret" });
 	const h = harness();
 	await h.emit("session_start");
-	const pending = h.command("whoami");
+	const pending = h.command("config whoami --scope global");
 	const c = h.clients[0];
 	assert.equal(c.options.identifyOnly, true);
 	c.publish();
@@ -273,7 +274,7 @@ test("offline whoami uses a temporary registration then closes it without sendin
 	assert.equal(c.watching(), true);
 	await h.command("connect");
 	assert.equal(h.clients.length, 1);
-	assert.match(h.notices.at(-1)!, /临时识别/);
+	assert.match(h.notices.at(-1)!, /config whoami 正在识别聊天/);
 	await assert.rejects(h.push(), /缺少 chatid|未正式接入/);
 	c.identify({ chatId: "group", chatType: 2, userid: "user" });
 	await pending;
@@ -286,11 +287,11 @@ test("offline whoami uses a temporary registration then closes it without sendin
 	assert.equal(h.clients[1].options.identifyOnly, false);
 });
 
-test("cancelling an offline whoami closes its temporary connection without touching configuration", async () => {
+test("cancelling an offline config whoami closes its temporary connection without touching configuration", async () => {
 	const h = harness();
 	await h.emit("session_start");
 	h.cancelWait();
-	await h.command("whoami");
+	await h.command("config whoami --scope global");
 	assert.equal(h.clients.length, 1);
 	assert.equal(h.clients[0].stops.length, 1);
 	assert.equal(readLayer("global")?.defaultChatId, "old-user");
@@ -313,7 +314,7 @@ test("a target change during reconnect confirmation is not applied to the live s
 	assert.match(h.notices.at(-1)!, /确认期间再次改变/);
 });
 
-test("replacing a registration during whoami confirmation never disconnects the replacement", async () => {
+test("replacing the registration during the confirmation saves the target and never disconnects the replacement", async () => {
 	const h = harness();
 	const c = await connected(h);
 	h.confirmWith(async () => {
@@ -322,20 +323,21 @@ test("replacing a registration during whoami confirmation never disconnects the 
 		h.clients[1].publish();
 		return true;
 	});
-	const pending = h.command("whoami");
+	const pending = h.command("config whoami --scope global");
 	await flush();
 	c.identify({ chatId: "new-user", chatType: 1, userid: "user" });
 	await pending;
-	assert.equal(readLayer("global")?.defaultChatId, "old-user");
+	// The chat was identified with the same bot: the new registration does not make it stale.
+	assert.equal(readLayer("global")?.defaultChatId, "new-user");
 	assert.equal(h.clients[1].stops.length, 0);
 	assert.equal(h.clients[1].client.isReady(), true);
 });
 
-test("whoami timeout disposes a temporary connection and does not change configuration", async (t) => {
+test("config whoami timeout disposes a temporary connection and does not change configuration", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const h = harness();
 	await h.emit("session_start");
-	const pending = h.command("whoami --wait 10");
+	const pending = h.command("config whoami --scope global --wait 10");
 	const c = h.clients[0];
 	c.publish();
 	await flush();
@@ -343,14 +345,14 @@ test("whoami timeout disposes a temporary connection and does not change configu
 	await pending;
 	assert.equal(c.stops.length, 1);
 	assert.equal(readLayer("global")?.defaultChatId, "old-user");
-	assert.match(h.notices.at(-1)!, /10 秒内/);
+	assert.match(h.notices.at(-1)!, /10 秒内没有收到验证码/);
 });
 
 for (const changed of [false, true]) {
-	test(`whoami ${changed ? "saves a changed target that waits for connect" : "with an unchanged target changes nothing"}`, async () => {
+	test(`config whoami ${changed ? "saves a changed target that waits for connect" : "with an unchanged target changes nothing"}`, async () => {
 		const h = harness();
 		const c = await connected(h);
-		const pending = h.command("whoami");
+		const pending = h.command("config whoami --scope global");
 		await flush();
 		c.identify({ chatId: changed ? "new-user" : "old-user", chatType: 1, userid: "user" });
 		await pending;
@@ -359,9 +361,13 @@ for (const changed of [false, true]) {
 		assert.equal(c.pushes.length, 1, "whoami never sends an extra entry");
 		if (changed) {
 			assert.match(h.confirms[0], /保存不会断开当前接入/);
-			assert.match(h.notices.at(-1)!, /当前接入仍使用旧目标，运行 \/wecom-aibot connect 后生效/);
+			assert.match(h.notices.at(-1)!, /当前接入仍使用旧配置，运行 \/wecom-aibot connect 后生效/);
+			assert.match(h.notices.at(-1)!, /未配置 allowedUserIds/, "the allowlist note joins the report");
 			await h.push();
 			assert.equal(c.pushes.at(-1)!.chat.chatId, "old-user", "the registration keeps its target until connect");
+		} else {
+			assert.deepEqual(h.confirms, []);
+			assert.match(h.notices.at(-1)!, /这已经是全局的默认推送目标/);
 		}
 	});
 }
@@ -371,7 +377,7 @@ test("declining a target change keeps the original target and live registration"
 	const c = await connected(h);
 	h.confirmWith(async () => false);
 	const before = readFileSync(CONFIG_FILE, "utf8");
-	const pending = h.command("whoami");
+	const pending = h.command("config whoami --scope global");
 	await flush();
 	c.identify({ chatId: "new-user", chatType: 1, userid: "user" });
 	await pending;
@@ -387,7 +393,7 @@ test("a failed target save keeps the old live registration", async () => {
 		writeLayer("global", { ...config, secret: "changed-during-confirmation" });
 		return true;
 	});
-	const pending = h.command("whoami");
+	const pending = h.command("config whoami --scope global");
 	await flush();
 	c.identify({ chatId: "new-user", chatType: 1, userid: "user" });
 	await pending;

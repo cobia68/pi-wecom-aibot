@@ -1,18 +1,7 @@
 /**
  * Minimal WebSocket client for the WeCom (企业微信) 智能机器人 长连接 API.
  *
- * Protocol reference (official docs, 智能机器人长连接):
- *   wss://openws.work.weixin.qq.com
- *
- * Client -> server commands:
- *   aibot_subscribe              { bot_id, secret }
- *   ping                         heartbeat
- *   aibot_respond_msg            reply to a msg callback (stream / markdown / template_card / file / ...)
- *   aibot_respond_update_msg     update a template card
- *   aibot_send_msg               proactive push (no callback required)
- *   aibot_upload_media_init/chunk/finish
- *
- * Server -> client:
+ * Server -> client frames:
  *   { headers: { req_id }, errcode, errmsg }         command response
  *   { cmd: "aibot_msg_callback",   headers, body }   user message
  *   { cmd: "aibot_event_callback", headers, body }   event
@@ -36,7 +25,6 @@ export interface WeComResponse {
 }
 
 export interface WeComInbound {
-	/** req_id from the callback headers; pass it back when replying. */
 	reqId: string;
 	/** The callback body as JSON; parseInbound() validates it at this boundary. */
 	body: unknown;
@@ -52,7 +40,6 @@ export interface WeComClientOptions {
 	createWebSocket?: (url: string) => WeComSocket;
 }
 
-/** The fields this client reads from a transport event; the ws package's events are wider. */
 export interface WeComSocketEvent {
 	readonly data?: unknown;
 	readonly message?: unknown;
@@ -77,14 +64,12 @@ const PING_INTERVAL_MS = 30_000;
 const MAX_BACKOFF_MS = 30_000;
 /** Like the official SDK: a rejected subscription is retried with backoff, then given up (it is rate-limited). */
 const MAX_SUBSCRIBE_FAILURES = 5;
-/** Connecting, subscribing and every command are acknowledged within this time. */
 const REQUEST_TIMEOUT_MS = WECOM_ACK_TIMEOUT_MS;
 
 function genReqId(): string {
 	return `pi-${randomUUID()}`;
 }
 
-/** Small typed promise used for command responses. */
 interface Pending {
 	resolve: (value: WeComResponse) => void;
 	reject: (err: Error) => void;
@@ -94,7 +79,6 @@ interface Pending {
 export class WeComClient {
 	private ws: WeComSocket | undefined;
 	private state: WeComState = "disconnected";
-	/** Stopped by stop() or after repeated subscription failures: no reconnect until start(). */
 	private halted = false;
 	private subscribeFailures = 0;
 	private attempts = 0;
@@ -115,7 +99,6 @@ export class WeComClient {
 		return this.state;
 	}
 
-	/** True after stop() or repeated subscription failures, until start(). */
 	get stopped(): boolean {
 		return this.halted;
 	}
@@ -150,7 +133,6 @@ export class WeComClient {
 			try {
 				ws.close();
 			} catch (error) {
-				// Closing is best effort, but a failure here means a socket the transport did not expect.
 				this.options.log?.(`WebSocket close failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
@@ -163,7 +145,6 @@ export class WeComClient {
 		this.setState("connecting");
 		let ws: WeComSocket;
 		try {
-			// ws's DOM-style events are wider than the fields read here; this is the transport boundary.
 			ws = this.options.createWebSocket?.(WS_URL) ?? (new WebSocket(WS_URL) as WeComSocket);
 		} catch (err) {
 			this.options.log?.(`connect failed: ${String(err)}`);
@@ -316,7 +297,6 @@ export class WeComClient {
 				this.setState("subscribed");
 			} else {
 				const reason = `subscribe failed: ${errcode ?? "?"} ${errmsg ?? ""}`.trim();
-				// Credentials stay wrong: stop after a few backed-off attempts instead of hammering the server.
 				if (++this.subscribeFailures >= MAX_SUBSCRIBE_FAILURES) this.stop(reason);
 				else this.disconnect(reason);
 			}
@@ -333,7 +313,7 @@ export class WeComClient {
 
 	// ----------------------------------------------------------------- outbound
 
-	/** Sends one frame; undefined when written, otherwise why it could not be written. */
+	/** undefined when written, otherwise why it could not be written. */
 	private send(payload: object): string | undefined {
 		const ws = this.ws;
 		if (ws?.readyState !== 1 /* OPEN */) return "WebSocket is not connected";
@@ -348,7 +328,6 @@ export class WeComClient {
 		}
 	}
 
-	/** Resolve only after a successful acknowledgement; reject on timeout or disconnect. */
 	sendCommand(cmd: string, body: unknown, reqId = genReqId()): Promise<WeComResponse> {
 		if (!this.isReady()) return Promise.reject(new DeliveryError("WebSocket is not subscribed", "not_sent"));
 		if (this.pending.has(reqId)) return Promise.reject(new DeliveryError("Request is already pending", "rejected"));
@@ -369,20 +348,16 @@ export class WeComClient {
 		});
 	}
 
-	/** aibot_respond_msg — reply to a message callback. */
 	respondMsg(reqId: string, body: unknown): boolean {
 		return this.isReady() && this.send({ cmd: "aibot_respond_msg", headers: { req_id: reqId }, body }) === undefined;
 	}
 
-	/** The same reply, but resolve only after WeCom acknowledged it (used when the reply carries a result). */
+	/** respondMsg that resolves only once WeCom acknowledged it, for a reply that carries a result. */
 	respondMsgAck(reqId: string, body: unknown): Promise<WeComResponse> {
 		return this.sendCommand("aibot_respond_msg", body, reqId);
 	}
 
-	/**
-	 * Upload a PNG as temporary media and return its media_id. init → chunk × N → finish;
-	 * chunks are 512KB of raw bytes and may be retried because the server ignores duplicates.
-	 */
+	/** Temporary media: init → chunk (512KB raw) × N → finish, returning the media_id. */
 	async uploadImage(data: Buffer, filename = "pi-notification.png"): Promise<string> {
 		if (data.byteLength < WECOM_IMAGE_MIN_BYTES || data.byteLength > WECOM_IMAGE_MAX_BYTES) {
 			throw new DeliveryError(
@@ -414,8 +389,7 @@ export class WeComClient {
 					});
 					break;
 				} catch (error) {
-					// Chunks are idempotent server-side, so one retry is safe whatever the outcome; the
-					// first reason still reaches the log instead of being hidden by the retry.
+					// The server ignores duplicate chunks, so one retry is safe whatever the outcome.
 					if (attempt >= 1) throw error;
 					this.options.log?.(
 						`upload chunk ${index} failed, retrying once: ${error instanceof Error ? error.message : String(error)}`,

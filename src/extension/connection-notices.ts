@@ -2,6 +2,8 @@
  * What the user is told about one registration's connection. The session reports each status it sees;
  * this decides when an outage, a stopped upstream or a recovery deserves a message, once per event.
  */
+import { sentences } from "../shared/text.ts";
+
 export type BridgeConnectionStatus = "online" | "reconnecting" | "blocked";
 
 export interface ConnectionObservation {
@@ -51,11 +53,11 @@ export class ConnectionNotices {
 		if (this.stopped && !wasStopped) {
 			// Also on the first connection: a refused subscription must not leave the bridge silently waiting.
 			const reason = observation.detail ?? "企业微信连接已停止";
-			const hint = reason.includes("/wecom-aibot connect")
-				? ""
-				: "。请核对 BotID/Secret（/wecom-aibot config show），然后运行 /wecom-aibot connect 恢复";
+			const hint =
+				!reason.includes("/wecom-aibot connect") &&
+				"请核对 BotID/Secret（/wecom-aibot config show），然后运行 /wecom-aibot connect 恢复";
 			this.reported = true;
-			this.notify(`企业微信智能机器人连接已停止：${reason}${hint}`, "warning");
+			this.notify(sentences(`企业微信智能机器人连接已停止：${reason}`, hint), "warning");
 		} else if (!this.ready && !this.stopped) {
 			if (observation.detail) this.disconnectDetail = observation.detail;
 			this.arm();
@@ -77,7 +79,7 @@ export class ConnectionNotices {
 				this.notify(
 					this.everSubscribed
 						? `企业微信智能机器人连接中断已超过 30 秒${this.disconnectDetail ? `：${this.disconnectDetail}` : ""}。仍在自动重连，可运行 /wecom-aibot log 查看诊断`
-						: "企业微信首次连接等待已超过 30 秒。仍在重试，可运行 /wecom-aibot status 和 /wecom-aibot log 查看原因；/wecom-aibot disconnect 可取消。",
+						: "企业微信首次连接等待已超过 30 秒。仍在重试，可运行 /wecom-aibot status 和 /wecom-aibot log 查看原因；/wecom-aibot disconnect 可取消",
 					"warning",
 				);
 			},

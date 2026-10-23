@@ -315,8 +315,7 @@ async function listen(server: Server, endpoint: string): Promise<boolean> {
 		if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
 		if (!filesystemSocket(endpoint)) return false;
 	}
-	// A short-lived kernel mutex serializes stale-file recovery: concurrent
-	// cleaners must never unlink a newly bound socket.
+	// A short-lived kernel mutex serializes stale-file recovery: a cleaner must never unlink a newly bound socket.
 	const mutex = createServer((socket) => socket.destroy());
 	const port = 49_152 + (createHash("sha256").update(endpoint).digest().readUInt16BE(0) % 16_384);
 	try {

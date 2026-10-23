@@ -1,5 +1,5 @@
 /** One WeCom connection, with routing and membership independent of any pi process. */
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { deliveryFailure } from "../shared/delivery.ts";
 import {
@@ -21,6 +21,7 @@ import {
 	renderNotification,
 } from "../shared/notification.ts";
 import type { GatewayImage, GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
+import { sentences } from "../shared/text.ts";
 import {
 	type ChatRef,
 	type InboundMessage,
@@ -40,10 +41,10 @@ import { WeComClient, type WeComClientOptions, type WeComInbound } from "./wecom
 const MAX_SESSIONS = 100;
 const MAX_TASKS = 10_000;
 const MAX_WATCH_MS = 10 * 60_000;
-/** A pi answers a screen or cancel request quickly; silence means it is gone or wedged. */
 const REQUEST_TIMEOUT_MS = 20_000;
 /** End a status message before WeCom ends it on its own; the result follows as a notification. */
 const STREAM_DEADLINE_MS = WECOM_STREAM_LIFETIME_MS - 10_000;
+const STATE_TIMEOUT_MS = 2_000;
 /** Settle and its result notification travel one IPC channel; this is the most the status waits for it. */
 const MERGE_GRACE_MS = 1_000;
 
@@ -58,7 +59,6 @@ interface Member extends GatewayRegistration {
 	peer: GatewayPeer;
 }
 
-/** A gateway request waiting for one pi's answer, tied to the callback that asked for it. */
 interface PendingRequest {
 	reqId: string;
 	chat: ChatRef;
@@ -67,26 +67,29 @@ interface PendingRequest {
 	timer: ReturnType<typeof setTimeout>;
 }
 
+interface SessionsPoll {
+	reqId: string;
+	prefix?: string;
+	members: Member[];
+	busy: Map<string, boolean>;
+	pending: number;
+	done: boolean;
+	timer?: ReturnType<typeof setTimeout>;
+}
+
 /** A message routed to a pi, by callback req_id. The gateway owns its status message. */
 interface Task {
 	target: SessionTarget;
 	streamId: string;
-	/** The conversation that asked; its result replaces this task's status message there. */
 	chat: ChatRef;
-	/** WeCom accepts replies to a callback for 24 hours. */
 	expiresAt: number;
-	/** Set when the status message opened: WeCom ends it 10 minutes later. */
 	deadline?: ReturnType<typeof setTimeout>;
 	/** The "running" status was actually written, so its content can still be replaced. */
 	opened?: boolean;
-	/** Settled, waiting for its result notification to replace the status content. */
 	awaitingResult?: boolean;
 	completionState?: "settled" | "notifying";
 	mergeTimer?: ReturnType<typeof setTimeout>;
-	/** A final state that could not be sent while WeCom was disconnected. */
 	unsent?: ProcessingState;
-	/** pi reported this task as running; the session list shows the session as busy. */
-	running?: boolean;
 }
 
 export class WeComGateway {
@@ -94,8 +97,9 @@ export class WeComGateway {
 	private readonly seen = new Set<string>();
 	private readonly tasks = new Map<string, Task>();
 	private readonly requests = new Map<string, PendingRequest>();
-	/** /wecom-aibot whoami in progress, by pi instance. */
-	private readonly watches = new Map<string, { id: string; expiresAt: number }>();
+	private readonly stateQueries = new Map<string, { poll: SessionsPoll; instanceId: string }>();
+	/** /wecom-aibot config whoami in progress, by pi instance: the one-time code its chat must send. */
+	private readonly watches = new Map<string, { id: string; code: string; expiresAt: number }>();
 	private client: WeComClient | undefined;
 	private status: GatewayStatus = { state: "disconnected", sessions: 0 };
 	private readonly options: WeComGatewayOptions;
@@ -115,21 +119,20 @@ export class WeComGateway {
 	owns(instanceId: string, peer: GatewayPeer): boolean {
 		return this.members.get(instanceId)?.peer === peer;
 	}
-	/** Gateway-side diagnostics for pi's log; used when an IPC frame cannot be handled at all. */
 	log(message: string): void {
 		this.broadcast({ type: "log", message });
 	}
 
 	register(registration: GatewayRegistration, peer: GatewayPeer, resume = false): void {
 		if (registration.config.botId !== this.options.botId)
-			throw new Error("共享网关的 BotID 与本 pi 不一致，请核对配置。");
+			throw new Error("共享网关的 BotID 与本 pi 不一致，请核对配置");
 		const collision = [...this.members.values()].find(
 			(member) =>
 				member.source.sessionId === registration.source.sessionId && member.instanceId !== registration.instanceId,
 		);
-		if (collision) throw new Error("该完整 session ID 已由另一个 pi 注册，请在当前窗口新建或切换会话。");
+		if (collision) throw new Error("该完整 session ID 已由另一个 pi 注册，请在当前窗口新建或切换会话");
 		if (!this.members.has(registration.instanceId) && this.size >= MAX_SESSIONS)
-			throw new Error("共享网关的在线会话已达上限。");
+			throw new Error("共享网关的在线会话已达上限");
 		const previous = this.members.get(registration.instanceId);
 		this.members.set(registration.instanceId, { ...registration, source: { ...registration.source }, peer });
 		// A whoami belongs to the connection that asked; the replaced one has already failed it.
@@ -168,6 +171,7 @@ export class WeComGateway {
 		if (this.members.get(instanceId)?.peer !== peer) return;
 		this.members.delete(instanceId);
 		this.watches.delete(instanceId);
+		for (const [id, query] of [...this.stateQueries]) if (query.instanceId === instanceId) this.answerState(id);
 		this.broadcastStatus();
 		this.membershipChanged();
 	}
@@ -183,10 +187,20 @@ export class WeComGateway {
 		this.client?.start();
 	}
 
-	/** The next message this pi may receive reports its conversation instead of becoming a task. */
-	watch(instanceId: string, id: string, timeoutMs: number): void {
-		if (!this.members.has(instanceId)) throw new Error("pi 尚未注册");
-		this.watches.set(instanceId, { id, expiresAt: Date.now() + Math.min(Math.max(timeoutMs, 1000), MAX_WATCH_MS) });
+	/** A message that is exactly the returned code identifies its chat, not a task; waiting codes are unique. */
+	watch(instanceId: string, id: string, timeoutMs: number): string {
+		const member = this.members.get(instanceId);
+		if (!member) throw new Error("pi 尚未注册");
+		this.watches.delete(instanceId);
+		const taken = new Set([...this.watches.values()].map((watch) => watch.code));
+		let code: string;
+		do {
+			code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+		} while (taken.has(code));
+		const expiresAt = Date.now() + Math.min(Math.max(timeoutMs, 1000), MAX_WATCH_MS);
+		this.watches.set(instanceId, { id, code, expiresAt });
+		member.peer.send({ type: "watching", id, code });
+		return code;
 	}
 
 	unwatch(instanceId: string, id: string): void {
@@ -199,6 +213,8 @@ export class WeComGateway {
 		this.members.clear();
 		for (const request of this.requests.values()) clearTimeout(request.timer);
 		this.requests.clear();
+		for (const { poll } of this.stateQueries.values()) clearTimeout(poll.timer);
+		this.stateQueries.clear();
 		for (const task of this.tasks.values()) {
 			clearTimeout(task.deadline);
 			clearTimeout(task.mergeTimer);
@@ -207,7 +223,7 @@ export class WeComGateway {
 		this.watches.clear();
 	}
 
-	/** Shown in the task's status message; only the pi the task was routed to may report it. */
+	/** Only the pi the task was routed to may report its status. */
 	taskStatus(instanceId: string, taskId: string, state: TaskState): boolean {
 		const task = this.tasks.get(taskId);
 		const member = this.members.get(instanceId);
@@ -216,7 +232,6 @@ export class WeComGateway {
 			this.closeTask(taskId);
 			return false;
 		}
-		task.running = state === "running";
 		if (state === "running") {
 			task.deadline ??= setTimeout(() => this.expireStream(taskId), STREAM_DEADLINE_MS);
 			return this.stream(taskId, task, state);
@@ -234,7 +249,6 @@ export class WeComGateway {
 		return this.stream(taskId, task, state);
 	}
 
-	/** A pi's notification, rendered here with its source header. The source must be that pi's session. */
 	async notify(instanceId: string, chat: ChatRef, notification: GatewayNotification): Promise<void> {
 		const member = this.members.get(instanceId);
 		if (!member || !this.client) throw new Error("pi 尚未注册");
@@ -247,8 +261,7 @@ export class WeComGateway {
 			aborted: notification.aborted,
 			imageFailure: notification.imageFailure,
 		});
-		// A task's own result replaces its status message: one message, tied to the person who asked.
-		// Only a text result can ride the stream; an image stays a separate message.
+		// A task's own text result replaces its status message; an image stays a separate message.
 		const awaiting = notification.taskId ? this.awaitingTask(member, chat, notification.taskId) : undefined;
 		if (
 			awaiting &&
@@ -258,7 +271,6 @@ export class WeComGateway {
 		) {
 			const outcome = await this.finishWithResult(this.client, awaiting.taskId, awaiting.task, content);
 			if (outcome === "delivered" || outcome === "unknown") return;
-			// A rejected or unsent finish falls back to the push below; the status closes first.
 		}
 		if (awaiting)
 			this.stream(
@@ -293,7 +305,7 @@ export class WeComGateway {
 					failure = `发送被拒绝：${errorMessage(error)}`;
 				}
 			}
-			// The reason belongs in the fallback, as the README promises; a truncated tail is cut, not lost.
+			// The README promises the reason in the fallback.
 			const reason = failure?.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 200);
 			this.log(`图片通知改发文字：${reason ?? "未知原因"}`);
 			const fallback = renderNotification(notification.source, notification.text, {
@@ -337,7 +349,6 @@ export class WeComGateway {
 		return { taskId, task };
 	}
 
-	/** Replace the status content with the result and wait for WeCom's acknowledgement. */
 	private async finishWithResult(
 		client: WeComClient,
 		taskId: string,
@@ -357,14 +368,12 @@ export class WeComGateway {
 		} catch (error) {
 			const outcome = deliveryFailure(error);
 			this.log(`结果并入状态消息失败（${outcome}）：${errorMessage(error)}`);
-			// Close the receipt instead of leaving "执行中…" until WeCom ends it; the result is pushed below.
-			if (outcome !== "unknown") this.stream(taskId, task, "settled");
-			else this.closeTask(taskId);
+			// An unknown outcome may have delivered the result: send nothing more. Otherwise notify() closes the status.
+			if (outcome === "unknown") this.closeTask(taskId);
 			return outcome;
 		}
 	}
 
-	/** No result notification arrived: close the status the way it used to. */
 	private finishAwaiting(taskId: string): void {
 		const task = this.tasks.get(taskId);
 		if (!task) return;
@@ -378,7 +387,6 @@ export class WeComGateway {
 		this.stream(taskId, task, task.completionState ?? "settled");
 	}
 
-	/** WeCom would end the status message on its own; end it first and point at the coming notification. */
 	private expireStream(taskId: string): void {
 		const task = this.tasks.get(taskId);
 		if (!task) return;
@@ -418,7 +426,6 @@ export class WeComGateway {
 		for (const member of this.members.values()) member.peer.send(frame);
 	}
 
-	/** One inbound callback; reading a quoted image makes this asynchronous, a failure is only ever logged. */
 	private receive(action: () => void | Promise<void>): void {
 		const failed = (error: unknown) => this.log(`gateway inbound failed: ${errorMessage(error)}`);
 		try {
@@ -443,40 +450,35 @@ export class WeComGateway {
 	private async route(inbound: WeComInbound): Promise<void> {
 		const userid = senderOf(inbound.body);
 		if (!userid) return;
+		const message = parseInbound(inbound.body);
+		this.expire();
+		// Before the allowlist: only the person at that pi has seen the code, and being identified grants nothing.
+		const watcher = message && this.watcherOf(message.text);
+		if (message && watcher) {
+			if (this.firstSeen(message.msgId || inbound.reqId))
+				this.identify(watcher, inbound.reqId, { ...message.chat, userid: message.userid });
+			return;
+		}
 		const permitted = this.eligible(userid);
 		if (!permitted.length) {
-			// The WeCom connection outlives the last pi by a moment: say where to reconnect instead of staying
-			// silent, but keep silence when a registered pi's allowlist simply excludes this sender.
+			// WeCom outlives the last pi by a moment; a sender only an allowlist excludes gets silence.
 			if (!this.members.size) this.reply(inbound.reqId, NO_ONLINE_SESSION);
 			return;
 		}
 		const eligible = permitted.filter((member) => !member.identifyOnly);
-		const message = parseInbound(inbound.body);
-		const id = message?.msgId || inbound.reqId;
-		if (this.seen.has(id)) return;
-		this.seen.add(id);
-		const oldest = this.seen.values().next().value;
-		if (this.seen.size > 1000 && oldest !== undefined) this.seen.delete(oldest);
+		if (!this.firstSeen(message?.msgId || inbound.reqId)) return;
 		if (!message) {
-			this.reply(inbound.reqId, "无法识别这条消息，请重新发送。");
+			this.reply(inbound.reqId, "无法识别这条消息，请重新发送");
 			return;
 		}
 		const quoted = quotedImage(inbound.body);
 		const quoting = message.quoteText !== undefined || quoted !== undefined;
-		this.expire();
-		// While a pi waits in /wecom-aibot whoami, the next message it may receive only identifies the chat.
-		const watchers = permitted.filter((member) => this.watches.has(member.instanceId));
-		if (watchers.length) {
-			this.identify(watchers, inbound.reqId, { ...message.chat, userid: message.userid });
-			return;
-		}
 		const command = parseWeComCommand(message.text);
 		if (command.kind !== "none") {
 			this.command(command, inbound.reqId, message, eligible);
 			return;
 		}
-		// A quote is the one way to target a message without naming a session. Its text names the
-		// notification it quotes; only an image quote needs the file read below, so nothing else waits.
+		// A quote targets a session without naming it; only an image quote waits for the download below.
 		const named = message.quoteText ? quotedMember(eligible, message.quoteText) : undefined;
 		if (named) {
 			this.hand(named, inbound.reqId, message, eligible);
@@ -493,13 +495,12 @@ export class WeComGateway {
 				return;
 			}
 		}
-		this.reply(inbound.reqId, quoting ? `${QUOTE_FAILED}\n\n${sessionsText(eligible, this.tasks)}` : GUIDANCE);
+		if (quoting) this.listSessions(inbound.reqId, eligible, QUOTE_FAILED);
+		else this.reply(inbound.reqId, GUIDANCE);
 	}
 
-	/** Deliver one message to one session, or say why it cannot take it. */
 	private hand(target: Member, reqId: string, message: InboundMessage, eligible: Member[]): void {
-		if (!this.deliver(target, reqId, message))
-			this.reply(reqId, `${TARGET_GONE}\n\n${sessionsText(eligible, this.tasks)}`);
+		if (!this.deliver(target, reqId, message)) this.listSessions(reqId, eligible, TARGET_GONE);
 	}
 
 	private command(
@@ -516,14 +517,14 @@ export class WeComGateway {
 				this.reply(reqId, command.message);
 				return;
 			case "sessions":
-				this.reply(reqId, sessionsText(eligible, this.tasks));
+				this.listSessions(reqId, eligible);
 				return;
 			default:
 				break;
 		}
 		const target = eligible.find((member) => member.source.sessionId === command.sessionId);
 		if (!target) {
-			this.reply(reqId, `${TARGET_MISSING}\n\n${sessionsText(eligible, this.tasks)}`);
+			this.listSessions(reqId, eligible, TARGET_MISSING);
 			return;
 		}
 		if (command.kind === "send") {
@@ -533,14 +534,48 @@ export class WeComGateway {
 		this.request(command.kind, target, reqId, message.chat);
 	}
 
-	/** A screen or cancel request; the pi answers with the same id. */
+	private listSessions(reqId: string, eligible: Member[], prefix?: string): void {
+		const poll: SessionsPoll = { reqId, prefix, members: eligible, busy: new Map(), pending: 0, done: false };
+		const queries = eligible.map((member) => ({ id: randomUUID(), member }));
+		// Registered before the first send: a pi may answer before the loop ends.
+		for (const { id, member } of queries) this.stateQueries.set(id, { poll, instanceId: member.instanceId });
+		poll.pending = queries.length;
+		if (queries.length) poll.timer = setTimeout(() => this.finishPoll(poll), STATE_TIMEOUT_MS);
+		for (const { id, member } of queries) {
+			const request = { action: "state" as const, target: sessionTarget(member) };
+			if (!member.peer.send({ type: "request", id, request })) this.answerState(id);
+		}
+		if (!poll.pending) this.finishPoll(poll);
+	}
+
+	private answerState(id: string, busy?: boolean): void {
+		const query = this.stateQueries.get(id);
+		if (!query) return;
+		this.stateQueries.delete(id);
+		const { poll } = query;
+		if (busy !== undefined) poll.busy.set(query.instanceId, busy);
+		poll.pending -= 1;
+		if (!poll.pending) this.finishPoll(poll);
+	}
+
+	private finishPoll(poll: SessionsPoll): void {
+		if (poll.done) return;
+		poll.done = true;
+		clearTimeout(poll.timer);
+		for (const [id, query] of [...this.stateQueries]) if (query.poll === poll) this.stateQueries.delete(id);
+		// A pi that left or registered again while it was asked is not listed.
+		const online = poll.members.filter((member) => this.members.get(member.instanceId) === member);
+		const text = sessionsText(online, poll.busy);
+		this.reply(poll.reqId, poll.prefix ? `${poll.prefix}\n\n${text}` : text);
+	}
+
 	private request(action: "screen" | "cancel", target: Member, reqId: string, chat: ChatRef): void {
 		const id = randomUUID();
 		const timer = setTimeout(() => {
 			if (!this.requests.delete(id)) return;
 			this.reply(
 				reqId,
-				`目标会话未在 ${REQUEST_TIMEOUT_MS / 1000} 秒内响应，可用 /wecom-aibot sessions 确认它仍在线。`,
+				`目标会话未在 ${REQUEST_TIMEOUT_MS / 1000} 秒内响应，可用 /wecom-aibot sessions 确认它仍在线`,
 			);
 		}, REQUEST_TIMEOUT_MS);
 		this.requests.set(id, { reqId, chat, instanceId: target.instanceId, action, timer });
@@ -550,8 +585,11 @@ export class WeComGateway {
 		this.reply(reqId, TARGET_GONE);
 	}
 
-	/** One pi's answer to a screen or cancel request. */
 	response(instanceId: string, id: string, response: BridgeResponse): void {
+		if (this.stateQueries.get(id)?.instanceId === instanceId) {
+			this.answerState(id, response.ok ? response.busy : undefined);
+			return;
+		}
 		const pending = this.requests.get(id);
 		if (!pending || pending.instanceId !== instanceId) return;
 		clearTimeout(pending.timer);
@@ -564,16 +602,16 @@ export class WeComGateway {
 			return;
 		}
 		if (pending.action === "cancel") {
-			this.reply(pending.reqId, "已请求中止；这一轮可能还会输出最后一点内容。");
+			this.reply(pending.reqId, "已请求中止；这一轮可能还会输出最后一点内容");
 			return;
 		}
 		if (!response.image) {
-			this.reply(pending.reqId, "截图失败：目标会话没有返回图片。");
+			this.reply(pending.reqId, "截图失败：目标会话没有返回图片");
 			return;
 		}
 		void this.sendImage(pending.chat, response.image, this.members.get(instanceId)?.source.sessionId)
 			.then((sent) => {
-				if (!sent) this.reply(pending.reqId, "截图已生成，但图片发送失败；详情见 /wecom-aibot log。");
+				if (!sent) this.reply(pending.reqId, "截图已生成，但图片发送失败；详情见 /wecom-aibot log");
 			})
 			.catch((error: unknown) => this.log(`截图发送失败：${errorMessage(error)}`));
 	}
@@ -596,10 +634,7 @@ export class WeComGateway {
 		}
 	}
 
-	/**
-	 * The image as sent: the session marker added, logged so a later quote can be compared with it.
-	 * A file that cannot be marked is still sent; the marker is an aid, not part of the delivery.
-	 */
+	/** Logged so a later quote's reading can be compared with what was sent; an unmarkable file is sent as is. */
 	private marked(data: Buffer, sessionId: string): Buffer {
 		try {
 			const stamped = stampPng(data, sessionId);
@@ -613,12 +648,27 @@ export class WeComGateway {
 		}
 	}
 
-	private identify(watchers: Member[], reqId: string, identity: ChatIdentity): void {
-		for (const member of watchers) {
-			const watch = this.watches.get(member.instanceId);
-			this.watches.delete(member.instanceId);
-			if (watch) member.peer.send({ type: "identity", id: watch.id, identity });
-		}
+	/** WeCom may deliver one message twice. */
+	private firstSeen(id: string): boolean {
+		if (this.seen.has(id)) return false;
+		this.seen.add(id);
+		const oldest = this.seen.values().next().value;
+		if (this.seen.size > 1000 && oldest !== undefined) this.seen.delete(oldest);
+		return true;
+	}
+
+	/** Full-width digits from a Chinese IME count too. */
+	private watcherOf(text: string): Member | undefined {
+		const typed = text.trim().replace(/[０-９]/g, (digit) => String(digit.charCodeAt(0) - 0xff10));
+		if (!/^\d{6}$/.test(typed)) return undefined;
+		for (const [instanceId, watch] of this.watches) if (watch.code === typed) return this.members.get(instanceId);
+		return undefined;
+	}
+
+	private identify(member: Member, reqId: string, identity: ChatIdentity): void {
+		const watch = this.watches.get(member.instanceId);
+		this.watches.delete(member.instanceId);
+		if (watch) member.peer.send({ type: "identity", id: watch.id, identity });
 		this.reply(reqId, identityText(identity));
 	}
 
@@ -677,10 +727,7 @@ const OPTIONS: Record<Subcommand, string[]> = {
 	cancel: ["--sessionid"],
 };
 
-/**
- * The WeCom-side command grammar. Every task names its target; a message that is not a command is
- * either a quoted reply (which names its target) or gets guidance. Nothing is remembered between messages.
- */
+/** WeCom-side command grammar. Every task names its target; nothing is remembered between messages. */
 export function parseWeComCommand(text: string): WeComCommand {
 	const trimmed = text.trim();
 	if (!new RegExp(`^${COMMAND_PREFIX}(?:\\s|$)`, "i").test(trimmed)) return { kind: "none" };
@@ -690,9 +737,9 @@ export function parseWeComCommand(text: string): WeComCommand {
 	const name = head.toLowerCase();
 	if (name === "--help") return { kind: "help" };
 	if (name.startsWith("-"))
-		return { kind: "error", message: `未知选项 ${head}。可用子命令：${SUBCOMMANDS.join("、")}。` };
+		return { kind: "error", message: `未知选项 ${head}。可用子命令：${SUBCOMMANDS.join("、")}` };
 	const sub = SUBCOMMANDS.find((item) => item === name);
-	if (!sub) return { kind: "error", message: `未知子命令 ${head}。可用子命令：${SUBCOMMANDS.join("、")}。` };
+	if (!sub) return { kind: "error", message: `未知子命令 ${head}。可用子命令：${SUBCOMMANDS.join("、")}` };
 	const after = rest.slice(head.length).replace(/^\s+/, "");
 	// --prompt is terminal: everything after it is the prompt, exactly as typed.
 	const found = /(^|\s)--prompt(?=\s|$)/.exec(after);
@@ -715,7 +762,7 @@ export function parseWeComCommand(text: string): WeComCommand {
 	if (parsed.help) return { kind: "help", topic: sub };
 	const sessionId = parsed.values.get("--sessionid");
 	if (sub === "sessions") {
-		if (sessionId) return { kind: "error", message: "sessions 不接受 --sessionid。" };
+		if (sessionId) return { kind: "error", message: "sessions 不接受 --sessionid" };
 		return { kind: "sessions" };
 	}
 	if (!sessionId) {
@@ -728,29 +775,28 @@ export function parseWeComCommand(text: string): WeComCommand {
 	if (sub === "send") {
 		if (prompt === undefined)
 			return { kind: "error", message: "缺少 --prompt。例如：/wecom-aibot send --sessionid <id> --prompt 检查构建" };
-		if (!prompt.trim()) return { kind: "error", message: "--prompt 之后要有正文。" };
+		if (!prompt.trim()) return { kind: "error", message: "--prompt 之后要有正文" };
 		return { kind: "send", sessionId, prompt };
 	}
-	if (prompt !== undefined) return { kind: "error", message: `${sub} 不接受 --prompt。` };
+	if (prompt !== undefined) return { kind: "error", message: `${sub} 不接受 --prompt` };
 	return sub === "screen" ? { kind: "screen", sessionId } : { kind: "cancel", sessionId };
 }
 
-/** Options for one subcommand; a returned string is the error to show. */
 function parseOptions(sub: Subcommand, text: string): { values: Map<string, string>; help: boolean } | string {
 	const values = new Map<string, string>();
 	const tokens = text.trim() ? text.trim().split(/\s+/) : [];
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
 		if (token === "--help") return { values, help: true };
-		if (!token.startsWith("--")) return `${sub} 不接受位置参数（${token}）；正文请写在 --prompt 之后。`;
+		if (!token.startsWith("--")) return `${sub} 不接受位置参数（${token}）；正文请写在 --prompt 之后`;
 		const allowed = OPTIONS[sub];
 		if (!allowed.includes(token)) {
-			const hint = allowed.length ? `可用选项：${allowed.join("、")}。` : "该子命令不接受选项。";
-			return `未知选项 ${token}。${hint}参数用空格分隔，不支持 =。`;
+			const hint = allowed.length ? `可用选项：${allowed.join("、")}` : "该子命令不接受选项";
+			return sentences(`未知选项 ${token}`, hint, "参数用空格分隔，不支持 =");
 		}
 		const value = tokens[i + 1];
-		if (value === undefined || value.startsWith("--")) return `${token} 缺少值。`;
-		if (values.has(token)) return `${token} 重复给出。`;
+		if (value === undefined || value.startsWith("--")) return `${token} 缺少值`;
+		if (values.has(token)) return `${token} 重复给出`;
 		i++;
 		values.set(token, value);
 	}
@@ -762,12 +808,12 @@ const GUIDANCE = [
 	"1. 发送 /wecom-aibot sessions 查看在线会话与完整 session ID",
 	"2. 再发送 /wecom-aibot send --sessionid <id> --prompt <正文>",
 	"",
-	"也可以直接引用机器人的一条通知或一张图片（如截图），把这条消息定向到该会话。",
+	"也可以直接引用机器人的一条通知或一张图片（如截图），把这条消息定向到该会话",
 ].join("\n");
-const TARGET_MISSING = "找不到这个 session ID；它可能已离线或写错。";
-const TARGET_GONE = "目标会话已离线。";
-const QUOTE_FAILED = "引用的通知或图片无法定位到一个在线会话。";
-const NO_ONLINE_SESSION = "当前没有在线的 pi 会话：最后一个会话已断开。请重新打开 pi 并运行 /wecom-aibot connect。";
+const TARGET_MISSING = "找不到这个 session ID；它可能已离线或写错";
+const TARGET_GONE = "目标会话已离线";
+const QUOTE_FAILED = "引用的通知或图片无法定位到一个在线会话";
+const NO_ONLINE_SESSION = "当前没有在线的 pi 会话：最后一个会话已断开。请重新打开 pi 并运行 /wecom-aibot connect";
 
 function quotedMember(eligible: Member[], quoteText: string): Member | undefined {
 	const ids = quotedSessions(quoteText);
@@ -775,14 +821,13 @@ function quotedMember(eligible: Member[], quoteText: string): Member | undefined
 	return eligible.find((member) => member.source.sessionId === ids[0]);
 }
 
-function sessionsText(eligible: Member[], tasks: Map<string, Task>): string {
-	if (!eligible.length) return "当前没有可用的在线会话。请先在 pi 中运行 /wecom-aibot connect。";
-	const running = new Set([...tasks.values()].filter((task) => task.running).map((task) => task.target.instanceId));
+function sessionsText(eligible: Member[], busy: ReadonlyMap<string, boolean>): string {
+	if (!eligible.length) return "当前没有可用的在线会话。请先在 pi 中运行 /wecom-aibot connect";
 	const lines = [`当前有 ${eligible.length} 个在线会话：`];
 	for (const member of eligible) {
-		const entry = `· ${display(member.source.directoryName)} · ${display(member.source.provider)} · ${display(member.source.modelName)} · ${running.has(member.instanceId) ? "执行中" : "空闲"}\n  session: ${member.source.sessionId}`;
+		const entry = `· ${display(member.source.directoryName)} · ${display(member.source.provider)} · ${display(member.source.modelName)} · ${stateLabel(busy.get(member.instanceId))}\n  session: ${member.source.sessionId}`;
 		if (Buffer.byteLength(lines.join("\n\n") + entry, "utf8") > 18_000) {
-			lines.push("（其余会话未显示，可先断开一些 pi。）");
+			lines.push("（其余会话未显示，可先断开一些 pi）");
 			break;
 		}
 		lines.push(entry);
@@ -791,40 +836,45 @@ function sessionsText(eligible: Member[], tasks: Map<string, Task>): string {
 	return lines.join("\n\n");
 }
 
+function stateLabel(busy: boolean | undefined): string {
+	if (busy === undefined) return "状态未知";
+	return busy ? "执行中" : "空闲";
+}
+
 function helpText(topic?: Subcommand): string {
 	switch (topic) {
 		case "send":
 			return [
-				"send — 把一段正文作为任务交给指定会话。",
+				"send — 把一段正文作为任务交给指定会话",
 				"",
 				"用法：/wecom-aibot send --sessionid <完整 session ID> --prompt <正文>",
 				"",
-				"--prompt 必须放在最后，其后全部内容都是正文（可换行）。",
-				"参数用空格分隔，不支持 =。",
+				"--prompt 必须放在最后，其后全部内容都是正文（可换行）",
+				"参数用空格分隔，不支持 =",
 			].join("\n");
 		case "screen":
 			return [
-				"screen — 截取指定会话当前的终端画面。",
+				"screen — 截取指定会话当前的终端画面",
 				"",
 				"用法：/wecom-aibot screen --sessionid <完整 session ID>",
 				"",
-				"只读请求，不会打断正在运行的任务；没有终端界面的会话无法截图。",
+				"只读请求，不会打断正在运行的任务；没有终端界面的会话无法截图",
 			].join("\n");
 		case "cancel":
 			return [
-				"cancel — 请求中止指定会话正在运行的一轮。",
+				"cancel — 请求中止指定会话正在运行的一轮",
 				"",
 				"用法：/wecom-aibot cancel --sessionid <完整 session ID>",
 				"",
-				"中止是异步生效的，这一轮可能还会输出最后一点内容。",
+				"中止是异步生效的，这一轮可能还会输出最后一点内容",
 			].join("\n");
 		case "sessions":
 			return [
-				"sessions — 列出在线会话。",
+				"sessions — 列出在线会话",
 				"",
 				"用法：/wecom-aibot sessions",
 				"",
-				"每个会话显示目录、供应商 · 模型、忙闲和完整 session ID；发任务时用它作为 --sessionid。",
+				"每个会话显示目录、供应商 · 模型、忙闲和完整 session ID；发任务时用它作为 --sessionid",
 			].join("\n");
 		default:
 			return [
@@ -835,7 +885,7 @@ function helpText(topic?: Subcommand): string {
 				"screen   --sessionid <id>     截取该会话当前终端画面",
 				"cancel   --sessionid <id>     请求中止该会话正在运行的一轮",
 				"",
-				"参数用空格分隔，不支持 =。--prompt 必须放在最后，其后全部是正文。",
+				"参数用空格分隔，不支持 =。--prompt 必须放在最后，其后全部是正文",
 				"查看单个命令：/wecom-aibot <子命令> --help",
 			].join("\n");
 	}
@@ -845,7 +895,6 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** Read a rendered PNG defensively: a missing, non-file or oversized path falls back to Markdown with a reason. */
 function readImage(path: string): { data?: Buffer; reason?: string } {
 	try {
 		const stat = statSync(path);
@@ -858,13 +907,12 @@ function readImage(path: string): { data?: Buffer; reason?: string } {
 	}
 }
 
-/** WeCom-side receipt for a message consumed by /wecom-aibot whoami; the pi shows the result. */
 function identityText(identity: ChatIdentity): string {
 	const code = (value: string) => `\`${value.replace(/[`\s]/g, "")}\``;
 	return [
-		`whoami 已识别当前${identity.chatType === 2 ? "群聊" : "单聊"}；这条消息只用于识别，不会交给 pi 处理。`,
+		`whoami 已识别当前${identity.chatType === 2 ? "群聊" : "单聊"}；这条消息只用于识别，不会交给 pi 处理`,
 		`chatid：${code(identity.chatId)}　chat_type：${identity.chatType}　userid：${code(identity.userid)}`,
-		"识别结果已交给发起 whoami 的 pi。",
+		"识别结果已交给发起 whoami 的 pi",
 	].join("\n\n");
 }
 
