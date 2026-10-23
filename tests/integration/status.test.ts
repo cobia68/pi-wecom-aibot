@@ -226,7 +226,7 @@ test("the footer stays empty when unconfigured; connect explains that configurat
 	await h.command("connect");
 	assert.equal(h.clients.length, 0);
 	assert.deepEqual(h.changes, []);
-	assert.match(h.notices.at(-1)!, /尚未配置.*\/wecom-aibot config edit --scope global/);
+	assert.match(h.notices.at(-1)!, /尚未配置.*\/wecom-aibot config --scope global edit/);
 });
 
 test("a saved connection change keeps the name green and adds a pending reconnection until connect", async () => {
@@ -234,14 +234,14 @@ test("a saved connection change keeps the name green and adds a pending reconnec
 	const client = await connect(h);
 	client.publish({ state: "subscribed", sessions: 1 });
 	assert.equal(h.statuses.get(key), label("success"));
-	await h.command("config set --scope global defaultChatId=new-user");
+	await h.command("config --scope global set defaultChatId=new-user");
 	assert.equal(h.statuses.get(key), `${label("success")}${theme.fg("warning", "（待重新接入）")}`);
 	assert.equal(client.stopped.length, 0, "saving never disconnects");
 	// A setting is no connection change: nothing waits for connect.
-	await h.command("config set --scope global defaultChatId=private-user");
-	await h.command("config set --scope session screenshotTheme=light");
+	await h.command("config --scope global set defaultChatId=private-user");
+	await h.command("config --scope session set screenshotTheme=light");
 	assert.equal(h.statuses.get(key), label("success"));
-	await h.command("config set --scope global defaultChatId=new-user");
+	await h.command("config --scope global set defaultChatId=new-user");
 	await h.command("connect");
 	assert.equal(h.clients.length, 2, "connect adopts the saved target with a new registration");
 	h.clients[1].publish({ state: "subscribed", sessions: 1 });

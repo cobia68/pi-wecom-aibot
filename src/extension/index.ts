@@ -413,7 +413,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 					if (!resolved) return;
 					const connection = connectionOf(resolved);
 					if (!connection) {
-						ctx.ui.notify("尚未配置机器人凭据，请先运行 /wecom-aibot config edit --scope global", "warning");
+						ctx.ui.notify("尚未配置机器人凭据，请先运行 /wecom-aibot config --scope global edit", "warning");
 						return;
 					}
 					if (bridge?.identifyOnly) {
@@ -423,7 +423,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: BridgeOptio
 					if (!connection.target) {
 						ctx.ui.notify(
 							sentences(
-								"默认推送目标未配置，请先运行 /wecom-aibot config whoami --scope <global|session> 识别保存，或用 /wecom-aibot config set --scope <global|session> defaultChatId=<ID> 填写",
+								"默认推送目标未配置，请先运行 /wecom-aibot config --scope <global|session> whoami 识别保存，或用 /wecom-aibot config --scope <global|session> set defaultChatId=<ID> 填写",
 								bridge ? "本次未更新当前接入" : "尚未接入",
 							),
 							"warning",

@@ -421,7 +421,7 @@ export class SessionConfig {
 			this.report("父会话文件已不存在，没有可继承的企业微信覆盖项；本 session 使用全局配置", "info");
 		else if (copied.length)
 			this.report(
-				`已从父会话继承企业微信覆盖项：${copied.join("、")}。这是一次性快照，之后两个 session 各自独立；不需要时运行 /wecom-aibot config unset --scope session <字段>`,
+				`已从父会话继承企业微信覆盖项：${copied.join("、")}。这是一次性快照，之后两个 session 各自独立；不需要时运行 /wecom-aibot config --scope session unset <字段>`,
 				"info",
 			);
 		return inherited;
@@ -469,7 +469,7 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 		}
 		if (!SETTABLE.includes(spec.name)) {
 			problems.push(
-				`${spec.name} 只能用 /wecom-aibot config edit --scope <global|session> 输入：命令会留在输入历史中`,
+				`${spec.name} 只能用 /wecom-aibot config --scope <global|session> edit 输入：命令会留在输入历史中`,
 			);
 			continue;
 		}
@@ -480,7 +480,7 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 		seen.add(spec.name);
 		if (!text) {
 			problems.push(
-				`${spec.name} 缺少值；删除字段请用 /wecom-aibot config unset --scope <global|session> ${spec.name}`,
+				`${spec.name} 缺少值；删除字段请用 /wecom-aibot config --scope <global|session> unset ${spec.name}`,
 			);
 			continue;
 		}

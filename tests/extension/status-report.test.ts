@@ -132,12 +132,12 @@ test("each connection state has its own icon, and the headline names the next st
 		[
 			"no credentials",
 			{ resolved: mergeLayers(undefined, undefined), stopReason: "reset" },
-			"💤 企业微信智能机器人：未接入（配置已删除），先运行 /wecom-aibot config edit --scope global 填写凭据",
+			"💤 企业微信智能机器人：未接入（配置已删除），先运行 /wecom-aibot config --scope global edit 填写凭据",
 		],
 		[
 			"no target",
 			{ resolved: noTarget },
-			"💤 企业微信智能机器人：未接入，先运行 /wecom-aibot config whoami --scope global 识别默认推送目标",
+			"💤 企业微信智能机器人：未接入，先运行 /wecom-aibot config --scope global whoami 识别默认推送目标",
 		],
 		["files unusable", { resolved: undefined }, "💤 企业微信智能机器人：未接入"],
 		[

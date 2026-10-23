@@ -651,7 +651,7 @@ test("all-runs and a scheduled completion send the local answer only once", asyn
 test("all-runs sends to the adopted target while a saved target waits for connect", async (t) => {
 	const notices: string[] = [];
 	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
-	await command("config set --scope global notificationScope=all-runs defaultChatId=new-user", ctx);
+	await command("config --scope global set notificationScope=all-runs defaultChatId=new-user", ctx);
 	assert.match(notices.at(-1)!, /通知设置已热更新；接入配置待重新接入/);
 	const registration = ws;
 	idle = false;
@@ -672,11 +672,11 @@ test("all-runs sends to the adopted target while a saved target waits for connec
 	);
 });
 
-test("config set --scope session notificationScope applies to the running session without reconnecting", async (t) => {
+test("config --scope session set notificationScope applies to the running session without reconnecting", async (t) => {
 	const notices: string[] = [];
 	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
 	const registration = ws;
-	await command("config set --scope session notificationScope=all-runs", ctx);
+	await command("config --scope session set notificationScope=all-runs", ctx);
 	const sessionFile = layerFile({ session: sessionId });
 	assert.equal(
 		JSON.parse(await readFile(sessionFile, "utf8")).notificationScope,
@@ -704,7 +704,7 @@ test("config set --scope session notificationScope applies to the running sessio
 	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
 	assert.equal(pushes.length, 1, "the switch applies to the running session");
 	assert.match(pushes[0].body.markdown.content, /AFTER-NOTIFY-ON/);
-	await command("config unset --scope session notificationScope", ctx);
+	await command("config --scope session unset notificationScope", ctx);
 	assert.deepEqual(JSON.parse(await readFile(sessionFile, "utf8")), {}, "unset keeps the session's own (empty) file");
 	ws.sent.length = 0;
 	idle = false;
@@ -1310,15 +1310,15 @@ test("every help form names the actual config path where it belongs without exec
 	const variants = [
 		"--help",
 		"config --help",
-		"config set --scope session screenshotTheme=light --help",
+		"config --scope session set screenshotTheme=light --help",
 		"connect --help",
 		"reset --help",
 		"test --help",
 		"test your-userid --chat-type 1 --help",
-		"config whoami --scope global --help",
+		"config --scope global whoami --help",
 	];
 	// -h is no help option: it is refused like any unknown option, before anything runs.
-	const refused = ["-h", "disconnect -h", "config whoami --wait 180 -h", "config edit --scope global -h"];
+	const refused = ["-h", "disconnect -h", "config whoami --wait 180 -h", "config --scope global edit -h"];
 	for (const args of [...variants, ...refused]) await command(args, ctx);
 	assert.equal(notices.length, variants.length + refused.length);
 	const helps = notices.slice(0, variants.length).map((notice) => notice.message);
@@ -1406,12 +1406,12 @@ test("actions written as options, unknown options and extra positional arguments
 		"setup --bot-id a --secret b",
 		"notify on",
 		"config set screenshotTheme=light",
-		"config set --scope session",
-		"config set --scope session screenshotTheme=sepia",
-		"config set --scope global secret=leaked",
+		"config --scope session set",
+		"config --scope session set screenshotTheme=sepia",
+		"config --scope global set secret=leaked",
 		"config unset screenshotTheme",
-		"config set --scope session --mode text",
-		"config set --scope session defaultChatId='x'",
+		"config --scope session set --mode text",
+		"config --scope session set defaultChatId='x'",
 		'test "user"',
 		"test user 2",
 		"test --chat-type 3 user",
@@ -1466,7 +1466,7 @@ test("config merges into the file as it is now, keeps the connection, and connec
 	// A hand edit (or another window) adds an allowlist after this pi loaded its configuration.
 	const edited = { ...JSON.parse(await readFile(CONFIG_FILE, "utf8")), allowedUserIds: ["boss"] };
 	await writeFile(CONFIG_FILE, JSON.stringify(edited));
-	await command("config set --scope global defaultChatId=boss", ctx);
+	await command("config --scope global set defaultChatId=boss", ctx);
 	const saved = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
 	assert.deepEqual(saved.allowedUserIds, ["boss"]);
 	assert.deepEqual(
@@ -1562,7 +1562,7 @@ for (const change of ["bot while waiting", "bot during confirmation", "Secret du
 			if (change.includes("confirmation")) await replace();
 			return true;
 		});
-		const pending = command("config whoami --scope global", ctx);
+		const pending = command("config --scope global whoami", ctx);
 		await drain();
 		if (change.includes("waiting")) await replace();
 		plain(notices.codes[0]);
@@ -1577,7 +1577,7 @@ for (const change of ["bot while waiting", "bot during confirmation", "Secret du
 
 test("config whoami shows the code, saves the identified chat into the chosen layer, and leaves other messages alone", async (t) => {
 	const notices = identityDialogs(t);
-	const pending = command("config whoami --scope session", ctx);
+	const pending = command("config --scope session whoami", ctx);
 	await drain();
 	assert.equal(notices.codes.length, 1);
 	inbound("during-the-wait");
@@ -1605,7 +1605,7 @@ test("config whoami without a scope only reports the chat and the command that w
 	assert.match(report, /^已识别单聊：chatid=colleague　chat_type=1　userid=colleague$/m);
 	assert.match(
 		report,
-		/设为默认推送目标：\/wecom-aibot config set --scope <global\|session> defaultChatId=colleague defaultChatType=1/,
+		/设为默认推送目标：\/wecom-aibot config --scope <global\|session> set defaultChatId=colleague defaultChatType=1/,
 	);
 	assert.match(report, /未配置 allowedUserIds/);
 });
@@ -1616,7 +1616,7 @@ test("a reconnect during the confirmation keeps a chat identified with the same 
 		await command("connect", ctx);
 		return true;
 	});
-	const pending = command("config whoami --scope global", ctx);
+	const pending = command("config --scope global whoami", ctx);
 	await drain();
 	plain(notices.codes[0], { from: { userid: "new-user" } });
 	await pending;
@@ -1644,7 +1644,7 @@ test("config whoami validates its wait and its preconditions before waiting for 
 	clearConfig();
 	await emit("session_start");
 	await command("config whoami", ctx);
-	assert.match(notices.at(-1)!.message, /\/wecom-aibot config edit --scope global/);
+	assert.match(notices.at(-1)!.message, /\/wecom-aibot config --scope global edit/);
 	assert.equal(ws.sent.length, frameCount, "none of these may send or reply upstream");
 });
 
@@ -1652,7 +1652,7 @@ test("config help explains whoami's code, the group mention and the wait", async
 	const notices: string[] = [];
 	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
 	await command("config whoami --help", ctx);
-	assert.match(notices[0], /^ {2}whoami \[--scope <global\|session>\]/m);
+	assert.match(notices[0], /^ {2}\[--scope <global\|session>\] whoami/m);
 	assert.match(notices[0], /6 位验证码/);
 	assert.match(notices[0], /群聊需 @机器人/);
 	assert.match(notices[0], /默认 300/);
@@ -1679,7 +1679,7 @@ test("config edit guides a first configuration, then edits one item of the chose
 	});
 	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
 	const sockets = FakeWebSocket.instances.length;
-	await command("config edit --scope global", ctx);
+	await command("config --scope global edit", ctx);
 	assert.deepEqual(JSON.parse(await readFile(CONFIG_FILE, "utf8")), {
 		botId: "new-bot",
 		secret: "new-secret",
@@ -1691,11 +1691,11 @@ test("config edit guides a first configuration, then edits one item of the chose
 	assert.equal(FakeWebSocket.instances.length, sockets, "a saved configuration never connects by itself");
 	// With credentials in place, edit opens a menu and changes the one item chosen.
 	choices = [/^截图主题：/, /^light$/];
-	await command("config edit --scope global", ctx);
+	await command("config --scope global edit", ctx);
 	assert.equal(menus.at(-2)?.title, "编辑全局配置");
 	assert.equal(JSON.parse(await readFile(CONFIG_FILE, "utf8")).screenshotTheme, "light");
 	choices = [/^通知方式：/, /^screenshot：/];
-	await command("config edit --scope session", ctx);
+	await command("config --scope session edit", ctx);
 	assert.equal(menus.at(-2)?.title, "编辑当前 session 的覆盖项");
 	assert.deepEqual(JSON.parse(await readFile(layerFile({ session: sessionId }), "utf8")), {
 		notificationMode: "screenshot",
@@ -1703,32 +1703,32 @@ test("config edit guides a first configuration, then edits one item of the chose
 	assert.equal(JSON.parse(await readFile(CONFIG_FILE, "utf8")).notificationMode, undefined);
 	// The session override can be dropped from the same menu.
 	choices = [/^通知方式：/, /^取消覆盖/];
-	await command("config edit --scope session", ctx);
+	await command("config --scope session edit", ctx);
 	assert.deepEqual(JSON.parse(await readFile(layerFile({ session: sessionId }), "utf8")), {});
 	// Esc, an empty Secret and a pasted ID with quotes cancel before anything is written.
 	const before = await readFile(CONFIG_FILE, "utf8");
 	choices = [];
-	await command("config edit --scope global", ctx);
+	await command("config --scope global edit", ctx);
 	choices = [/^机器人凭据：/];
 	answers = ["", ""];
-	await command("config edit --scope global", ctx);
+	await command("config --scope global edit", ctx);
 	choices = [/^默认推送目标：/, /手动填写单聊/];
 	answers = ['"user_one"'];
-	await command("config edit --scope global", ctx);
+	await command("config --scope global edit", ctx);
 	assert.match(notices.at(-2)!, /含引号或空格/);
 	assert.equal(await readFile(CONFIG_FILE, "utf8"), before);
 	assert.equal(notices.filter((notice) => /已取消，配置未修改/.test(notice)).length, 3);
 	// Without an interactive UI there is nothing to edit with.
 	Object.assign(ctx, { hasUI: false });
-	await command("config edit --scope global", ctx);
-	assert.match(notices.at(-1)!, /需要交互界面.*config set --scope global/);
+	await command("config --scope global edit", ctx);
+	assert.match(notices.at(-1)!, /需要交互界面.*config --scope global set/);
 	assert.equal(await readFile(CONFIG_FILE, "utf8"), before);
 });
 
 test("config show and config <layer> show say where each value comes from, never the Secret", async (t) => {
 	const notices: string[] = [];
 	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
-	await command("config set --scope session screenshotTheme=light", ctx);
+	await command("config --scope session set screenshotTheme=light", ctx);
 	await command("config show", ctx);
 	const merged = notices.at(-1)!;
 	assert.match(merged, /screenshotTheme +light（session）/);
@@ -1736,16 +1736,16 @@ test("config show and config <layer> show say where each value comes from, never
 	assert.match(merged, /defaultChatId +default-user（global）/);
 	assert.match(merged, /secret +已配置（global）/);
 	assert.match(merged, /当前接入与以上配置一致/);
-	await command("config show --scope session", ctx);
+	await command("config --scope session show", ctx);
 	assert.match(notices.at(-1)!, /当前 session 的覆盖项：\n {2}screenshotTheme {2}light\n文件：/);
-	await command("config show --scope global", ctx);
+	await command("config --scope global show", ctx);
 	assert.match(notices.at(-1)!, /^全局配置/);
 	for (const text of notices) assert.doesNotMatch(text, /test-secret/);
 	// Nothing configured anywhere: the next step is named instead of a table of blanks alone.
 	await command("disconnect", ctx);
 	clearConfig();
 	await command("config show", ctx);
-	assert.match(notices.at(-1)!, /未配置：运行 \/wecom-aibot config edit --scope global/);
+	assert.match(notices.at(-1)!, /未配置：运行 \/wecom-aibot config --scope global edit/);
 });
 
 test("config without an action lists the subcommands and runs only the one chosen", async (t) => {
@@ -1772,16 +1772,16 @@ test("config without an action lists the subcommands and runs only the one chose
 	await command("config", ctx);
 	assert.match(notices.at(-1)!, /^当前 session 的企业微信配置（合并结果）/);
 	// One that needs values goes to the editor to be completed; a scope lists only its own.
-	choice = /^set --scope session /;
+	choice = /^--scope session set /;
 	await command("config --scope session", ctx);
 	assert.deepEqual(
 		menus.at(-1)?.options.map((option) => option.split(/ {2,}/)[0]),
 		[
-			"show --scope session",
-			"edit --scope session",
-			"set --scope session 字段=值 …",
-			"unset --scope session 字段 …",
-			"whoami --scope session",
+			"--scope session show",
+			"--scope session edit",
+			"--scope session set 字段=值 …",
+			"--scope session unset 字段 …",
+			"--scope session whoami",
 		],
 	);
 	assert.equal(
@@ -1789,13 +1789,13 @@ test("config without an action lists the subcommands and runs only the one chose
 		1,
 		"the descriptions line up",
 	);
-	assert.deepEqual(editor, ["/wecom-aibot config set --scope session "]);
+	assert.deepEqual(editor, ["/wecom-aibot config --scope session set "]);
 	assert.equal(await readFile(CONFIG_FILE, "utf8"), before, "choosing never writes by itself");
 	// Without an interactive UI the subcommands are listed instead.
 	Object.assign(ctx, { hasUI: false });
 	await command("config --scope global", ctx);
-	assert.match(notices.at(-1)!, /^\/wecom-aibot config 需要写明动作，例如 \/wecom-aibot config show --scope global/);
-	assert.match(notices.at(-1)!, /edit --scope global/);
+	assert.match(notices.at(-1)!, /^\/wecom-aibot config 需要写明动作，例如 \/wecom-aibot config --scope global show/);
+	assert.match(notices.at(-1)!, /--scope global edit/);
 	assert.doesNotMatch(notices.at(-1)!, /session/);
 });
 
@@ -1825,7 +1825,7 @@ test("without an interactive UI, connect never replaces a registration that stil
 	idle = false;
 	inbound("pending-task");
 	await drain();
-	await command("config set --scope global defaultChatId=new-user", ctx);
+	await command("config --scope global set defaultChatId=new-user", ctx);
 	const registration = ws;
 	await command("connect", ctx);
 	assert.match(notices.at(-1)!, /还有 .*排队任务.*没有交互界面无法确认，未重新接入/);
@@ -1842,15 +1842,17 @@ test("argument completion through pi offers subcommands, options and config's gr
 	assert.deepEqual(values("co"), ["config ", "connect "]);
 	assert.deepEqual(values("se"), null, "setup is gone");
 	assert.deepEqual(values("--h"), ["--help"]);
-	assert.deepEqual(values("config set --scope session screenshotTheme="), [
-		"config set --scope session screenshotTheme=system ",
-		"config set --scope session screenshotTheme=dark ",
-		"config set --scope session screenshotTheme=light ",
+	assert.deepEqual(values("config --scope session set screenshotTheme="), [
+		"config --scope session set screenshotTheme=system ",
+		"config --scope session set screenshotTheme=dark ",
+		"config --scope session set screenshotTheme=light ",
 	]);
 	assert.deepEqual(values("test x --"), ["test x --chat-type ", "test x --help"]);
 	assert.deepEqual(values("config whoami --w"), ["config whoami --wait "]);
-	assert.deepEqual(values("config edit --scope "), ["config edit --scope global ", "config edit --scope session "]);
-	assert.deepEqual(values("config show "), ["config show --scope ", "config show --help"]);
+	assert.deepEqual(values("config --scope "), ["config --scope global ", "config --scope session "]);
+	assert.equal(values("config edit "), null, "a write needs its target before the action");
+	assert.deepEqual(values("config "), ["config --scope ", "config show ", "config whoami ", "config --help"]);
+	assert.deepEqual(values("config show "), ["config show --help"]);
 	// A bare action still offers --help, so the list is complete at every position.
 	assert.deepEqual(values("connect -"), ["connect --help"]);
 	assert.deepEqual(values("status "), ["status --help"]);
@@ -2015,7 +2017,7 @@ test("changing notificationMode needs no connect: active and queued work survive
 	assert.equal(sent.length, 1);
 	await sendNotification({ content: "SCHEDULED-FALLBACK", after_settle: true });
 	const current = ws;
-	await command("config set --scope session notificationMode=screenshot", ctx);
+	await command("config --scope session set notificationMode=screenshot", ctx);
 	assert.equal(ws, current);
 	assert.equal(FakeWebSocket.instances.length, 2, "mode changes must not create a new registration");
 	fixture.state.lines = ["FIRST-MODE-RESULT"];
@@ -2028,7 +2030,7 @@ test("changing notificationMode needs no connect: active and queued work survive
 	assert.equal(sent.length, 2, "queued task survives the mode change");
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
 	assert.equal(ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.msgtype, "image");
-	await command("config unset --scope session notificationMode", ctx);
+	await command("config --scope session unset notificationMode", ctx);
 	await emit("message_end", {
 		message: { role: "assistant", content: [{ type: "text", text: "SECOND-TEXT-RESULT" }] },
 	});
@@ -2320,10 +2322,10 @@ test("screenshots follow pi's own theme until screenshotTheme names one, read at
 	};
 	const registration = ws;
 	await sendNotification({ chatid: "test-user", content: "PI" });
-	await command("config set --scope session screenshotTheme=dark", ctx);
+	await command("config --scope session set screenshotTheme=dark", ctx);
 	await sendNotification({ chatid: "test-user", content: "DARK" });
 	// A theme pi does not have is refused, and nothing changes.
-	await command("config set --scope session screenshotTheme=sepia", ctx);
+	await command("config --scope session set screenshotTheme=sepia", ctx);
 	await sendNotification({ chatid: "test-user", content: "STILL DARK" });
 	assert.deepEqual(backgrounds, ["#ffffff", "#000000", "#000000"]);
 	assert.equal(ws, registration);

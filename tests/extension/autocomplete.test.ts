@@ -101,12 +101,12 @@ test("Tab after the command name lists subcommands instead of files", async () =
 
 test("Tab keeps completing deeper argument levels", async () => {
 	const provider = wecomTabCompletion(realProvider());
-	const text = "/wecom-aibot config s";
+	const text = "/wecom-aibot config --scope global s";
 	const suggestions = await provider.getSuggestions([text], 0, text.length, {
 		signal: new AbortController().signal,
 		force: true,
 	});
-	assert.deepEqual(values(suggestions), ["config show ", "config set "]);
+	assert.deepEqual(values(suggestions), ["config --scope global show ", "config --scope global set "]);
 });
 
 test("a chosen word that can be followed gets its space, so the next Tab goes a level deeper", async () => {
@@ -115,11 +115,16 @@ test("a chosen word that can be followed gets its space, so the next Tab goes a 
 	const deeper = await pressTab("/wecom-aibot conf", 2);
 	assert.equal(deeper.text, "/wecom-aibot config ");
 	assert.equal(deeper.listed, true);
-	assert.match(deeper.rendered, /→ show /);
-	assert.match(deeper.rendered, /\(1\/7\)/, "five actions, --scope and --help");
+	assert.match(deeper.rendered, /→ --scope <global\|session> /);
+	assert.match(deeper.rendered, /^ {2}show {2,}/m);
+	assert.match(deeper.rendered, /^ {2}whoami {2,}/m);
+	assert.doesNotMatch(deeper.rendered, /^ {2}(edit|set|unset) /m, "a write needs its target first");
 	// Two matches: the first Tab lists them, the second applies the selected one with its space.
 	assert.equal((await pressTab("/wecom-aibot c", 2)).text, "/wecom-aibot config ");
-	assert.equal((await pressTab("/wecom-aibot config sh", 2)).text, "/wecom-aibot config show ");
+	assert.equal(
+		(await pressTab("/wecom-aibot config --scope global s", 2)).text,
+		"/wecom-aibot config --scope global show ",
+	);
 	// --help ends the command, so it gets no space.
 	assert.equal((await pressTab("/wecom-aibot --h")).text, "/wecom-aibot --help");
 	assert.equal((await pressTab("/wecom-aibot status ")).text, "/wecom-aibot status --help");

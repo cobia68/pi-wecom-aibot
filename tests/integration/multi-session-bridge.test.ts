@@ -380,7 +380,7 @@ function dialogs(
 test("config whoami identifies the chat that sends the code, saves it after confirmation and routes nothing", async () => {
 	const { a, b } = await pair();
 	const ui = dialogs(a);
-	const running = a.command("config whoami --scope global");
+	const running = a.command("config --scope global whoami");
 	await ui.waiting;
 	chatMessage({
 		from: { userid: "user_one" },
@@ -420,7 +420,7 @@ test("offline config whoami identifies through a hidden temporary registration a
 	await a.command("disconnect");
 	await until(() => server.gateway.size === 1, "A disconnected");
 	const ui = dialogs(a);
-	const running = a.command("config whoami --scope global");
+	const running = a.command("config --scope global whoami");
 	await ui.waiting;
 	await until(() => server.gateway.size === 2, "temporary identity registration plus B");
 	await assert.rejects(a.notification({ chatid: "user", content: "must not push" }), /未正式接入/);
@@ -448,7 +448,7 @@ test("config whoami honours --wait; Esc keeps the configuration and the connecti
 	const { a } = await pair();
 	const ui = dialogs(a, { answer: /发给机器人/ });
 	const before = await readFile(CONFIG_FILE, "utf8");
-	await a.command("config whoami --scope global --wait 120");
+	await a.command("config --scope global whoami --wait 120");
 	assert.match(ui.titles[0], /最多 120 秒$/, "the wait uses --wait");
 	assert.match(ui.notices.at(-1)!, /已取消 whoami/);
 	assert.equal(ui.confirms.length, 0);

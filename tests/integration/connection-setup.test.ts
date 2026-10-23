@@ -191,7 +191,7 @@ test("connect requires a default target but never requires having identified one
 	await h.emit("session_start");
 	await h.command("connect");
 	assert.equal(h.clients.length, 0);
-	assert.match(h.notices.at(-1)!, /默认推送目标.*config whoami --scope/);
+	assert.match(h.notices.at(-1)!, /默认推送目标.*config --scope <global\|session> whoami/);
 	writeLayer("global", config);
 	await h.command("connect");
 	assert.equal(h.clients.length, 1, "a manually configured target is sufficient");
@@ -256,7 +256,7 @@ test("a known-unsent connection entry is retained and delivered after recovery",
 test("config with a manual target saves configuration without creating a client or entry", async () => {
 	const h = harness();
 	await h.emit("session_start");
-	await h.command("config set --scope global defaultChatId=new-user");
+	await h.command("config --scope global set defaultChatId=new-user");
 	assert.equal(h.clients.length, 0);
 	assert.equal(readLayer("global")?.defaultChatId, "new-user");
 	assert.match(h.notices.at(-1)!, /配置不等于接入.*\/wecom-aibot connect/);
@@ -266,7 +266,7 @@ test("offline config whoami uses a temporary registration then closes it without
 	writeLayer("global", { botId: "bot", secret: "secret" });
 	const h = harness();
 	await h.emit("session_start");
-	const pending = h.command("config whoami --scope global");
+	const pending = h.command("config --scope global whoami");
 	const c = h.clients[0];
 	assert.equal(c.options.identifyOnly, true);
 	c.publish();
@@ -291,7 +291,7 @@ test("cancelling an offline config whoami closes its temporary connection withou
 	const h = harness();
 	await h.emit("session_start");
 	h.cancelWait();
-	await h.command("config whoami --scope global");
+	await h.command("config --scope global whoami");
 	assert.equal(h.clients.length, 1);
 	assert.equal(h.clients[0].stops.length, 1);
 	assert.equal(readLayer("global")?.defaultChatId, "old-user");
@@ -323,7 +323,7 @@ test("replacing the registration during the confirmation saves the target and ne
 		h.clients[1].publish();
 		return true;
 	});
-	const pending = h.command("config whoami --scope global");
+	const pending = h.command("config --scope global whoami");
 	await flush();
 	c.identify({ chatId: "new-user", chatType: 1, userid: "user" });
 	await pending;
@@ -337,7 +337,7 @@ test("config whoami timeout disposes a temporary connection and does not change 
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const h = harness();
 	await h.emit("session_start");
-	const pending = h.command("config whoami --scope global --wait 10");
+	const pending = h.command("config --scope global whoami --wait 10");
 	const c = h.clients[0];
 	c.publish();
 	await flush();
@@ -352,7 +352,7 @@ for (const changed of [false, true]) {
 	test(`config whoami ${changed ? "saves a changed target that waits for connect" : "with an unchanged target changes nothing"}`, async () => {
 		const h = harness();
 		const c = await connected(h);
-		const pending = h.command("config whoami --scope global");
+		const pending = h.command("config --scope global whoami");
 		await flush();
 		c.identify({ chatId: changed ? "new-user" : "old-user", chatType: 1, userid: "user" });
 		await pending;
@@ -377,7 +377,7 @@ test("declining a target change keeps the original target and live registration"
 	const c = await connected(h);
 	h.confirmWith(async () => false);
 	const before = readFileSync(CONFIG_FILE, "utf8");
-	const pending = h.command("config whoami --scope global");
+	const pending = h.command("config --scope global whoami");
 	await flush();
 	c.identify({ chatId: "new-user", chatType: 1, userid: "user" });
 	await pending;
@@ -393,7 +393,7 @@ test("a failed target save keeps the old live registration", async () => {
 		writeLayer("global", { ...config, secret: "changed-during-confirmation" });
 		return true;
 	});
-	const pending = h.command("config whoami --scope global");
+	const pending = h.command("config --scope global whoami");
 	await flush();
 	c.identify({ chatId: "new-user", chatType: 1, userid: "user" });
 	await pending;

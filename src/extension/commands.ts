@@ -26,7 +26,7 @@ interface WeComOption {
 	value: string;
 	description: string;
 	choices?: readonly (readonly [value: string, description: string])[];
-	/** The option written where it belongs, without its value: shown when it is given without a subcommand. */
+	/** The option written where it belongs, `{}` standing for its value: shown when it is given without a subcommand. */
 	example: string;
 }
 
@@ -40,33 +40,33 @@ export interface WeComCommand {
 	details: string[];
 }
 
-/** `config` has a grammar of its own (action, --scope, 字段=值), parsed by parseConfigArgs. */
+/** `config` has a grammar of its own (--scope, action, 字段=值), parsed by parseConfigArgs. */
 const CONFIG_COMMAND: WeComCommand = {
 	name: "config",
-	usage: "config <动作> [--scope <global|session>] [字段=值 …]",
+	usage: "config [--scope <global|session>] <动作> [字段=值 …]",
 	description: "查看或修改配置：机器人凭据、默认推送目标、通知与截图设置",
 	maxArgs: 0,
 	options: [
 		{
 			name: "scope",
 			value: "<global|session>",
-			description: "global 为全局配置，session 为当前 session 的覆盖；edit、set、unset 必填",
+			description: "写在动作前：global 全局配置，session 当前 session 的覆盖；edit、set、unset 必填",
 			choices: [
 				["global", "全局配置"],
 				["session", "当前 session 的覆盖"],
 			],
-			example: "config show --scope",
+			example: "config --scope {} show",
 		},
 		{
 			name: "wait",
 			value: "<秒>",
 			description: `只用于 whoami：最多等待的秒数，10～600，默认 ${WHOAMI_WAIT_SECONDS}`,
-			example: "config whoami --wait",
+			example: "config whoami --wait {}",
 		},
 	],
 	details: [
 		"两层配置：global 是全局默认，session 是当前 pi 会话的显式覆盖。优先级：内置默认值 < global < session",
-		"写操作必须写明 --scope global 或 --scope session，位置不限；不写作用域时只读：show 显示合并结果，whoami 只识别不保存",
+		"作用域是命令的目标，写在动作前：config --scope <global|session> <动作>。edit、set、unset 必须写；不写作用域时只读：show 显示合并结果，whoami 只识别不保存",
 		"set 写成 字段=值，可一次给多个：先全部校验再一次保存，有错误时一项都不写",
 		"botId 与 secret、defaultChatId 与 defaultChatType 各为一组，成组保存、成组删除。botId、secret 只能用 edit 输入（命令会留在输入历史中）；输入时屏幕上会显示 Secret",
 		"whoami：在要识别的聊天里把 pi 显示的 6 位验证码发给机器人（群聊需 @机器人）。识别不受白名单限制；没有接入时临时连接，不出现在在线会话列表，也不接收任务",
@@ -93,7 +93,7 @@ const WECOM_COMMANDS: WeComCommand[] = [
 		options: [],
 		details: [
 			"重新读取配置，仅连接当前 session，不修改配置；接入配置不变时保留当前任务和待发通知",
-			"BotID、Secret 和默认推送目标必须齐全；目标可用 /wecom-aibot config whoami --scope <global|session> 识别保存，也可用 /wecom-aibot config set --scope <global|session> defaultChatId=<ID> 填写",
+			"BotID、Secret 和默认推送目标必须齐全；目标可用 /wecom-aibot config --scope <global|session> whoami 识别保存，也可用 /wecom-aibot config --scope <global|session> set defaultChatId=<ID> 填写",
 			"注册与企微订阅均成功后，按通知方式向默认目标发送一次可引用的会话入口通知；已在线重复 connect、网络自动重连不重复发送，通知失败不撤销连接",
 			"每个 session 都需手动 /wecom-aibot connect，包括新建、恢复、分叉和重载；退出或切换会话时自动断开",
 			"凭据、白名单或默认目标变化后，connect 经确认撤销旧注册及其待处理工作；没有交互界面且有待处理工作时拒绝切换",
@@ -126,7 +126,7 @@ const WECOM_COMMANDS: WeComCommand[] = [
 					["1", "单聊"],
 					["2", "群聊"],
 				],
-				example: "test <chatid> --chat-type",
+				example: "test <chatid> --chat-type {}",
 			},
 		],
 		details: [
@@ -173,39 +173,39 @@ const CONFIG_SUBCOMMANDS: readonly ConfigSubcommand[] = [
 		run: { action: "show" },
 	},
 	{
-		usage: "show --scope global",
+		usage: "--scope global show",
 		description: "查看全局显式保存的配置",
 		scope: "global",
 		run: { action: "show", scope: "global" },
 	},
 	{
-		usage: "show --scope session",
+		usage: "--scope session show",
 		description: "查看当前 session 显式保存的覆盖项",
 		scope: "session",
 		run: { action: "show", scope: "session" },
 	},
 	{
-		usage: "edit --scope global",
+		usage: "--scope global edit",
 		description: "交互编辑全局配置；还没有凭据时引导填写 BotID、Secret 和默认推送目标",
 		scope: "global",
 		run: { action: "edit", scope: "global" },
 	},
 	{
-		usage: "edit --scope session",
+		usage: "--scope session edit",
 		description: "交互编辑当前 session 的覆盖项",
 		scope: "session",
 		run: { action: "edit", scope: "session" },
 	},
-	{ usage: "set --scope global", args: "字段=值 …", description: "修改全局字段", scope: "global" },
-	{ usage: "set --scope session", args: "字段=值 …", description: "修改当前 session 的覆盖项", scope: "session" },
+	{ usage: "--scope global set", args: "字段=值 …", description: "修改全局字段", scope: "global" },
+	{ usage: "--scope session set", args: "字段=值 …", description: "修改当前 session 的覆盖项", scope: "session" },
 	{
-		usage: "unset --scope global",
+		usage: "--scope global unset",
 		args: "字段 …",
 		description: "删除全局字段，回到内置默认值",
 		scope: "global",
 	},
 	{
-		usage: "unset --scope session",
+		usage: "--scope session unset",
 		args: "字段 …",
 		description: "删除 session 覆盖，重新继承全局值或内置默认值",
 		scope: "session",
@@ -216,13 +216,13 @@ const CONFIG_SUBCOMMANDS: readonly ConfigSubcommand[] = [
 		run: { action: "whoami", seconds: WHOAMI_WAIT_SECONDS },
 	},
 	{
-		usage: "whoami --scope global",
+		usage: "--scope global whoami",
 		description: "识别聊天，设为全局默认推送目标",
 		scope: "global",
 		run: { action: "whoami", scope: "global", seconds: WHOAMI_WAIT_SECONDS },
 	},
 	{
-		usage: "whoami --scope session",
+		usage: "--scope session whoami",
 		description: "识别聊天，设为当前 session 的默认推送目标",
 		scope: "session",
 		run: { action: "whoami", scope: "session", seconds: WHOAMI_WAIT_SECONDS },
@@ -230,13 +230,15 @@ const CONFIG_SUBCOMMANDS: readonly ConfigSubcommand[] = [
 ];
 
 const CONFIG_ACTION_ROWS: [usage: string, description: string][] = [
-	["show [--scope <global|session>]", "查看配置；不写作用域时显示合并结果并标明来源"],
-	["edit --scope <global|session>", "交互编辑一层；还没有凭据时引导填写 BotID、Secret 和默认推送目标"],
-	["set --scope <global|session> 字段=值 …", "修改字段，未给出的字段保持不变"],
-	["unset --scope <global|session> 字段 …", "删除字段，重新继承下一层；关联组整组删除"],
-	["whoami [--scope <global|session>]", "发验证码识别聊天；写了作用域时确认后设为这一层的默认推送目标"],
+	["[--scope <global|session>] show", "查看配置；不写作用域时显示合并结果并标明来源"],
+	["--scope <global|session> edit", "交互编辑一层；还没有凭据时引导填写 BotID、Secret 和默认推送目标"],
+	["--scope <global|session> set 字段=值 …", "修改字段，未给出的字段保持不变"],
+	["--scope <global|session> unset 字段 …", "删除字段，重新继承下一层；关联组整组删除"],
+	["[--scope <global|session>] whoami", "发验证码识别聊天；写了作用域时确认后设为这一层的默认推送目标"],
 ];
 const CONFIG_ACTIONS = ["show", "edit", "set", "unset", "whoami"];
+/** The writes: each needs a target, `config --scope <global|session> <动作>`. */
+const SCOPED_ACTIONS = ["edit", "set", "unset"];
 
 export function configSubcommands(scope?: ConfigScope): readonly ConfigSubcommand[] {
 	return CONFIG_SUBCOMMANDS.filter((item) => !scope || item.scope === scope);
@@ -263,6 +265,8 @@ const HELP_OPTION: WeComOption = { name: "help", value: "", description: "显示
 function scanWecomArgs(input: string): {
 	positional: string[];
 	options: Map<string, string>;
+	/** How many positional words came before each option: config's target goes before its action. */
+	positionOf: Map<string, number>;
 	unknown: string[];
 	help: boolean;
 	error?: string;
@@ -271,6 +275,7 @@ function scanWecomArgs(input: string): {
 	const tokens = input.trim().split(/\s+/).filter(Boolean);
 	const positional: string[] = [];
 	const options = new Map<string, string>();
+	const positionOf = new Map<string, number>();
 	const unknown: string[] = [];
 	let help = false;
 	let optionsEnded = false;
@@ -297,13 +302,15 @@ function scanWecomArgs(input: string): {
 				return {
 					positional,
 					options,
+					positionOf,
 					unknown,
 					help,
 					error: `--${name} 缺少值；写成 --${name} <值>，值以 - 开头时写成 --${name}=<值>`,
 				};
 			}
-			if (options.has(name)) return { positional, options, unknown, help, error: `--${name} 重复给出` };
+			if (options.has(name)) return { positional, options, positionOf, unknown, help, error: `--${name} 重复给出` };
 			options.set(name, value);
+			positionOf.set(name, positional.length);
 			continue;
 		}
 		if (token.startsWith("-") && token.length > 1) {
@@ -312,7 +319,7 @@ function scanWecomArgs(input: string): {
 		}
 		positional.push(token);
 	}
-	return { positional, options, unknown, help };
+	return { positional, options, positionOf, unknown, help };
 }
 
 type Scan = ReturnType<typeof scanWecomArgs>;
@@ -355,7 +362,9 @@ export function parseWecomInvocation(input: string): WeComInvocation {
 		][0];
 		if (misplaced) return { kind: "error", message: configOptionProblem(misplaced) };
 		if (scan.help) return { kind: "help", topic: command };
-		return parseConfigArgs(scan.positional.slice(1), scan.options);
+		// Counted from the word after `config`: -1 is before `config` itself, 0 is right after it.
+		const after = new Map([...scan.positionOf].map(([name, at]) => [name, at - 1] as const));
+		return parseConfigArgs(scan.positional.slice(1), scan.options, after);
 	}
 	if (scan.unknown.length) {
 		const positional = command.maxArgs ? "位置参数以 - 开头时，先用单独的 -- 分隔" : "";
@@ -401,7 +410,7 @@ function bareInvocation(scan: Scan): WeComInvocation {
 	return {
 		kind: "error",
 		message: sentences(
-			`--${name} 要写在子命令后面${option ? `，例如 /wecom-aibot ${option.example} ${value}` : ""}`,
+			`--${name} 要写在子命令后面${option ? `，例如 /wecom-aibot ${option.example.replace("{}", value)}` : ""}`,
 			"查看用法：/wecom-aibot --help",
 		),
 	};
@@ -421,7 +430,16 @@ function isScope(word: string | undefined): word is ConfigScope {
 	return SCOPES.includes(word as ConfigScope);
 }
 
-function parseConfigArgs(args: string[], options: Map<string, string>): WeComInvocation {
+/**
+ * `config [--scope <global|session>] <动作> …`: the scope is the command's target and goes before the action, like
+ * the WeCom side's `--sessionid <id> <动作>`; whoami's --wait goes after it. `positionOf` counts the words after
+ * `config` that came before each option.
+ */
+function parseConfigArgs(
+	args: string[],
+	options: Map<string, string>,
+	positionOf: Map<string, number>,
+): WeComInvocation {
 	const error = (message: string): WeComInvocation => ({
 		kind: "error",
 		message: sentences(message, "查看帮助：/wecom-aibot config --help"),
@@ -432,31 +450,37 @@ function parseConfigArgs(args: string[], options: Map<string, string>): WeComInv
 	const given = options.get("scope")?.toLowerCase();
 	if (given !== undefined && !isScope(given)) return error("--scope 只能是 global 或 session");
 	const scope = given as ConfigScope | undefined;
+	const wait = options.get("wait");
+	/** The command as it should be written: the target first, then the action and its words, then --wait. */
+	const written = (target: string | undefined, rest: string[]) =>
+		["/wecom-aibot config", ...(target ? ["--scope", target] : []), ...rest, ...(wait ? ["--wait", wait] : [])].join(
+			" ",
+		);
 	// The earlier spelling with the scope as a word, `config global set …` or `config set global …`: say the new one.
 	if (scope === undefined) {
 		const at = isScope(words[0]) ? 0 : isScope(words[1]) ? 1 : -1;
 		if (at >= 0) {
 			const rest = args.filter((_, index) => index !== at);
 			const head = rest[0]?.toLowerCase() ?? "";
-			const spelled = !rest.length
-				? ["--scope", words[at]]
-				: CONFIG_ACTIONS.includes(head)
-					? [head, "--scope", words[at], ...rest.slice(1)]
-					: ["<动作>", "--scope", words[at]];
-			return error(`作用域改为 --scope：/wecom-aibot config ${spelled.join(" ")}`);
+			const spelled =
+				!rest.length || CONFIG_ACTIONS.includes(head) ? [head, ...rest.slice(1)].filter(Boolean) : ["<动作>"];
+			return error(`作用域改为 --scope，写在动作前：${written(words[at], spelled)}`);
 		}
 	}
 	const [action] = words;
 	const values = args.slice(1);
-	const wait = options.get("wait");
+	if (scope !== undefined && positionOf.get("scope") !== 0)
+		return error(`--scope 要写在动作前：${written(scope, args)}`);
 	if (wait !== undefined && action !== "whoami")
 		return error("--wait 只用于 whoami，例如 /wecom-aibot config whoami --wait 300");
+	if (wait !== undefined && (positionOf.get("wait") ?? 0) < 1)
+		return error(`--wait 要写在 whoami 后：${written(scope, args)}`);
 	// Only a given scope is part of the result: reading without one is a different request, not an empty scope.
 	const scoped = scope ? { scope } : {};
 	if (action === undefined) return { kind: "config", config: { action: "choose", ...scoped } };
 	if (!CONFIG_ACTIONS.includes(action)) return error(`未知动作 ${args[0]}；可用 show、edit、set、unset、whoami`);
 	const needsScope = (example: string) =>
-		error(`${action} 需要 --scope：/wecom-aibot config ${action} --scope session${example}，或 --scope global`);
+		error(`${action} 需要 --scope：/wecom-aibot config --scope session ${action}${example}，或 --scope global`);
 	switch (action) {
 		case "show":
 			return values.length ? error("config show 不接受参数") : { kind: "config", config: { action, ...scoped } };
@@ -467,7 +491,7 @@ function parseConfigArgs(args: string[], options: Map<string, string>): WeComInv
 			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " screenshotTheme=light");
 			if (!values.length)
 				return error(
-					`set 需要至少一个 字段=值，例如 /wecom-aibot config set --scope ${scope} screenshotTheme=light`,
+					`set 需要至少一个 字段=值，例如 /wecom-aibot config --scope ${scope} set screenshotTheme=light`,
 				);
 			const parsed = parseAssignments(values);
 			return "problems" in parsed
@@ -477,7 +501,7 @@ function parseConfigArgs(args: string[], options: Map<string, string>): WeComInv
 		case "unset": {
 			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " screenshotTheme");
 			if (!values.length)
-				return error(`unset 需要字段名，例如 /wecom-aibot config unset --scope ${scope} screenshotTheme`);
+				return error(`unset 需要字段名，例如 /wecom-aibot config --scope ${scope} unset screenshotTheme`);
 			const parsed = parseRemovals(values);
 			return "problems" in parsed
 				? rejected(parsed.problems)
@@ -623,11 +647,11 @@ function configHelpText(): string {
 		...section("字段", alignedRows(FIELDS.map((spec) => [spec.name, fieldText(spec)]))),
 		...section("选项", optionRows(command)),
 		...section("示例", [
-			"  /wecom-aibot config edit --scope global",
-			"  /wecom-aibot config set --scope session screenshotTheme=light",
-			"  /wecom-aibot config set --scope global notificationMode=screenshot notificationScope=all-runs",
-			"  /wecom-aibot config unset --scope session defaultChatId",
-			"  /wecom-aibot config whoami --scope global",
+			"  /wecom-aibot config --scope global edit",
+			"  /wecom-aibot config --scope session set screenshotTheme=light",
+			"  /wecom-aibot config --scope global set notificationMode=screenshot notificationScope=all-runs",
+			"  /wecom-aibot config --scope session unset defaultChatId",
+			"  /wecom-aibot config --scope global whoami",
 		]),
 		...section("配置", configPaths()),
 	].join("\n");
@@ -672,20 +696,29 @@ export function completeWecom(
 	return shown.map(({ item, label }) => ({ value: `${head}${item.value}${spaced(item) ? " " : ""}`, label }));
 }
 
-/** The words that may follow `tokens`: required options, positionals, optional options, then --help. */
+/** The words that may follow `tokens`: config's target, positionals, options, then --help. */
 function candidatesAt(tokens: string[], current: string, themes: () => readonly string[]): Candidate[] {
 	if (!tokens.length) return topLevel();
 	const command = commandNamed(tokens[0]);
 	const rest = tokens.slice(1).map((token) => token.toLowerCase());
 	if (!command || rest.includes("--help")) return [];
 	const pending = command.options.find((option) => rest.at(-1) === `--${option.name}`);
+	// config's --scope takes a value only right after `config`; written later it is refused when run.
+	if (pending && command === CONFIG_COMMAND && pending.name === "scope" && rest.length > 1) return [];
 	if (pending) return (pending.choices ?? []).map(([value, description]) => ({ value, description }));
 	const used = new Set<string>();
+	/** Options written before any positional word: only there is config's --scope in place. */
+	const early = new Set<string>();
 	const words: string[] = [];
 	for (let i = 0; i < rest.length; i++) {
-		if (!rest[i].startsWith("-")) words.push(rest[i]);
-		else if (command.options.some((option) => rest[i] === `--${option.name}`)) used.add(rest[i++].slice(2));
-		else used.add(rest[i].slice(2).split("=")[0]);
+		if (!rest[i].startsWith("-")) {
+			words.push(rest[i]);
+			continue;
+		}
+		const name = rest[i].slice(2).split("=")[0];
+		used.add(name);
+		if (!words.length) early.add(name);
+		if (command.options.some((option) => rest[i] === `--${option.name}`)) i++;
 	}
 	const option = (item: WeComOption): Candidate => ({
 		value: `--${item.name}`,
@@ -698,19 +731,23 @@ function candidatesAt(tokens: string[], current: string, themes: () => readonly 
 		if (words.length > command.maxArgs) return [];
 		return [...command.options.filter((item) => !used.has(item.name)).map(option), help];
 	}
-	const action = words[0];
-	if (action !== undefined && !CONFIG_ACTIONS.includes(action)) return [];
-	if (action !== undefined && action !== "set" && action !== "unset" && words.length > 1) return [];
-	const options = command.options
-		.filter((item) => !used.has(item.name) && (item.name !== "wait" || action === "whoami"))
-		.map(option);
-	const required = ["edit", "set", "unset"].includes(action ?? "")
-		? options.filter((item) => item.value === "--scope")
-		: [];
+	const [action] = words;
+	const scoped = used.has("scope");
+	const configOption = (name: string) => option(command.options.find((item) => item.name === name)!);
+	// The target goes before the action; until it is given, only the actions that may go without it are offered.
+	if (action === undefined)
+		return [
+			...(scoped ? [] : [configOption("scope")]),
+			...configCandidates(words, current, themes).filter((item) => scoped || !SCOPED_ACTIONS.includes(item.value)),
+			help,
+		];
+	// A target after the action, a --wait before it, or a write without a target is refused when run: offer nothing.
+	if (!CONFIG_ACTIONS.includes(action) || (scoped && !early.has("scope")) || early.has("wait")) return [];
+	if (SCOPED_ACTIONS.includes(action) && !scoped) return [];
+	if (action !== "set" && action !== "unset" && words.length > 1) return [];
 	return [
-		...required,
 		...configCandidates(words, current, themes),
-		...options.filter((item) => !required.includes(item)),
+		...(action === "whoami" && !used.has("wait") ? [configOption("wait")] : []),
 		help,
 	];
 }

@@ -139,7 +139,7 @@ class ConfigCommand {
 			adopted === undefined
 				? resolved.values.botId
 					? "当前 session 未接入；配置齐全后运行 /wecom-aibot connect"
-					: "未配置：运行 /wecom-aibot config edit --scope global 填写 BotID、Secret 和默认推送目标"
+					: "未配置：运行 /wecom-aibot config --scope global edit 填写 BotID、Secret 和默认推送目标"
 				: pendingReconnect(resolved, adopted)
 					? "待重新接入：当前接入仍使用旧配置，运行 /wecom-aibot connect 后生效"
 					: "当前接入与以上配置一致";
@@ -148,7 +148,7 @@ class ConfigCommand {
 				"当前 session 的企业微信配置（合并结果）：",
 				...table(rows),
 				state,
-				"修改：/wecom-aibot config set --scope <global|session> 字段=值 …，或 config edit --scope <global|session>",
+				"修改：/wecom-aibot config --scope <global|session> set 字段=值 …，或 config --scope <global|session> edit",
 			].join("\n"),
 		);
 	}
@@ -183,7 +183,7 @@ class ConfigCommand {
 		const theme = change.set?.screenshotTheme;
 		if (theme !== undefined && !this.piHasTheme(theme)) {
 			this.notify(
-				`pi 中没有主题 ${theme}，未做任何修改；可用 /wecom-aibot config edit --scope ${scope} 从 pi 的主题列表中选择`,
+				`pi 中没有主题 ${theme}，未做任何修改；可用 /wecom-aibot config --scope ${scope} edit 从 pi 的主题列表中选择`,
 				"warning",
 			);
 			return;
@@ -209,7 +209,7 @@ class ConfigCommand {
 		if (!this.ctx.hasUI) {
 			this.notify(
 				sentences(
-					`config edit 需要交互界面；请使用 /wecom-aibot config set --scope ${scope} 字段=值`,
+					`config edit 需要交互界面；请使用 /wecom-aibot config --scope ${scope} set 字段=值`,
 					`凭据只能在交互界面输入，或直接编辑 ${this.file(scope)}`,
 				),
 				"warning",
@@ -229,8 +229,8 @@ class ConfigCommand {
 		if (!bot) {
 			this.notify(
 				scope === "global"
-					? "全局配置还没有 BotID 和 Secret；先运行 /wecom-aibot config edit --scope global"
-					: "还没有配置 BotID 和 Secret；先运行 /wecom-aibot config edit --scope global",
+					? "全局配置还没有 BotID 和 Secret；先运行 /wecom-aibot config --scope global edit"
+					: "还没有配置 BotID 和 Secret；先运行 /wecom-aibot config --scope global edit",
 				"warning",
 			);
 			return;
@@ -238,7 +238,7 @@ class ConfigCommand {
 		const identity = await this.host.identify(this.ctx, bot, seconds);
 		if (!identity) return;
 		const command = (layer: string) =>
-			`/wecom-aibot config set --scope ${layer} defaultChatId=${identity.chatId} defaultChatType=${identity.chatType}`;
+			`/wecom-aibot config --scope ${layer} set defaultChatId=${identity.chatId} defaultChatType=${identity.chatType}`;
 		const allowlist = this.allowlistNote(identity);
 		const report = (...lines: (string | false | undefined)[]) =>
 			this.notify([found(identity), ...lines, allowlist].filter(Boolean).join("\n"));
@@ -434,7 +434,7 @@ class ConfigCommand {
 			]);
 		if (allow.skip)
 			options.push([
-				`暂不设置（以后运行 /wecom-aibot config whoami --scope ${scope} 识别）`,
+				`暂不设置（以后运行 /wecom-aibot config --scope ${scope} whoami 识别）`,
 				async () => ({ change: { set: {} } }),
 			]);
 		const title = current ? `默认推送目标（当前 ${current}）` : "默认推送目标";
@@ -516,7 +516,7 @@ class ConfigCommand {
 				: [];
 		if (shadowed.length)
 			lines.push(
-				`当前 session 覆盖了 ${shadowed.join("、")}，全局修改不影响本 session；需要跟随全局时运行 /wecom-aibot config unset --scope session ${shadowed[0]}`,
+				`当前 session 覆盖了 ${shadowed.join("、")}，全局修改不影响本 session；需要跟随全局时运行 /wecom-aibot config --scope session unset ${shadowed[0]}`,
 			);
 		lines.push(this.conclusion(before, after));
 		return lines.join("\n");

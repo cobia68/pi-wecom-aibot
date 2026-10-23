@@ -120,8 +120,8 @@ function oneLine(text: string): string {
 function nextStep(resolved: Resolved | undefined): string | undefined {
 	if (!resolved) return undefined;
 	const connection = connectionOf(resolved);
-	if (!connection) return "先运行 /wecom-aibot config edit --scope global 填写凭据";
-	if (!connection.target) return "先运行 /wecom-aibot config whoami --scope global 识别默认推送目标";
+	if (!connection) return "先运行 /wecom-aibot config --scope global edit 填写凭据";
+	if (!connection.target) return "先运行 /wecom-aibot config --scope global whoami 识别默认推送目标";
 	return "每个 session 需运行 /wecom-aibot connect";
 }
 

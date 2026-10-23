@@ -125,7 +125,7 @@ test("the total help describes the commands it lists; setup and notify are gone 
 
 test("config help documents scopes, every field with its default, and no retired name", () => {
 	const help = topicHelp("config --help");
-	assert.equal(topicHelp("config set --scope session --help"), help, "help inside config is config's own help");
+	assert.equal(topicHelp("config --scope session set --help"), help, "help inside config is config's own help");
 	for (const field of [
 		"botId",
 		"secret",
@@ -139,10 +139,11 @@ test("config help documents scopes, every field with its default, and no retired
 	assert.match(help, /text：.*（默认）/);
 	assert.match(help, /wecom-tasks：.*（默认）/);
 	assert.match(help, /screenshotTheme .*pi 主题名.*不设置时跟随 pi 当前的界面主题/);
-	assert.match(help, /写操作必须写明 --scope global 或 --scope session/);
-	assert.match(help, /^ {2}--scope <global\|session> {2,}/m);
-	assert.match(help, /^ {2}unset --scope <global\|session> 字段 … {2,}/m);
-	assert.match(help, /^ {2}whoami \[--scope <global\|session>\] {2,}/m);
+	assert.match(help, /^用法：\/wecom-aibot config \[--scope <global\|session>\] <动作> \[字段=值 …\]$/m);
+	assert.match(help, /作用域是命令的目标，写在动作前：config --scope <global\|session> <动作>/);
+	assert.match(help, /^ {2}--scope <global\|session> {2,}写在动作前/m);
+	assert.match(help, /^ {2}--scope <global\|session> unset 字段 … {2,}/m);
+	assert.match(help, /^ {2}\[--scope <global\|session>\] whoami {2,}/m);
 	assert.match(help, /6 位验证码.*不受白名单限制/);
 	assert.match(help, /只能用 edit 输入/);
 	assert.match(help, /allowedUserIds.*不由 config 管理/);
@@ -181,7 +182,7 @@ test("help says saving configuration never connects, and whoami only listens thr
 	assert.doesNotMatch(wecomHelpText(), /wecom-aibot use/);
 });
 
-test("config takes an action, --scope and 字段=值; reading may omit the scope, and no action lists the forms", () => {
+test("config takes its target before the action: --scope, action, 字段=值; reading may omit the target", () => {
 	const config = (input: string) => {
 		const invocation = parseWecomInvocation(input);
 		assert.equal(invocation.kind, "config", input);
@@ -190,26 +191,26 @@ test("config takes an action, --scope and 字段=值; reading may omit the scope
 	assert.deepEqual(config("config"), { action: "choose" });
 	assert.deepEqual(config("config --scope GLOBAL"), { action: "choose", scope: "global" });
 	assert.deepEqual(config("config show"), { action: "show" });
-	assert.deepEqual(config("config show --scope global"), { action: "show", scope: "global" });
+	assert.deepEqual(config("config --scope global show"), { action: "show", scope: "global" });
 	assert.deepEqual(config("config --scope session show"), { action: "show", scope: "session" });
-	assert.deepEqual(config("config edit --scope=global"), { action: "edit", scope: "global" });
-	assert.deepEqual(config("config set screenshotTheme=light notificationScope=all-runs --scope session"), {
+	assert.deepEqual(config("config --scope=global edit"), { action: "edit", scope: "global" });
+	assert.deepEqual(config("config --scope session set screenshotTheme=light notificationScope=all-runs"), {
 		action: "set",
 		scope: "session",
 		set: { screenshotTheme: "light", notificationScope: "all-runs" },
 	});
-	assert.deepEqual(config("config unset --scope session defaultChatId"), {
+	assert.deepEqual(config("config --scope session unset defaultChatId"), {
 		action: "unset",
 		scope: "session",
 		remove: ["defaultChatId", "defaultChatType"],
 	});
-	assert.deepEqual(config("config unset --scope global screenshotTheme"), {
+	assert.deepEqual(config("config --scope global unset screenshotTheme"), {
 		action: "unset",
 		scope: "global",
 		remove: ["screenshotTheme"],
 	});
 	assert.deepEqual(config("config whoami"), { action: "whoami", seconds: 300 });
-	assert.deepEqual(config("config whoami --scope session --wait 30"), {
+	assert.deepEqual(config("config --scope session whoami --wait 30"), {
 		action: "whoami",
 		scope: "session",
 		seconds: 30,
@@ -217,33 +218,33 @@ test("config takes an action, --scope and 字段=值; reading may omit the scope
 	const errors: [string, RegExp][] = [
 		[
 			"config set screenshotTheme=light",
-			/^set 需要 --scope：\/wecom-aibot config set --scope session screenshotTheme=light，或 --scope global/,
+			/^set 需要 --scope：\/wecom-aibot config --scope session set screenshotTheme=light，或 --scope global/,
 		],
 		["config edit", /^edit 需要 --scope/],
-		["config unset defaultChatId", /^unset 需要 --scope：.*unset --scope session defaultChatId/],
-		["config set --scope everyone x=1", /--scope 只能是 global 或 session/],
-		["config set --scope global --scope session x=1", /--scope 重复给出/],
+		["config unset defaultChatId", /^unset 需要 --scope：.*config --scope session unset defaultChatId/],
+		["config --scope everyone set x=1", /--scope 只能是 global 或 session/],
+		["config --scope global set --scope session x=1", /--scope 重复给出/],
 		[
 			"config global set notificationMode=text",
-			/作用域改为 --scope：\/wecom-aibot config set --scope global notificationMode=text/,
+			/作用域改为 --scope，写在动作前：\/wecom-aibot config --scope global set notificationMode=text/,
 		],
-		["config set session notificationMode=text", /config set --scope session notificationMode=text/],
-		["config global", /作用域改为 --scope：\/wecom-aibot config --scope global。/],
-		["config session delete x", /config <动作> --scope session/],
-		["config set --global x=1", /^未知选项 --global。作用域写成 --scope global$/],
+		["config set session notificationMode=text", /config --scope session set notificationMode=text/],
+		["config global", /作用域改为 --scope，写在动作前：\/wecom-aibot config --scope global。/],
+		["config session delete x", /config --scope session <动作>/],
+		["config --global set x=1", /^未知选项 --global。作用域写成 --scope global$/],
 		["config --show", /show 是动作，不带 --/],
-		["config set --scope session --notificationMode text", /字段写成 notificationMode=…，不用 --/],
-		["config set --scope session --mode text", /未知选项 --mode.*--scope、--wait、--help；字段写成 字段=值/],
+		["config --scope session set --notificationMode text", /字段写成 notificationMode=…，不用 --/],
+		["config --scope session set --mode text", /未知选项 --mode.*--scope、--wait、--help；字段写成 字段=值/],
 		["config show --wait 30", /--wait 只用于 whoami/],
 		["config whoami --wait 5", /--wait 须为 10～600/],
 		["config whoami x", /不接受参数/],
 		["config everything", /未知动作 everything；可用 show、edit、set、unset、whoami/],
 		["config show extra", /不接受参数/],
-		["config edit --scope global now", /不接受参数/],
-		["config set --scope session", /至少一个 字段=值/],
-		["config set --scope session screenshotTheme=light bogus=1", /未知字段 bogus.*未做任何修改/],
-		["config set --scope global secret=s", /只能用 .*edit/],
-		["config unset --scope session", /需要字段名/],
+		["config --scope global edit now", /不接受参数/],
+		["config --scope session set", /至少一个 字段=值/],
+		["config --scope session set screenshotTheme=light bogus=1", /未知字段 bogus.*未做任何修改/],
+		["config --scope global set secret=s", /只能用 .*edit/],
+		["config --scope session unset", /需要字段名/],
 		["test --scope global", /test 不支持 --scope/],
 	];
 	for (const [input, message] of errors) {
@@ -251,6 +252,27 @@ test("config takes an action, --scope and 字段=值; reading may omit the scope
 		assert.equal(invocation.kind, "error", input);
 		assert.match(invocation.kind === "error" ? invocation.message : "", message, input);
 	}
+});
+
+test("the target goes right after config and before the action; --wait goes after whoami", () => {
+	const misplaced: [string, string][] = [
+		[
+			"config set --scope global notificationMode=text",
+			"/wecom-aibot config --scope global set notificationMode=text",
+		],
+		["config show --scope session", "/wecom-aibot config --scope session show"],
+		["config edit --scope=global", "/wecom-aibot config --scope global edit"],
+		["config unset defaultChatId --scope session", "/wecom-aibot config --scope session unset defaultChatId"],
+		["config whoami --wait 30 --scope global", "/wecom-aibot config --scope global whoami --wait 30"],
+		["--scope global config show", "/wecom-aibot config --scope global show"],
+	];
+	for (const [input, written] of misplaced)
+		assert.equal(errorOf(input), `--scope 要写在动作前：${written}。查看帮助：/wecom-aibot config --help`, input);
+	assert.equal(
+		errorOf("config --wait 30 whoami"),
+		"--wait 要写在 whoami 后：/wecom-aibot config whoami --wait 30。查看帮助：/wecom-aibot config --help",
+	);
+	assert.match(errorOf("config --scope global --wait 30 whoami"), /config --scope global whoami --wait 30。/);
 });
 
 test("a bare action documents no options, yet its completion still offers --help", () => {
@@ -280,18 +302,12 @@ test("argument completion offers every word that may come next: subcommands, opt
 	assert.deepEqual(values("test x --"), ["test x --chat-type ", "test x --help"]);
 	assert.deepEqual(values("test x --chat-type "), ["test x --chat-type 1 ", "test x --chat-type 2 "]);
 	assert.deepEqual(values("test x --chat-type 2 "), ["test x --chat-type 2 --help"]);
-	assert.deepEqual(values("config "), [
-		"config show ",
-		"config edit ",
-		"config set ",
-		"config unset ",
-		"config whoami ",
-		"config --scope ",
-		"config --help",
-	]);
-	assert.deepEqual(values("config s"), ["config show ", "config set "]);
+	// The target comes first: until it is given, only the actions that may go without it are offered.
+	assert.deepEqual(values("config "), ["config --scope ", "config show ", "config whoami ", "config --help"]);
+	assert.deepEqual(values("config s"), ["config show "]);
 	assert.deepEqual(values("config -"), ["config --scope ", "config --help"]);
-	// The scope may come before the action, which is then offered after it.
+	assert.deepEqual(values("config --scope "), ["config --scope global ", "config --scope session "]);
+	assert.deepEqual(values("config --scope s"), ["config --scope session "]);
 	assert.deepEqual(values("config --scope global "), [
 		"config --scope global show ",
 		"config --scope global edit ",
@@ -300,60 +316,60 @@ test("argument completion offers every word that may come next: subcommands, opt
 		"config --scope global whoami ",
 		"config --scope global --help",
 	]);
-	// Only options that apply: --wait is whoami's; a used option is not offered again.
-	assert.deepEqual(values("config show "), ["config show --scope ", "config show --help"]);
-	assert.deepEqual(values("config whoami "), [
-		"config whoami --scope ",
-		"config whoami --wait ",
-		"config whoami --help",
-	]);
+	assert.deepEqual(values("config --scope=global s"), ["config --scope=global show ", "config --scope=global set "]);
+	// After the action there is no --scope: --wait is whoami's and comes after it.
+	assert.deepEqual(values("config show "), ["config show --help"]);
+	assert.deepEqual(values("config whoami "), ["config whoami --wait ", "config whoami --help"]);
 	assert.deepEqual(values("config whoami --w"), ["config whoami --wait "]);
-	assert.deepEqual(values("config show --scope global "), ["config show --scope global --help"]);
-	// edit, set and unset need --scope, so it comes first.
-	assert.deepEqual(values("config edit "), ["config edit --scope ", "config edit --help"]);
-	assert.deepEqual(values("config set -"), ["config set --scope ", "config set --help"]);
-	assert.equal(values("config set ")?.[0], "config set --scope ");
-	assert.equal(values("config unset ")?.[0], "config unset --scope ");
-	assert.deepEqual(values("config set --scope "), ["config set --scope global ", "config set --scope session "]);
-	assert.deepEqual(values("config set --scope s"), ["config set --scope session "]);
+	assert.deepEqual(values("config --scope global whoami "), [
+		"config --scope global whoami --wait ",
+		"config --scope global whoami --help",
+	]);
+	assert.deepEqual(values("config --scope global show "), ["config --scope global show --help"]);
+	assert.deepEqual(values("config --scope session edit "), ["config --scope session edit --help"]);
 	// Credentials are never offered to set: they only go through edit. A field= takes its value without a space.
-	assert.deepEqual(values("config set --scope global "), [
-		"config set --scope global defaultChatId=",
-		"config set --scope global defaultChatType=",
-		"config set --scope global notificationMode=",
-		"config set --scope global notificationScope=",
-		"config set --scope global screenshotTheme=",
-		"config set --scope global --help",
+	assert.deepEqual(values("config --scope global set "), [
+		"config --scope global set defaultChatId=",
+		"config --scope global set defaultChatType=",
+		"config --scope global set notificationMode=",
+		"config --scope global set notificationScope=",
+		"config --scope global set screenshotTheme=",
+		"config --scope global set --help",
 	]);
-	assert.deepEqual(values("config set --scope session notificationMode=text n"), [
-		"config set --scope session notificationMode=text notificationScope=",
+	assert.deepEqual(values("config --scope session set notificationMode=text n"), [
+		"config --scope session set notificationMode=text notificationScope=",
 	]);
-	// The scope may come anywhere: fields are completed after it as well as before.
-	assert.deepEqual(values("config set n"), ["config set notificationMode=", "config set notificationScope="]);
 	// The screenshot theme offers pi's own themes; the plugin brings none.
-	assert.deepEqual(values("config set --scope session screenshotTheme=r"), [
-		"config set --scope session screenshotTheme=rainbow-prism ",
+	assert.deepEqual(values("config --scope session set screenshotTheme=r"), [
+		"config --scope session set screenshotTheme=rainbow-prism ",
 	]);
-	assert.equal(values("config set --scope session screenshotTheme=")?.length, 4);
-	assert.deepEqual(values("config set --scope session notificationmode="), [
-		"config set --scope session notificationMode=text ",
-		"config set --scope session notificationMode=screenshot ",
+	assert.equal(values("config --scope session set screenshotTheme=")?.length, 4);
+	assert.deepEqual(values("config --scope session set notificationmode="), [
+		"config --scope session set notificationMode=text ",
+		"config --scope session set notificationMode=screenshot ",
 	]);
-	assert.deepEqual(values("config unset --scope session d"), [
-		"config unset --scope session defaultChatId ",
-		"config unset --scope session defaultChatType ",
+	assert.deepEqual(values("config --scope session unset d"), [
+		"config --scope session unset defaultChatId ",
+		"config --scope session unset defaultChatType ",
 	]);
 	// A finished token, a free value or a word after --help shows no list: Enter must run the command.
 	for (const done of [
 		"config",
 		"config show",
-		"config set --scope session",
-		"config set --scope session screenshotTheme=light",
-		"config set --scope session defaultChatId=",
+		"config --scope session set",
+		"config --scope session set screenshotTheme=light",
+		"config --scope session set defaultChatId=",
 		"config whoami --wait ",
 		"config show --help ",
 		"config show extra ",
 		"config bogus ",
+		// Refused when run: a write without a target, the target after the action, --wait before whoami.
+		"config set ",
+		"config edit ",
+		"config unset d",
+		"config set --scope global ",
+		"config show --scope ",
+		"config --wait 30 whoami ",
 		"test x y ",
 		"whoami --w",
 		"--help",
@@ -370,11 +386,12 @@ test("every completion level and the menu put the descriptions in one column, wh
 		"test x --",
 		"config ",
 		"config whoami -",
-		"config set --scope ",
-		"config set --scope global ",
-		"config set --scope session notificationScope=",
-		"config set --scope session screenshotTheme=",
-		"config unset --scope session ",
+		"config --scope ",
+		"config --scope global ",
+		"config --scope global set ",
+		"config --scope session set notificationScope=",
+		"config --scope session set screenshotTheme=",
+		"config --scope session unset ",
 	]) {
 		const labels = (completeWecom(prefix, themes) ?? []).map((item) => item.label);
 		assert.ok(labels.length > 1, prefix);
@@ -400,7 +417,7 @@ test("-h is an unknown option like any other: only --help shows help", () => {
 	assert.match(errorOf("-h"), /^未知选项 -h。查看用法：\/wecom-aibot --help/);
 	assert.match(errorOf("connect -h"), /^未知选项 -h。\/wecom-aibot connect 不接受选项/);
 	assert.match(errorOf("test -h"), /支持的选项：--chat-type、--help/);
-	assert.match(errorOf("config edit --scope global -h"), /^未知选项 -h。.*--scope、--wait、--help；字段写成 字段=值$/);
+	assert.match(errorOf("config --scope global edit -h"), /^未知选项 -h。.*--scope、--wait、--help；字段写成 字段=值$/);
 	assert.deepEqual(values("-"), ["--help"]);
 	assert.equal(topicHelp("--help connect"), topicHelp("connect --help"));
 });
@@ -416,12 +433,12 @@ test("a bare /wecom-aibot opens the menu; options without a subcommand say where
 		"未知选项 -x。查看用法：/wecom-aibot --help；选项写在子命令后面",
 	]);
 	for (const message of messages) assert.doesNotMatch(message, /status/, message);
-	assert.match(errorOf("--scope global"), /例如 \/wecom-aibot config show --scope global/);
+	assert.match(errorOf("--scope global"), /例如 \/wecom-aibot config --scope global show/);
 	assert.match(errorOf("--connect"), /^connect 是子命令，不带 --/);
 	const status = parseWecomInvocation("status");
 	assert.equal(status.kind === "run" && status.command.name, "status");
-	const whoami = parseWecomInvocation("--wait 30 config whoami");
-	assert.equal(whoami.kind === "config" && whoami.config.action === "whoami" && whoami.config.seconds, 30);
+	// A --wait before the command name is in the wrong place, like one before whoami.
+	assert.match(errorOf("--wait 30 config whoami"), /^--wait 要写在 whoami 后：\/wecom-aibot config whoami --wait 30/);
 });
 
 test("error messages never end in a full stop, also when composed from several sentences", () => {
@@ -434,15 +451,15 @@ test("error messages never end in a full stop, also when composed from several s
 		"test --chat-type 3 x",
 		"config whoami --wait 5",
 		"config show --wait 30",
-		"config set --scope session screenshotTheme=light bogus=1 x",
-		"config unset --scope session",
+		"config --scope session set screenshotTheme=light bogus=1 x",
+		"config --scope session unset",
 		"config global set x=1",
 		"config everything",
 		"--wait",
 	])
 		assert.ok(!errorOf(input).endsWith("。"), errorOf(input));
 	assert.equal(
-		errorOf("config set --scope session screenshotTheme=light bogus=1 x"),
+		errorOf("config --scope session set screenshotTheme=light bogus=1 x"),
 		"未知字段 bogus；可用字段：defaultChatId、defaultChatType、notificationMode、notificationScope、screenshotTheme；「x」缺少 =，写成 字段=值。未做任何修改。查看帮助：/wecom-aibot config --help",
 	);
 });

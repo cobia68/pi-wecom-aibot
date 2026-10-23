@@ -50,7 +50,7 @@ pi install .
 
 ### 检查安装
 
-重新打开 pi，或在已打开的 pi 中输入 `/reload`，再输入 `/wecom-aibot status`：第一行显示「💤 企业微信智能机器人：未接入」说明插件已加载，还没有配置时会提示先运行 `/wecom-aibot config edit --scope global`
+重新打开 pi，或在已打开的 pi 中输入 `/reload`，再输入 `/wecom-aibot status`：第一行显示「💤 企业微信智能机器人：未接入」说明插件已加载，还没有配置时会提示先运行 `/wecom-aibot config --scope global edit`
 
 ## 🔌 连接机器人
 
@@ -66,14 +66,14 @@ pi install .
 ### 第 2 步：在 pi 中配置
 
 ```text
-/wecom-aibot config edit --scope global
+/wecom-aibot config --scope global edit
 ```
 
 1. 按提示填入 BotID 和 Secret
 2. 「默认推送目标」选「发验证码识别」：pi 用刚填的凭据临时连接企业微信，并显示一个 6 位验证码。凭据填错时这一步就会报错
 3. 在要接收通知的聊天里把验证码发给机器人（群聊需 @机器人）。pi 显示识别到的聊天，凭据和目标一起保存，临时连接随即关闭
 
-知道 userid／chatid 时也可以选「手动填写」。只有这条验证码会被当成识别，其他消息照常处理；想让通知默认发到某个群，就在那个群里 @机器人 发验证码。以后换目标用 `/wecom-aibot config whoami --scope global`
+知道 userid／chatid 时也可以选「手动填写」。只有这条验证码会被当成识别，其他消息照常处理；想让通知默认发到某个群，就在那个群里 @机器人 发验证码。以后换目标用 `/wecom-aibot config --scope global whoami`
 
 `config` **只修改配置，不自动正式接入，也不发送会话入口通知**。识别时的临时连接不接收任务、不出现在在线会话列表，完成、取消或超时后关闭。每个 session 都必须手动执行 `/wecom-aibot connect`，新建、恢复、分叉和 `/reload` 后也不例外；退出或切换会话时自动 disconnect。`connect` / `disconnect` 不修改配置，也不影响其他已接入的 pi
 
@@ -118,10 +118,10 @@ pi install .
 ```text
 /wecom-aibot config                                        # 列出全部写法供选择
 /wecom-aibot config show                                   # 当前 session 合并后的配置，标明每项来源
-/wecom-aibot config edit --scope global                    # 交互编辑全局配置
-/wecom-aibot config set --scope session screenshotTheme=light
-/wecom-aibot config unset --scope session screenshotTheme  # 删除覆盖，重新继承全局值
-/wecom-aibot config whoami --scope global                  # 发验证码识别聊天，设为全局默认推送目标
+/wecom-aibot config --scope global edit                    # 交互编辑全局配置
+/wecom-aibot config --scope session set screenshotTheme=light
+/wecom-aibot config --scope session unset screenshotTheme  # 删除覆盖，重新继承全局值
+/wecom-aibot config --scope global whoami                  # 发验证码识别聊天，设为全局默认推送目标
 ```
 
 | 系统          | 位置                                         |
@@ -133,7 +133,7 @@ pi install .
 
 优先级：内置默认值 < 全局配置 < session 覆盖。BotID 与 Secret、默认推送目标与类型各自成组，整组取自同一层，session 的 BotID 不会配上全局的 Secret
 
-- 作用域写成 `--scope global` 或 `--scope session`，位置不限。`edit`、`set`、`unset` 必须写；`show`、`whoami` 不写时只读：`show` 显示合并结果，`whoami` 只识别不保存
+- 作用域是命令的目标，写在动作前：`config --scope <global|session> <动作>`，和企微侧 `--sessionid <id> <动作>` 一样。`edit`、`set`、`unset` 必须写；`show`、`whoami` 不写时只读：`show` 显示合并结果，`whoami` 只识别不保存。写在动作后会报错并给出正确写法
 - 只输入 `config` 时不执行任何动作，而是列出全部写法供选择，`config --scope global` 只列全局的：`show`、`edit`、`whoami` 选中即执行；`set`、`unset` 把命令填进输入框，补上 `字段=值` 后回车。没有交互界面时只列出这些写法
 - `set` 写成 `字段=值`，字段名即 JSON 键名，大小写不敏感；一条命令可写多个字段，有任何错误时一项都不保存
 - BotID 和 Secret 只能用 `edit` 输入：`set` 的命令文本会留在 pi 的输入历史里。`edit` 输入时 Secret 显示在屏幕上，之后查看时只显示「已配置」
@@ -163,7 +163,7 @@ pi install .
 
 - 保存配置从不断开或重连。`notificationMode`、`notificationScope`、`screenshotTheme` 用到时现读，所有 pi 窗口下次使用时生效，无需 `connect`；已生成、等待发送的通知保持原快照
 - BotID、Secret、默认推送目标和 `allowedUserIds` 只在 `connect` 时采用。改变后，`status`、`config show` 和状态栏显示「待重新接入」，当前接入仍使用旧配置；运行 `/wecom-aibot connect` 确认后切换。切换会撤销旧注册，清除排队任务和待发通知，已开始的任务继续运行但结果不再回传。没有交互界面时，只有没有待处理工作才直接切换
-- `config whoami --scope <global|session>` 确认后把目标保存到那一层，不断开当前接入。识别用那一层生效的机器人；pi 正连着另一个机器人时，先 `disconnect` 再识别
+- `config --scope <global|session> whoami` 确认后把目标保存到那一层，不断开当前接入。识别用那一层生效的机器人；pi 正连着另一个机器人时，先 `disconnect` 再识别
 - 分叉出的 session（`/fork`、`/clone`、`--fork`）首次启动时复制一次父 session 的覆盖项并提示，之后两边各自独立。连接状态不复制，也不保存到配置文件
 - Secret 以明文保存，请勿提交到代码仓库或发给他人。删除 pi 会话不会删除它的覆盖文件，不需要时手动清理 `sessions/`
 
@@ -280,8 +280,8 @@ pi install .
 - Linux 上中文粗体需要同目录下对应的 `-Bold` 字体文件（如 `NotoSansCJKsc-Bold.otf`）。正文里的 emoji 仍使用单色 `Noto Emoji`（Linux 可放到 `~/.local/share/fonts/noto-emoji/NotoEmoji.ttf`）；找不到时正文 emoji 可能显示为方框。彩色 emoji 字体（如 Noto Color Emoji）当前渲染不支持
 
 ```text
-/wecom-aibot config set --scope global notificationMode=screenshot
-/wecom-aibot config set --scope session screenshotTheme=light
+/wecom-aibot config --scope global set notificationMode=screenshot
+/wecom-aibot config --scope session set screenshotTheme=light
 ```
 
 两项都在下次生成通知或截图时现读，无需重新 `connect`
@@ -292,7 +292,7 @@ pi install .
 | :------------------------ | :--------------------------------------------------------- |
 | `/wecom-aibot`            | 弹出子命令菜单，标题显示当前接入状态                       |
 | `/wecom-aibot status`     | 查看连接状态、默认推送目标、通知设置和配置文件位置         |
-| `/wecom-aibot config`     | 查看或修改配置：`<show\|edit\|set\|unset\|whoami> [--scope <global\|session>]`；whoami 发验证码识别聊天；不带动作时列出全部写法供选择；只保存，不接入也不断开 |
+| `/wecom-aibot config`     | 查看或修改配置：`[--scope <global\|session>] <show\|edit\|set\|unset\|whoami>`；whoami 发验证码识别聊天；不带动作时列出全部写法供选择；只保存，不接入也不断开 |
 | `/wecom-aibot test`       | 发送一条部署测试消息                                       |
 | `/wecom-aibot connect`    | 配置齐全后正式接入并发会话入口；接入配置改变后确认切换     |
 | `/wecom-aibot disconnect` | 仅注销当前 session；不修改配置，最后一个 pi 注销后网关退出 |
@@ -304,7 +304,7 @@ pi install .
 
 `config whoami` 等待或确认期间，如果机器人凭据被更换或配置被删除，旧识别结果不会写入配置，请重新识别。`reset` 若报告删除失败，当前 pi 已停止，但凭据可能仍在磁盘；请检查提示的文件权限后重试
 
-`reset` 删除全局配置文件：BotID、Secret、默认推送目标、通知设置和白名单一起删除，各 session 的覆盖文件保留；之后需要重新 `/wecom-aibot config edit --scope global`。没有交互界面时 `reset` 不删除任何文件。它只停止当前 pi 的接入；其他已连接的 pi 仍会继续收发，直到它们各自 `disconnect` 或退出
+`reset` 删除全局配置文件：BotID、Secret、默认推送目标、通知设置和白名单一起删除，各 session 的覆盖文件保留；之后需要重新 `/wecom-aibot config --scope global edit`。没有交互界面时 `reset` 不删除任何文件。它只停止当前 pi 的接入；其他已连接的 pi 仍会继续收发，直到它们各自 `disconnect` 或退出
 
 ## 🔄 升级与卸载
 
@@ -320,10 +320,10 @@ pi install .
 旧版本的字段 `sendMode`、`notifyEveryRun`、`enabled`、`welcome` 等不再读取，也不转换成新字段；下次保存同一层配置时从文件中删除。原来用截图通知或「每轮结束都通知」的，升级后重新设置：
 
 ```text
-/wecom-aibot config set --scope global notificationMode=screenshot notificationScope=all-runs
+/wecom-aibot config --scope global set notificationMode=screenshot notificationScope=all-runs
 ```
 
-命令写法也变过：作用域改为选项（`config global set …` 写成 `config set --scope global …`），`whoami` 移到 `config` 下（`/wecom-aibot config whoami`），只有 `--help` 能打开帮助。企微侧的目标必须放在动作前，例如 `screen --sessionid <id>` 改为 `--sessionid <id> screen`；旧写法不再执行，报错里会给出新写法。pi 与网关之间的协议版本仍是 6
+命令写法也变过：作用域改为写在动作前的选项（`config global set …`、`config set --scope global …` 都写成 `config --scope global set …`），`whoami` 移到 `config` 下（`/wecom-aibot config whoami`），只有 `--help` 能打开帮助。企微侧的目标必须放在动作前，例如 `screen --sessionid <id>` 改为 `--sessionid <id> screen`；旧写法不再执行，报错里会给出新写法。pi 与网关之间的协议版本仍是 6
 
 更新只替换磁盘上的文件，正在运行的 pi 和共享网关进程仍然持有旧代码，`/reload` 也换不掉已经在跑的网关。请关闭所有使用这个机器人的 pi 窗口（共享网关会在最后一个窗口退出后约 1.5 秒自行结束），再重新打开，并逐个执行 `/wecom-aibot connect`
 
@@ -357,7 +357,7 @@ pi install .
 <details>
 <summary><b>连接失败，提示核对 BotID/Secret</b></summary>
 
-- 执行 `/wecom-aibot config edit --scope global` 重新填写（凭据由 session 覆盖时用 `config edit --scope session`）
+- 执行 `/wecom-aibot config --scope global edit` 重新填写（凭据由 session 覆盖时用 `config --scope session edit`）
 - 在企业微信管理后台确认机器人仍是「API 模式」+「长连接」
 - 连续被拒绝几次后插件停止重试；改好后执行 `/wecom-aibot connect` 重新连接
 
@@ -375,7 +375,7 @@ pi install .
 
 - 对方需要先在企业微信里给机器人发过消息
 - 企业微信限制每个聊天每分钟最多 30 条、每小时最多 1000 条消息
-- 没有默认推送目标时，用 `/wecom-aibot config whoami --scope global` 设置，或在任务里写明发给谁
+- 没有默认推送目标时，用 `/wecom-aibot config --scope global whoami` 设置，或在任务里写明发给谁
 - 失败原因可以在 `/wecom-aibot log` 中查看
 
 网络短暂中断时，已完成的结果会在恢复连接后补发；退出 pi 会取消还没发出的通知
@@ -385,7 +385,7 @@ pi install .
 <details>
 <summary><b>怎么查自己的 userid 或群的 chatid</b></summary>
 
-执行 `/wecom-aibot config whoami`，pi 显示一个 6 位验证码；在要查的聊天里把它发给机器人（群聊需 @机器人），pi 显示 chatid 和 userid。这样只查看，不保存；加 `--scope global` 或 `--scope session` 时，确认后设为那一层的默认推送目标。离线时会临时连接识别，无需先 `connect`。默认等 5 分钟，可用 `--wait <秒>` 调整，10～600 秒。等待期间其他消息照常处理。已连接时确认更换目标只保存配置，不断开当前接入；运行 `/wecom-aibot connect` 后改用新目标
+执行 `/wecom-aibot config whoami`，pi 显示一个 6 位验证码；在要查的聊天里把它发给机器人（群聊需 @机器人），pi 显示 chatid 和 userid。这样只查看，不保存；写成 `config --scope global whoami` 或 `config --scope session whoami` 时，确认后设为那一层的默认推送目标。离线时会临时连接识别，无需先 `connect`。默认等 5 分钟，可用 `--wait <秒>` 调整，10～600 秒。等待期间其他消息照常处理。已连接时确认更换目标只保存配置，不断开当前接入；运行 `/wecom-aibot connect` 后改用新目标
 
 </details>
 
