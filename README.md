@@ -195,19 +195,25 @@ pi install .
 
 ```text
 /wecom-aibot sessions
-/wecom-aibot send   --sessionid <完整 session ID> --prompt <正文>
-/wecom-aibot screen --sessionid <完整 session ID>
-/wecom-aibot cancel --sessionid <完整 session ID>
+/wecom-aibot --sessionid <完整 session ID>
+/wecom-aibot --sessionid <完整 session ID> send --prompt <正文>
+/wecom-aibot --sessionid <完整 session ID> screen
+/wecom-aibot --sessionid <完整 session ID> cancel
 /wecom-aibot --help
+/wecom-aibot send --help
 ```
 
-- `sessions` 列出在线会话：目录、供应商 · 模型、忙闲，以及单独一行的完整 session ID
-- `send` 的正文从 `--prompt` 之后开始，空格、换行和 `--` 开头的文字都原样保留；`--prompt` 必须放在最后
+- `--sessionid` 是整条命令的目标，必须写在动作前；旧写法 `screen --sessionid <id>` 等只报错并给出新写法，不执行
+- `sessions` 不需要目标，列出在线会话：目录、供应商 · 模型、忙闲，以及单独一行的完整 session ID
+- 只写 `--sessionid <id>` 时，当场询问该会话的忙闲，回复「目录 · 供应商 · 模型 · 忙闲」一行，再列出三条填好 ID 的 `send`、`screen`、`cancel` 命令，方便直接复制；最多等 2 秒，没有回答时显示「状态未知」。这只是查询，不切换会话，也不记住选择；ID 不在线时回「找不到这个 session ID」并附上当前会话列表
+- `send` 的正文从 `--prompt` 之后开始，空格、换行和 `--` 开头的文字都原样保留；`--prompt` 必须放在最后，其后不再解析任何选项，出现 `--sessionid <uuid>`、`--help` 等也只是正文
 - `screen` 截取该会话当前的终端画面，只读请求，不打断正在运行的任务
 - `cancel` 请求中止该会话正在运行的一轮；中止是异步生效的
+- `--help` 是总帮助，`send --help` 等是单个动作的帮助，都不需要目标；带目标的 `--sessionid <id> send --help` 同样只显示帮助，不查询或执行，目标离线也不影响查看帮助
 - 参数只用空格分隔，不支持 `=`；未知选项会报错并列出可用选项
+- 命令中显式写出的 `--sessionid` 决定目标，引用不能改变它；引用通知或图片后发不带目标的 `send`、`screen`、`cancel` 仍报缺少目标，不从引用补目标
 - 没有任何目标的普通消息不会投递，机器人会回一条用法提示
-- 引用机器人发来的图片（截图、图片通知）回复，同样能定位到发它的会话：网关发出的每张 PNG 里都带这个 session 的标记，读标记不需要 OCR，也不靠记住发过什么
+- 引用机器人发来的图片（截图、图片通知）回复普通消息，同样能定位到发它的会话：网关发出的每张 PNG 里都带这个 session 的标记，读标记不需要 OCR，也不靠记住发过什么
 
 | 发送的内容 | pi 收到的是                                         |
 | :--------- | :-------------------------------------------------- |
@@ -226,8 +232,8 @@ pi install .
 网关不记住任何选择：每条消息自己带目标，所以不会因为切换窗口或成员变化而投到别的 pi
 
 - 只有一个 pi 在线时，同样要先指明目标（`/wecom-aibot sessions` 拿到 ID，或引用一条通知）
-- 引用某条会话通知回复，这条消息就交给发出该通知的 pi，且不影响其他消息
-- 引用机器人发来的一张图片回复，同样交给发这张图的 pi；图片被重新压缩、标记读不出来时，会回一条错误并附上当前会话列表
+- 引用某条会话通知回复普通消息，这条消息就交给发出该通知的 pi，且不影响其他消息；命令始终自行写明目标
+- 引用机器人发来的一张图片回复普通消息，同样交给发这张图的 pi；图片被重新压缩、标记读不出来时，会回一条错误并附上当前会话列表
 - 群聊里每个人各自指定目标，互不影响
 - 目标 session 离线或写错时，机器人会回一条错误并附上当前会话列表
 
@@ -317,7 +323,7 @@ pi install .
 /wecom-aibot config set --scope global notificationMode=screenshot notificationScope=all-runs
 ```
 
-命令写法也变过：作用域改为选项（`config global set …` 写成 `config set --scope global …`），`whoami` 移到 `config` 下（`/wecom-aibot config whoami`），只有 `--help` 能打开帮助。旧写法不再执行，报错里会给出新写法
+命令写法也变过：作用域改为选项（`config global set …` 写成 `config set --scope global …`），`whoami` 移到 `config` 下（`/wecom-aibot config whoami`），只有 `--help` 能打开帮助。企微侧的目标必须放在动作前，例如 `screen --sessionid <id>` 改为 `--sessionid <id> screen`；旧写法不再执行，报错里会给出新写法。pi 与网关之间的协议版本仍是 6
 
 更新只替换磁盘上的文件，正在运行的 pi 和共享网关进程仍然持有旧代码，`/reload` 也换不掉已经在跑的网关。请关闭所有使用这个机器人的 pi 窗口（共享网关会在最后一个窗口退出后约 1.5 秒自行结束），再重新打开，并逐个执行 `/wecom-aibot connect`
 

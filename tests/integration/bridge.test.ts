@@ -79,7 +79,7 @@ function inbound(id: string, extra: Record<string, unknown> = {}): void {
 
 /** Every task names its target: the bridge tests speak the WeCom-side grammar. */
 function taskText(prompt: string): string {
-	return `/wecom-aibot send --sessionid ${sessionId} --prompt ${prompt}`;
+	return `/wecom-aibot --sessionid ${sessionId} send --prompt ${prompt}`;
 }
 
 function sendNotification(params: Record<string, unknown>): Promise<any> {
@@ -2141,7 +2141,7 @@ test("screen fails with a text error instead of a fabricated image or notificati
 			from: { userid: "test-user" },
 			chattype: "single",
 			msgtype: "text",
-			text: { content: `/wecom-aibot screen --sessionid ${sessionId}` },
+			text: { content: `/wecom-aibot --sessionid ${sessionId} screen` },
 		},
 	});
 	await drain();
@@ -2153,32 +2153,34 @@ test("screen fails with a text error instead of a fabricated image or notificati
 	);
 });
 
-test("the WeCom session list asks this pi whether it is busy right now", async () => {
+test("the WeCom list and target-only query ask this pi whether it is busy right now", async () => {
 	let asked = 0;
-	const state = async () => {
+	const state = async (content: string) => {
+		const reqId = `sessions-${++asked}`;
 		ws.receive({
 			cmd: "aibot_msg_callback",
-			headers: { req_id: `sessions-${++asked}` },
+			headers: { req_id: reqId },
 			body: {
-				msgid: `sessions-${asked}`,
+				msgid: reqId,
 				from: { userid: "test-user" },
 				chattype: "single",
 				msgtype: "text",
-				text: { content: "/wecom-aibot sessions" },
+				text: { content },
 			},
 		});
 		await drain();
-		const list = ws.sent
-			.filter((frame) => frame.cmd === "aibot_respond_msg" && /在线会话/.test(frame.body.stream.content))
-			.at(-1);
-		return /· (执行中|空闲|状态未知)\n/.exec(list?.body.stream.content ?? "")?.[1];
+		const reply = ws.sent.find((frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === reqId);
+		return /· (执行中|空闲|状态未知)\n/.exec(reply?.body.stream.content ?? "")?.[1];
 	};
-	assert.equal(await state(), "空闲");
+	const commands = ["/wecom-aibot sessions", `/wecom-aibot --sessionid ${sessionId}`];
+	for (const content of commands) assert.equal(await state(content), "空闲");
 	idle = false;
-	assert.equal(await state(), "执行中", "a run typed in pi itself");
+	for (const content of commands) assert.equal(await state(content), "执行中", "a run typed in pi itself");
+	assert.equal(sent.length, 0, "neither query starts a task");
 	inbound("queued-behind-local-run");
 	idle = true;
-	assert.equal(await state(), "执行中", "pi is idle, but a WeCom task is still on its way");
+	for (const content of commands)
+		assert.equal(await state(content), "执行中", "pi is idle, but a WeCom task is still on its way");
 });
 
 test("an explicit image notification uses its content as the text fallback when capture fails", async () => {

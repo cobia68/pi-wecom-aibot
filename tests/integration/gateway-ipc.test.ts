@@ -129,7 +129,7 @@ function inbound(content: string, extra: Record<string, unknown> = {}, sessionId
 			from: { userid: "user" },
 			chattype: "single",
 			msgtype: "text",
-			text: { content: `/wecom-aibot send --sessionid ${sessionId} --prompt ${content}` },
+			text: { content: `/wecom-aibot --sessionid ${sessionId} send --prompt ${content}` },
 			...extra,
 		},
 	});
@@ -288,7 +288,7 @@ test("IPC carries a screen request to the pi and returns its answer", async () =
 	const a = client("A", {}, { onRequest: (id, request) => requests.push({ id, request }) });
 	a.connection.start();
 	await until(() => a.connection.isReady(), "A ready");
-	messageFor("A", `/wecom-aibot screen --sessionid session-A`);
+	messageFor("A", "/wecom-aibot --sessionid session-A screen");
 	await until(() => requests.length === 1, "request delivered");
 	assert.equal(requests[0].request.action, "screen");
 	a.connection.respond(requests[0].id, { ok: false, error: "该会话没有终端界面" });
@@ -299,6 +299,60 @@ test("IPC carries a screen request to the pi and returns its answer", async () =
 			),
 		"failure reported",
 	);
+});
+
+test("IPC carries a target-only live-state query to just that pi and keeps no selected target", async () => {
+	await startServer();
+	let busy = true;
+	let askedA = 0;
+	let askedB = 0;
+	const a = client(
+		"A",
+		{},
+		{
+			onRequest: (id, request) => {
+				assert.equal(request.action, "state");
+				askedA++;
+				a.connection.respond(id, { ok: true, busy });
+			},
+		},
+	);
+	const b = client(
+		"B",
+		{},
+		{
+			onRequest: () => {
+				askedB++;
+			},
+		},
+	);
+	a.connection.start();
+	b.connection.start();
+	await until(() => a.connection.isReady() && b.connection.isReady(), "both ready");
+	const ws = FakeWebSocket.instances[0];
+	const replies = () => ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg");
+	messageFor("A", "/wecom-aibot --sessionid session-A");
+	await until(() => replies().length === 1, "single-session busy reply");
+	assert.equal(
+		replies()[0].body.stream.content,
+		[
+			"· directory-A · provider-A · model-A · 执行中",
+			"",
+			"/wecom-aibot --sessionid session-A send --prompt <正文>",
+			"/wecom-aibot --sessionid session-A screen",
+			"/wecom-aibot --sessionid session-A cancel",
+		].join("\n"),
+	);
+	busy = false;
+	messageFor("A", "/wecom-aibot --sessionid session-A");
+	await until(() => replies().length === 2, "single-session idle reply");
+	assert.match(replies()[1].body.stream.content, /^· directory-A · provider-A · model-A · 空闲\n/);
+	messageFor("A", "/wecom-aibot cancel");
+	await until(() => replies().length === 3, "missing target reply");
+	assert.match(replies()[2].body.stream.content, /^cancel 需要目标：/);
+	assert.equal(askedA, 2);
+	assert.equal(askedB, 0, "B is neither polled nor operated on");
+	assert.equal(a.tasks.length + b.tasks.length, 0);
 });
 
 test("IPC preserves a known-unsent outcome when upstream readiness is stale", async () => {

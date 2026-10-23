@@ -68,10 +68,9 @@ interface PendingRequest {
 }
 
 interface SessionsPoll {
-	reqId: string;
-	prefix?: string;
 	members: Member[];
 	busy: Map<string, boolean>;
+	finish: (members: Member[], busy: ReadonlyMap<string, boolean>) => void;
 	pending: number;
 	done: boolean;
 	timer?: ReturnType<typeof setTimeout>;
@@ -527,6 +526,10 @@ export class WeComGateway {
 			this.listSessions(reqId, eligible, TARGET_MISSING);
 			return;
 		}
+		if (command.kind === "session") {
+			this.showSession(reqId, target, message.userid);
+			return;
+		}
 		if (command.kind === "send") {
 			this.hand(target, reqId, { ...message, text: command.prompt }, eligible);
 			return;
@@ -534,9 +537,31 @@ export class WeComGateway {
 		this.request(command.kind, target, reqId, message.chat);
 	}
 
+	private showSession(reqId: string, target: Member, userid: string): void {
+		this.pollSessions([target], (online, busy) => {
+			const member = online[0];
+			if (!member) {
+				this.listSessions(
+					reqId,
+					this.eligible(userid).filter((item) => !item.identifyOnly),
+					TARGET_MISSING,
+				);
+				return;
+			}
+			this.reply(reqId, sessionText(member, busy.get(member.instanceId)));
+		});
+	}
+
 	private listSessions(reqId: string, eligible: Member[], prefix?: string): void {
-		const poll: SessionsPoll = { reqId, prefix, members: eligible, busy: new Map(), pending: 0, done: false };
-		const queries = eligible.map((member) => ({ id: randomUUID(), member }));
+		this.pollSessions(eligible, (online, busy) => {
+			const text = sessionsText(online, busy);
+			this.reply(reqId, prefix ? `${prefix}\n\n${text}` : text);
+		});
+	}
+
+	private pollSessions(members: Member[], finish: SessionsPoll["finish"]): void {
+		const poll: SessionsPoll = { members, busy: new Map(), finish, pending: 0, done: false };
+		const queries = members.map((member) => ({ id: randomUUID(), member }));
 		// Registered before the first send: a pi may answer before the loop ends.
 		for (const { id, member } of queries) this.stateQueries.set(id, { poll, instanceId: member.instanceId });
 		poll.pending = queries.length;
@@ -565,8 +590,7 @@ export class WeComGateway {
 		for (const [id, query] of [...this.stateQueries]) if (query.poll === poll) this.stateQueries.delete(id);
 		// A pi that left or registered again while it was asked is not listed.
 		const online = poll.members.filter((member) => this.members.get(member.instanceId) === member);
-		const text = sessionsText(online, poll.busy);
-		this.reply(poll.reqId, poll.prefix ? `${poll.prefix}\n\n${text}` : text);
+		poll.finish(online, poll.busy);
 	}
 
 	private request(action: "screen" | "cancel", target: Member, reqId: string, chat: ChatRef): void {
@@ -716,99 +740,87 @@ export type WeComCommand =
 	| { kind: "error"; message: string }
 	| { kind: "help"; topic?: Subcommand }
 	| { kind: "sessions" }
+	| { kind: "session"; sessionId: string }
 	| { kind: "send"; sessionId: string; prompt: string }
 	| { kind: "screen"; sessionId: string }
 	| { kind: "cancel"; sessionId: string };
 
-const OPTIONS: Record<Subcommand, string[]> = {
-	sessions: [],
-	send: ["--sessionid", "--prompt"],
-	screen: ["--sessionid"],
-	cancel: ["--sessionid"],
-};
+type SessionAction = Exclude<Subcommand, "sessions">;
 
-/** WeCom-side command grammar. Every task names its target; nothing is remembered between messages. */
+/** The target is a command option before the action; --prompt ends parsing unconditionally. */
 export function parseWeComCommand(text: string): WeComCommand {
-	const trimmed = text.trim();
+	const trimmed = text.trimStart();
 	if (!new RegExp(`^${COMMAND_PREFIX}(?:\\s|$)`, "i").test(trimmed)) return { kind: "none" };
-	const rest = trimmed.slice(COMMAND_PREFIX.length).trim();
-	if (!rest) return { kind: "help" };
-	const head = rest.split(/\s+/)[0];
-	const name = head.toLowerCase();
-	if (name === "--help") return { kind: "help" };
-	if (name.startsWith("-"))
-		return { kind: "error", message: `未知选项 ${head}。可用子命令：${SUBCOMMANDS.join("、")}` };
-	const sub = SUBCOMMANDS.find((item) => item === name);
-	if (!sub) return { kind: "error", message: `未知子命令 ${head}。可用子命令：${SUBCOMMANDS.join("、")}` };
-	const after = rest.slice(head.length).replace(/^\s+/, "");
-	// --prompt is terminal: everything after it is the prompt, exactly as typed.
-	const found = /(^|\s)--prompt(?=\s|$)/.exec(after);
-	let optionText = after;
-	let prompt: string | undefined;
-	if (found) {
-		const cut = found.index + found[1].length;
-		optionText = after.slice(0, cut);
-		prompt = after.slice(cut + "--prompt".length).replace(/^\s+/, "");
-		// Only a real `--sessionid <id>` misplaced after --prompt is an error; prose may mention the option.
-		if (/(^|\s)--sessionid\s+[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?=\s|$)/i.test(prompt)) {
-			return {
-				kind: "error",
-				message: "--sessionid 必须写在 --prompt 之前。例如：/wecom-aibot send --sessionid <id> --prompt 检查构建",
-			};
+	const rest = trimmed.slice(COMMAND_PREFIX.length);
+	const tokens = /\S+/g;
+	let sessionId: string | undefined;
+	let sub: Subcommand | undefined;
+	for (let found = tokens.exec(rest); found; found = tokens.exec(rest)) {
+		const token = found[0];
+		if (token === "--help") return sub ? { kind: "help", topic: sub } : { kind: "help" };
+		if (token === "--sessionid") {
+			const value = tokens.exec(rest)?.[0];
+			if (!value || value.startsWith("--")) return { kind: "error", message: "--sessionid 缺少值" };
+			if (sessionId) return { kind: "error", message: "--sessionid 重复给出" };
+			if (sub === "sessions") return { kind: "error", message: "sessions 不需要 --sessionid" };
+			if (sub) return { kind: "error", message: `--sessionid 要写在动作前：${sessionCommand(value, sub)}` };
+			sessionId = value;
+			continue;
 		}
+		if (!sub) {
+			if (token.startsWith("-")) return unknownOption(token);
+			sub = SUBCOMMANDS.find((item) => item === token.toLowerCase());
+			if (!sub) return { kind: "error", message: `未知子命令 ${token}。可用子命令：${SUBCOMMANDS.join("、")}` };
+			continue;
+		}
+		if (token === "--prompt") {
+			if (sub !== "send") return { kind: "error", message: `${sub} 不接受 --prompt` };
+			if (!sessionId) return targetRequired(sub);
+			// Only the separator is syntax; keep all remaining whitespace and command-looking text as content.
+			const prompt = rest.slice(tokens.lastIndex).replace(/^(?:\r\n|\s)/, "");
+			if (!prompt.trim()) return { kind: "error", message: "--prompt 之后要有正文" };
+			return { kind: "send", sessionId, prompt };
+		}
+		if (token.startsWith("-")) return unknownOption(token, sub);
+		return { kind: "error", message: `${sub} 不接受位置参数（${token}）；正文请写在 --prompt 之后` };
 	}
-	const parsed = parseOptions(sub, optionText);
-	if (typeof parsed === "string") return { kind: "error", message: parsed };
-	if (parsed.help) return { kind: "help", topic: sub };
-	const sessionId = parsed.values.get("--sessionid");
-	if (sub === "sessions") {
-		if (sessionId) return { kind: "error", message: "sessions 不接受 --sessionid" };
-		return { kind: "sessions" };
-	}
-	if (!sessionId) {
-		const example = sub === "send" ? " --prompt 你的任务" : "";
-		return {
-			kind: "error",
-			message: `缺少 --sessionid。先发送 /wecom-aibot sessions 获取完整 session ID，例如：/wecom-aibot ${sub} --sessionid <id>${example}`,
-		};
-	}
-	if (sub === "send") {
-		if (prompt === undefined)
-			return { kind: "error", message: "缺少 --prompt。例如：/wecom-aibot send --sessionid <id> --prompt 检查构建" };
-		if (!prompt.trim()) return { kind: "error", message: "--prompt 之后要有正文" };
-		return { kind: "send", sessionId, prompt };
-	}
-	if (prompt !== undefined) return { kind: "error", message: `${sub} 不接受 --prompt` };
-	return sub === "screen" ? { kind: "screen", sessionId } : { kind: "cancel", sessionId };
+	if (!sub) return sessionId ? { kind: "session", sessionId } : { kind: "help" };
+	if (sub === "sessions")
+		return sessionId ? { kind: "error", message: "sessions 不需要 --sessionid" } : { kind: "sessions" };
+	if (!sessionId) return targetRequired(sub);
+	if (sub === "send")
+		return { kind: "error", message: `缺少 --prompt。例如：${sessionCommand(sessionId, sub, "检查构建")}` };
+	return { kind: sub, sessionId };
 }
 
-function parseOptions(sub: Subcommand, text: string): { values: Map<string, string>; help: boolean } | string {
-	const values = new Map<string, string>();
-	const tokens = text.trim() ? text.trim().split(/\s+/) : [];
-	for (let i = 0; i < tokens.length; i++) {
-		const token = tokens[i];
-		if (token === "--help") return { values, help: true };
-		if (!token.startsWith("--")) return `${sub} 不接受位置参数（${token}）；正文请写在 --prompt 之后`;
-		const allowed = OPTIONS[sub];
-		if (!allowed.includes(token)) {
-			const hint = allowed.length ? `可用选项：${allowed.join("、")}` : "该子命令不接受选项";
-			return sentences(`未知选项 ${token}`, hint, "参数用空格分隔，不支持 =");
-		}
-		const value = tokens[i + 1];
-		if (value === undefined || value.startsWith("--")) return `${token} 缺少值`;
-		if (values.has(token)) return `${token} 重复给出`;
-		i++;
-		values.set(token, value);
-	}
-	return { values, help: false };
+function unknownOption(token: string, sub?: Subcommand): WeComCommand {
+	const allowed = sub ? (sub === "send" ? ["--prompt", "--help"] : ["--help"]) : ["--sessionid", "--help"];
+	return {
+		kind: "error",
+		message: sentences(`未知选项 ${token}`, `可用选项：${allowed.join("、")}`, "参数用空格分隔，不支持 ="),
+	};
+}
+
+function targetRequired(action: SessionAction): WeComCommand {
+	return {
+		kind: "error",
+		message: sentences(
+			`${action} 需要目标：${sessionCommand("<id>", action)}`,
+			`先发 ${COMMAND_PREFIX} sessions 获取 ID`,
+		),
+	};
+}
+
+function sessionCommand(sessionId: string, action: SessionAction, prompt = "<正文>"): string {
+	return `${COMMAND_PREFIX} --sessionid ${sessionId} ${action}${action === "send" ? ` --prompt ${prompt}` : ""}`;
 }
 
 const GUIDANCE = [
 	"请先指定目标会话：",
 	"1. 发送 /wecom-aibot sessions 查看在线会话与完整 session ID",
-	"2. 再发送 /wecom-aibot send --sessionid <id> --prompt <正文>",
+	`2. 再发送 ${sessionCommand("<id>", "send")}`,
 	"",
-	"也可以直接引用机器人的一条通知或一张图片（如截图），把这条消息定向到该会话",
+	"也可以直接引用机器人的一条通知或一张图片（如截图），把普通消息定向到该会话；命令仍需写明 --sessionid",
 ].join("\n");
 const TARGET_MISSING = "找不到这个 session ID；它可能已离线或写错";
 const TARGET_GONE = "目标会话已离线";
@@ -821,18 +833,32 @@ function quotedMember(eligible: Member[], quoteText: string): Member | undefined
 	return eligible.find((member) => member.source.sessionId === ids[0]);
 }
 
+function sessionSummary(member: Member, busy: boolean | undefined): string {
+	return `· ${display(member.source.directoryName)} · ${display(member.source.provider)} · ${display(member.source.modelName)} · ${stateLabel(busy)}`;
+}
+
+function sessionText(member: Member, busy: boolean | undefined): string {
+	return [
+		sessionSummary(member, busy),
+		"",
+		sessionCommand(member.source.sessionId, "send"),
+		sessionCommand(member.source.sessionId, "screen"),
+		sessionCommand(member.source.sessionId, "cancel"),
+	].join("\n");
+}
+
 function sessionsText(eligible: Member[], busy: ReadonlyMap<string, boolean>): string {
 	if (!eligible.length) return "当前没有可用的在线会话。请先在 pi 中运行 /wecom-aibot connect";
 	const lines = [`当前有 ${eligible.length} 个在线会话：`];
 	for (const member of eligible) {
-		const entry = `· ${display(member.source.directoryName)} · ${display(member.source.provider)} · ${display(member.source.modelName)} · ${stateLabel(busy.get(member.instanceId))}\n  session: ${member.source.sessionId}`;
+		const entry = `${sessionSummary(member, busy.get(member.instanceId))}\n  session: ${member.source.sessionId}`;
 		if (Buffer.byteLength(lines.join("\n\n") + entry, "utf8") > 18_000) {
 			lines.push("（其余会话未显示，可先断开一些 pi）");
 			break;
 		}
 		lines.push(entry);
 	}
-	lines.push("把任务发给其中一个：\n/wecom-aibot send --sessionid <上面的 session ID> --prompt 你的任务");
+	lines.push(`把任务发给其中一个：\n${sessionCommand("<上面的 session ID>", "send", "你的任务")}`);
 	return lines.join("\n\n");
 }
 
@@ -847,16 +873,16 @@ function helpText(topic?: Subcommand): string {
 			return [
 				"send — 把一段正文作为任务交给指定会话",
 				"",
-				"用法：/wecom-aibot send --sessionid <完整 session ID> --prompt <正文>",
+				`用法：${sessionCommand("<完整 session ID>", "send")}`,
 				"",
-				"--prompt 必须放在最后，其后全部内容都是正文（可换行）",
+				"--sessionid 必须写在动作前；--prompt 必须放在最后，其后全部内容都是正文（可换行）",
 				"参数用空格分隔，不支持 =",
 			].join("\n");
 		case "screen":
 			return [
 				"screen — 截取指定会话当前的终端画面",
 				"",
-				"用法：/wecom-aibot screen --sessionid <完整 session ID>",
+				`用法：${sessionCommand("<完整 session ID>", "screen")}`,
 				"",
 				"只读请求，不会打断正在运行的任务；没有终端界面的会话无法截图",
 			].join("\n");
@@ -864,7 +890,7 @@ function helpText(topic?: Subcommand): string {
 			return [
 				"cancel — 请求中止指定会话正在运行的一轮",
 				"",
-				"用法：/wecom-aibot cancel --sessionid <完整 session ID>",
+				`用法：${sessionCommand("<完整 session ID>", "cancel")}`,
 				"",
 				"中止是异步生效的，这一轮可能还会输出最后一点内容",
 			].join("\n");
@@ -880,13 +906,15 @@ function helpText(topic?: Subcommand): string {
 			return [
 				"企业微信侧命令（pi 里的 /wecom-aibot 是另一套设备命令）：",
 				"",
-				"sessions                      列出在线会话与完整 session ID",
-				"send     --sessionid <id> --prompt <正文>",
-				"screen   --sessionid <id>     截取该会话当前终端画面",
-				"cancel   --sessionid <id>     请求中止该会话正在运行的一轮",
+				"/wecom-aibot sessions                      列出在线会话与完整 session ID",
+				"/wecom-aibot --sessionid <id>               查看该会话并列出可复制命令",
+				sessionCommand("<id>", "send"),
+				`${sessionCommand("<id>", "screen")}       截取该会话当前终端画面`,
+				`${sessionCommand("<id>", "cancel")}       请求中止该会话正在运行的一轮`,
 				"",
+				"--sessionid 必须写在动作前，只作用于本条命令，不记住选择；命令不从引用补目标",
 				"参数用空格分隔，不支持 =。--prompt 必须放在最后，其后全部是正文",
-				"查看单个命令：/wecom-aibot <子命令> --help",
+				"查看单个命令：/wecom-aibot <子命令> --help；带目标的 --help 同样只显示帮助",
 			].join("\n");
 	}
 }

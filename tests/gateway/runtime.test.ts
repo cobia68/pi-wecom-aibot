@@ -99,7 +99,7 @@ function message(content: string, body: Record<string, unknown> = {}) {
 }
 
 function send(sessionId: string, text: string, body: Record<string, unknown> = {}) {
-	return message(`/wecom-aibot send --sessionid ${sessionId} --prompt ${text}`, body);
+	return message(`/wecom-aibot --sessionid ${sessionId} send --prompt ${text}`, body);
 }
 
 /** Screen and cancel requests; the state questions of session lists are left out. */
@@ -266,7 +266,10 @@ test("temporary identity registrations are hidden and cannot be targeted or publ
 	assert.equal(status.status.sessions, 1);
 	send("identity-session", "must not run");
 	message("must not run either", { quote: quote("identity-session") });
-	message("/wecom-aibot screen --sessionid identity-session");
+	message("/wecom-aibot --sessionid identity-session screen");
+	message("/wecom-aibot --sessionid identity-session");
+	assert.match(prompt(), /找不到这个 session ID/);
+	assert.doesNotMatch(prompt(), /project-I/);
 	assert.equal(identifying.peer.messages().length, 0);
 	assert.equal(requests(identifying.peer).length, 0);
 	await assert.rejects(
@@ -359,6 +362,121 @@ test("sessions waits a moment for a silent pi, then lists it as unknown", (t) =>
 	assert.match(prompt(), /当前有 1 个在线会话/);
 });
 
+test("a target-only command queries just that pi and returns three filled-in commands without selecting it", () => {
+	const a = add("A", SESSION_A);
+	const b = add("B", SESSION_B);
+	a.peer.busy = true;
+	b.peer.busy = undefined;
+	message(`/wecom-aibot --sessionid ${SESSION_A}`);
+	assert.equal(
+		prompt(),
+		[
+			"· project-A · provider-A · model-A · 执行中",
+			"",
+			`/wecom-aibot --sessionid ${SESSION_A} send --prompt <正文>`,
+			`/wecom-aibot --sessionid ${SESSION_A} screen`,
+			`/wecom-aibot --sessionid ${SESSION_A} cancel`,
+		].join("\n"),
+	);
+	assert.equal(
+		a.peer.frames.filter((frame) => frame.type === "request" && frame.request.action === "state").length,
+		1,
+	);
+	assert.equal(b.peer.frames.filter((frame) => frame.type === "request").length, 0);
+	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
+	assert.equal(requests(a.peer).length, 0);
+	a.peer.busy = false;
+	message(`/wecom-aibot --sessionid ${SESSION_A}`);
+	assert.match(prompt(), /^· project-A · provider-A · model-A · 空闲\n/);
+	message("the next message has no target");
+	assert.match(prompt(), /先指定目标会话/);
+	for (const action of ["screen", "cancel"]) {
+		message(`/wecom-aibot ${action}`);
+		assert.match(prompt(), new RegExp(`^${action} 需要目标：`));
+	}
+	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
+	assert.equal(requests(a.peer).length + requests(b.peer).length, 0);
+});
+
+test("a target-only command with an unknown ID returns the error and the current session list", () => {
+	const a = add("A", SESSION_A);
+	const b = add("B", SESSION_B);
+	message("/wecom-aibot --sessionid missing-session");
+	assert.match(prompt(), /^找不到这个 session ID/);
+	assert.match(prompt(), /当前有 2 个在线会话/);
+	assert.match(prompt(), new RegExp(SESSION_A));
+	assert.match(prompt(), new RegExp(SESSION_B));
+	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
+	assert.equal(requests(a.peer).length + requests(b.peer).length, 0);
+});
+
+test("a single-session query waits up to two seconds and ignores answers from the wrong pi or after completion", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const a = add("A", SESSION_A);
+	add("B", SESSION_B);
+	a.peer.busy = undefined;
+	const replies = () => a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").length;
+	const before = replies();
+	message(`/wecom-aibot --sessionid ${SESSION_A}`);
+	const query = a.peer.frames.find((frame) => frame.type === "request" && frame.request.action === "state");
+	assert.ok(query?.type === "request");
+	gateway.response("B", query.id, { ok: true, busy: true });
+	assert.equal(replies(), before);
+	t.mock.timers.tick(1_999);
+	assert.equal(replies(), before);
+	t.mock.timers.tick(1);
+	assert.equal(replies(), before + 1);
+	assert.match(prompt(), /^· project-A · provider-A · model-A · 状态未知\n/);
+	gateway.response("A", query.id, { ok: true, busy: true });
+	t.mock.timers.tick(2_000);
+	assert.equal(replies(), before + 1);
+});
+
+test("a pi leaving during a single-session query falls back to the remaining live session list", () => {
+	const a = add("A", SESSION_A);
+	add("B", SESSION_B);
+	a.peer.busy = undefined;
+	message(`/wecom-aibot --sessionid ${SESSION_A}`);
+	gateway.unregister("A", a.peer);
+	assert.match(prompt(), /^找不到这个 session ID/);
+	assert.match(prompt(), /当前有 1 个在线会话/);
+	assert.match(prompt(), new RegExp(SESSION_B));
+	assert.doesNotMatch(prompt(), /project-A/);
+});
+
+test("a re-registered pi cannot inherit an in-flight single-session query", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const a = add("A", SESSION_A);
+	a.peer.busy = undefined;
+	message(`/wecom-aibot --sessionid ${SESSION_A}`);
+	const next = registration("A", SESSION_B);
+	next.registrationId = "new-registration";
+	const peer = new Peer("A");
+	gateway.register(next, peer);
+	t.mock.timers.tick(2_000);
+	assert.match(prompt(), /^找不到这个 session ID/);
+	assert.match(prompt(), new RegExp(`session: ${SESSION_B}`));
+	assert.doesNotMatch(prompt(), new RegExp(SESSION_A));
+});
+
+test("single-session queries only reveal sessions the sender can access", () => {
+	const a = add("A", SESSION_A, (value) => {
+		value.config.allowedUserIds = ["alice"];
+	});
+	const b = add("B", SESSION_B, (value) => {
+		value.config.allowedUserIds = ["bob"];
+	});
+	message(`/wecom-aibot --sessionid ${SESSION_B}`, { from: { userid: "alice" } });
+	assert.match(prompt(), /^找不到这个 session ID/);
+	assert.match(prompt(), new RegExp(SESSION_A));
+	assert.doesNotMatch(prompt(), /project-B/);
+	assert.doesNotMatch(prompt(), new RegExp(SESSION_B));
+	assert.equal(b.peer.frames.filter((frame) => frame.type === "request").length, 0);
+	message(`/wecom-aibot --sessionid ${SESSION_A}`, { from: { userid: "alice" } });
+	assert.match(prompt(), /^· project-A · provider-A · model-A · 空闲\n/);
+	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
+});
+
 test("a quoted notification routes that one message, without remembering anything", () => {
 	const a = add("A", SESSION_A);
 	const b = add("B", SESSION_B);
@@ -396,26 +514,96 @@ test("a command wins over a quote: the named session takes it", () => {
 	assert.equal(b.peer.messages().length, 0);
 });
 
-test("--prompt keeps spaces, dashes, newlines and command-looking text verbatim", () => {
+test("an explicit target wins over a conflicting quote for screen and cancel too", () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot send --sessionid ${SESSION_A} --prompt 修复 --screen 和 --sessionid 的解析\n第二行`);
-	assert.equal(a.peer.messages()[0].task.message.text, "修复 --screen 和 --sessionid 的解析\n第二行");
+	const b = add("B", SESSION_B);
+	for (const action of ["screen", "cancel"]) {
+		message(`/wecom-aibot --sessionid ${SESSION_A} ${action}`, { quote: quote(SESSION_B) });
+		assert.equal(requests(a.peer).at(-1)!.request.action, action);
+		assert.equal(requests(b.peer).length, 0);
+	}
 });
 
-test("--sessionid written after --prompt is an order error, not part of the prompt", () => {
+test("commands never infer a missing target from a quoted notification or image", (t) => {
+	const a = add("A", SESSION_A);
+	const b = add("B", SESSION_B);
+	const fetchMock = t.mock.method(globalThis, "fetch");
+	for (const quoteBody of [quote(SESSION_B), { msgtype: "image", image: { url: "https://example.invalid/q" } }]) {
+		for (const action of ["send", "screen", "cancel"]) {
+			message(`/wecom-aibot ${action}${action === "send" ? " --prompt task" : ""}`, { quote: quoteBody });
+			assert.match(prompt(), new RegExp(`^${action} 需要目标：`));
+		}
+	}
+	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
+	assert.equal(requests(a.peer).length + requests(b.peer).length, 0);
+	assert.equal(fetchMock.mock.callCount(), 0);
+});
+
+test("--prompt keeps spaces, dashes, newlines and command-looking text verbatim, with no UUID exception", () => {
+	const a = add("A", SESSION_A);
+	const text = `修复  --screen 和 --sessionid ${SESSION_B} 的解析\n第二行 --help --prompt\n\n`;
+	send(SESSION_A, text);
+	assert.equal(a.peer.messages()[0].task.message.text, text);
+});
+
+test("a target written only after --prompt remains prose and cannot supply the missing command target", () => {
 	const a = add("A", SESSION_A);
 	message(`/wecom-aibot send --prompt 正文 --sessionid ${SESSION_A}`);
 	assert.equal(a.peer.messages().length, 0);
-	assert.match(prompt(), /--sessionid 必须写在 --prompt 之前/);
+	assert.match(prompt(), /^send 需要目标：/);
+	assert.doesNotMatch(prompt(), /必须写在 --prompt 之前/);
+});
+
+test("the action-first target syntax reports its replacement without executing any action", () => {
+	const a = add("A", SESSION_A);
+	for (const action of ["send", "screen", "cancel"]) {
+		message(`/wecom-aibot ${action} --sessionid ${SESSION_A}${action === "send" ? " --prompt task" : ""}`);
+		assert.match(prompt(), /^--sessionid 要写在动作前：/);
+		assert.ok(prompt().includes(`/wecom-aibot --sessionid ${SESSION_A} ${action}`));
+	}
+	assert.equal(a.peer.messages().length, 0);
+	assert.equal(requests(a.peer).length, 0);
+});
+
+test("help never queries or operates on a supplied target, even when it is offline", () => {
+	const a = add("A", SESSION_A);
+	for (const content of [
+		`/wecom-aibot --sessionid ${SESSION_A} --help`,
+		"/wecom-aibot --sessionid offline-session --help",
+		"/wecom-aibot --sessionid offline-session send --help",
+		`/wecom-aibot --sessionid ${SESSION_A} screen --help`,
+		`/wecom-aibot --sessionid ${SESSION_A} cancel --help`,
+	]) {
+		message(content);
+		assert.match(prompt(), /sessions|send|screen|cancel/);
+		assert.doesNotMatch(prompt(), /找不到这个 session ID/);
+	}
+	assert.equal(a.peer.messages().length, 0);
+	assert.equal(a.peer.frames.filter((frame) => frame.type === "request").length, 0);
+});
+
+test("all guidance, session-list examples and action help use the target-first grammar", () => {
+	add("A", SESSION_A);
+	for (const content of ["plain text", "/wecom-aibot sessions", "/wecom-aibot --help"]) {
+		message(content);
+		assert.match(prompt(), /\/wecom-aibot --sessionid <[^>]+> send --prompt/);
+		assert.doesNotMatch(prompt(), /\/wecom-aibot (?:send|screen|cancel)\s+--sessionid/);
+	}
+	for (const action of ["send", "screen", "cancel"]) {
+		message(`/wecom-aibot ${action} --help`);
+		assert.ok(prompt().includes(`/wecom-aibot --sessionid <完整 session ID> ${action}`));
+		assert.doesNotMatch(prompt(), /\/wecom-aibot (?:send|screen|cancel)\s+--sessionid/);
+		for (const line of prompt().split("\n")) assert.equal(line.endsWith("。"), false);
+	}
 });
 
 test("an equals form is an unknown option, and the error lists what is supported", () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot send --sessionid=${SESSION_A} --prompt x`);
+	message(`/wecom-aibot --sessionid=${SESSION_A} send --prompt x`);
 	assert.equal(a.peer.messages().length, 0);
 	assert.match(prompt(), /未知选项 --sessionid=/);
-	assert.match(prompt(), /--sessionid/);
-	assert.match(prompt(), /--prompt/);
+	assert.match(prompt(), /可用选项：--sessionid、--help/);
+	assert.match(prompt(), /不支持 =/);
 });
 
 test("a positional argument is rejected; the prompt belongs after --prompt", () => {
@@ -427,7 +615,7 @@ test("a positional argument is rejected; the prompt belongs after --prompt", () 
 
 test("screen asks the named pi and sends the image it returns", async () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot screen --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --sessionid ${SESSION_A} screen`);
 	const request = requests(a.peer)[0];
 	assert.equal(request.type, "request");
 	assert.deepEqual(request.request, { action: "screen", target: sessionTarget(a.value) });
@@ -449,7 +637,7 @@ test("screen asks the named pi and sends the image it returns", async () => {
 
 test("a failed screen request reports the pi's reason", () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot screen --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --sessionid ${SESSION_A} screen`);
 	gateway.response("A", requests(a.peer)[0].id, { ok: false, error: "该会话没有终端界面" });
 	assert.match(prompt(), /截图失败：该会话没有终端界面/);
 });
@@ -458,7 +646,7 @@ test("screen is only answered by the pi it was sent to", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const a = add("A", SESSION_A);
 	add("B", SESSION_B);
-	message(`/wecom-aibot screen --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --sessionid ${SESSION_A} screen`);
 	const count = a.ws.sent.length;
 	gateway.response("B", requests(a.peer)[0].id, { ok: true });
 	assert.equal(a.ws.sent.length, count, "another pi's answer is ignored");
@@ -468,7 +656,7 @@ test("screen is only answered by the pi it was sent to", (t) => {
 
 test("cancel asks the named pi and says only that abort was requested", () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot cancel --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --sessionid ${SESSION_A} cancel`);
 	const request = requests(a.peer)[0];
 	assert.deepEqual(request.request, { action: "cancel", target: sessionTarget(a.value) });
 	gateway.response("A", request.id, { ok: true });
@@ -478,7 +666,7 @@ test("cancel asks the named pi and says only that abort was requested", () => {
 test("a request nobody answers times out with the timeout named", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	add("A", SESSION_A);
-	message(`/wecom-aibot screen --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --sessionid ${SESSION_A} screen`);
 	t.mock.timers.tick(20_000);
 	assert.match(prompt(), /20 秒内响应/);
 });
@@ -1004,7 +1192,7 @@ test("every image the gateway sends carries its session marker; a file it cannot
 
 test("a screenshot carries the marker of the session that took it", async () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot screen --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --sessionid ${SESSION_A} screen`);
 	const file = imageFile(TINY_PNG);
 	gateway.response("A", requests(a.peer)[0].id, {
 		ok: true,
