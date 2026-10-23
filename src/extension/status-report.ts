@@ -1,7 +1,8 @@
 /**
  * What `/wecom-aibot status` reports: one headline whose icon tells the connection state, then the
  * details in one aligned table. pi shows the whole notice in its dim colour, so the icon is its only
- * colour; each icon also has its own shape, so a monochrome screenshot keeps the meaning.
+ * colour; each icon also has its own shape, so a monochrome screenshot keeps the meaning. The four
+ * icons are all East Asian wide, so the state never shifts the text after it by a column.
  */
 import { stripVTControlCharacters } from "node:util";
 import type { WeComState } from "../shared/wecom-protocol.ts";
@@ -37,8 +38,11 @@ export interface StatusSnapshot {
 	overrideFile?: string;
 }
 
-/** ✅ usable, ⏳ on its way, ❌ stopped and waiting for the user, ⚪ not connected. */
-export type StatusIcon = "✅" | "⏳" | "❌" | "⚪";
+/**
+ * 🔌 plugged in, ⏳ on its way, 🛑 stopped and waiting for the user, 💤 not connected. All four are
+ * East Asian wide, so every headline keeps the text at the same column whichever state it reports.
+ */
+export type StatusIcon = "🔌" | "⏳" | "🛑" | "💤";
 
 /** The reasons this extension stops a registration itself; any other reason is a failure from below. */
 const STOP_REASONS: Record<string, string> = {
@@ -81,20 +85,20 @@ function classify({ bridge, stopReason, resolved }: Pick<StatusSnapshot, "bridge
 		if (stopReason && !Object.hasOwn(STOP_REASONS, stopReason)) {
 			const reason = oneLine(stopReason);
 			return {
-				icon: "❌",
+				icon: "🛑",
 				state: "已停止",
 				reason,
 				next: reason.includes("/wecom-aibot connect") ? undefined : RESUME,
 			};
 		}
-		return { icon: "⚪", state: "未接入", reason: stopReason && STOP_REASONS[stopReason], next: nextStep(resolved) };
+		return { icon: "💤", state: "未接入", reason: stopReason && STOP_REASONS[stopReason], next: nextStep(resolved) };
 	}
 	if (bridge.identifyOnly) return { icon: "⏳", state: "whoami 临时识别中（未正式接入）" };
-	if (bridge.ready) return { icon: "✅", state: "已接入" };
+	if (bridge.ready) return { icon: "🔌", state: "已接入" };
 	const detail = bridge.detail ? oneLine(bridge.detail) : undefined;
 	if (bridge.stopped)
 		return {
-			icon: "❌",
+			icon: "🛑",
 			state: "已停止",
 			reason: detail,
 			next: detail?.includes("/wecom-aibot connect") ? undefined : RESUME,

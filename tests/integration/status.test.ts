@@ -192,7 +192,7 @@ test("a stored configuration never opts a session into receiving tasks; querying
 	await h.emit("agent_start");
 	assert.equal(h.clients.length, 0, "the configuration cannot opt a session into receiving tasks");
 	assert.deepEqual(h.changes, []);
-	assert.match(h.notices[0], /^⚪ 企业微信智能机器人：未接入，每个 session 需运行 \/wecom-aibot connect\n/);
+	assert.match(h.notices[0], /^💤 企业微信智能机器人：未接入，每个 session 需运行 \/wecom-aibot connect\n/);
 	assert.doesNotMatch(h.notices[0], /自动连接：开|已启动/);
 	assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved);
 });
@@ -302,23 +302,23 @@ test("status names each connection state with its own icon, driven by the real s
 	assert.equal(await headline(), "⏳ 企业微信智能机器人：正在连接");
 	// Refused before any subscription: the footer has no label yet, the status still says why.
 	client.publish({ state: "disconnected", sessions: 1, stopped: true, detail: "subscribe refused" });
-	assert.equal(await headline(), "❌ 企业微信智能机器人：已停止（subscribe refused），运行 /wecom-aibot connect 恢复");
+	assert.equal(await headline(), "🛑 企业微信智能机器人：已停止（subscribe refused），运行 /wecom-aibot connect 恢复");
 	await h.command("connect");
 	client.publish({ state: "subscribed", sessions: 2 });
-	assert.equal(await headline(), "✅ 企业微信智能机器人：已接入");
+	assert.equal(await headline(), "🔌 企业微信智能机器人：已接入");
 	assert.ok(h.notices.at(-1)!.split("\n").includes("  共享网关  2 个 pi 已注册"));
 	client.publish({ state: "disconnected", sessions: 2, detail: "outage" });
 	assert.equal(await headline(), "⏳ 企业微信智能机器人：正在重连（outage）");
 	await h.command("disconnect");
 	assert.equal(
 		await headline(),
-		"⚪ 企业微信智能机器人：未接入（已由用户断开），每个 session 需运行 /wecom-aibot connect",
+		"💤 企业微信智能机器人：未接入（已由用户断开），每个 session 需运行 /wecom-aibot connect",
 	);
 	await h.command("connect");
 	h.clients[1].fail("registration rejected");
 	assert.equal(
 		await headline(),
-		"❌ 企业微信智能机器人：已停止（registration rejected），运行 /wecom-aibot connect 恢复",
+		"🛑 企业微信智能机器人：已停止（registration rejected），运行 /wecom-aibot connect 恢复",
 	);
 });
 
@@ -329,7 +329,7 @@ test("a bare /wecom-aibot opens the subcommand menu under the connection state; 
 	await h.command("");
 	assert.equal(h.dialogs.menus.length, 1);
 	const [menu] = h.dialogs.menus;
-	assert.equal(menu.title, "⚪ 企业微信智能机器人：未接入");
+	assert.equal(menu.title, "💤 企业微信智能机器人：未接入");
 	assert.deepEqual(
 		menu.options.map((option) => option.split(/ {2,}/)[0]),
 		["status", "config", "connect", "disconnect", "test", "log", "reset", "--help"],
@@ -352,7 +352,7 @@ test("a menu choice runs exactly like the typed subcommand, confirmations includ
 	assert.equal(h.clients.length, 1, "connect from the menu registers like the typed command");
 	h.clients[0].publish({ state: "subscribed", sessions: 1 });
 	await h.command("");
-	assert.equal(h.dialogs.menus.at(-1)?.title, "✅ 企业微信智能机器人：已接入");
+	assert.equal(h.dialogs.menus.at(-1)?.title, "🔌 企业微信智能机器人：已接入");
 	// config opens its own chooser; Esc there changes nothing.
 	h.dialogs.picks.push(/^config /);
 	await h.command("");
@@ -458,7 +458,7 @@ test("a changed session ID revokes the old registration even before a lifecycle 
 	assert.equal(h.statuses.has(key), false);
 	assert.equal(old.stopped.length, 1, "hiding an old registration is not sufficient; it must be revoked");
 	await h.command("status");
-	assert.match(h.notices.at(-1)!, /^⚪ 企业微信智能机器人：未接入（目标会话已切换）/);
+	assert.match(h.notices.at(-1)!, /^💤 企业微信智能机器人：未接入（目标会话已切换）/);
 });
 
 for (const end of ["reset", "session_shutdown", "fatal"] as const) {

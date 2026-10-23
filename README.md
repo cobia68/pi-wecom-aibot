@@ -50,7 +50,7 @@ pi install .
 
 ### 检查安装
 
-重新打开 pi，或在已打开的 pi 中输入 `/reload`，再输入 `/wecom-aibot status`：第一行显示「⚪ 企业微信智能机器人：未接入」说明插件已加载，还没有配置时会提示先运行 `/wecom-aibot config edit --scope global`
+重新打开 pi，或在已打开的 pi 中输入 `/reload`，再输入 `/wecom-aibot status`：第一行显示「💤 企业微信智能机器人：未接入」说明插件已加载，还没有配置时会提示先运行 `/wecom-aibot config edit --scope global`
 
 ## 🔌 连接机器人
 
@@ -340,7 +340,7 @@ pi install .
 <details>
 <summary><b>给机器人发消息没有反应</b></summary>
 
-- 确认至少有一个 pi 正在运行并已接入：执行 `/wecom-aibot status`，第一行应为「✅ 企业微信智能机器人：已接入」。⏳ 表示正在连接或重连，❌ 表示已停止（按提示运行 `/wecom-aibot connect`），⚪ 表示当前 session 未接入
+- 确认至少有一个 pi 正在运行并已接入：执行 `/wecom-aibot status`，第一行应为「🔌 企业微信智能机器人：已接入」。⏳ 表示正在连接或重连，🛑 表示已停止（按提示运行 `/wecom-aibot connect`），💤 表示当前 session 未接入。四个图标宽度一致，状态变化时标题不会左右跳
 - 群聊中需要先 @机器人
 - 设置了白名单时，名单外的人发的消息会被直接忽略
 - 执行 `/wecom-aibot log` 查看运行记录。出现 `gateway process exited` 或 `gateway launch failed` 时，多半是本地目录安装漏了 `npm ci`，或 PATH 中找不到 Node.js

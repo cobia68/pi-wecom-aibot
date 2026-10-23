@@ -1479,7 +1479,7 @@ test("config merges into the file as it is now, keeps the connection, and connec
 	await command("status", ctx);
 	assert.match(
 		notices.at(-1)!,
-		/^✅ 企业微信智能机器人：已接入\n待重新接入：[^\n]*\n\n {2}机器人 {4}[^\n]+\n {2}默认推送 {2}default-user（单聊）\n/,
+		/^🔌 企业微信智能机器人：已接入\n待重新接入：[^\n]*\n\n {2}机器人 {4}[^\n]+\n {2}默认推送 {2}default-user（单聊）\n/,
 	);
 	const sockets = FakeWebSocket.instances.length;
 	Object.assign(ctx, { hasUI: true });
@@ -1925,7 +1925,7 @@ test("a refused first subscription is reported in pi instead of leaving the brid
 	assert.equal(stopped[0].type, "warning");
 	assert.match(stopped[0].message, /subscribe failed: 40001.*BotID\/Secret.*\/wecom-aibot connect/);
 	await command("status", ctx);
-	assert.match(notices.at(-1)!.message, /^❌ 企业微信智能机器人：已停止（subscribe failed: 40001/);
+	assert.match(notices.at(-1)!.message, /^🛑 企业微信智能机器人：已停止（subscribe failed: 40001/);
 	await command("connect", ctx);
 	assert.equal(FakeWebSocket.instances.length, 7, "/wecom-aibot connect subscribes again");
 });

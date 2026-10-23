@@ -69,7 +69,7 @@ test("a session that has not connected reads as one headline and one aligned tab
 	assert.equal(
 		text,
 		[
-			"⚪ 企业微信智能机器人：未接入，每个 session 需运行 /wecom-aibot connect",
+			"💤 企业微信智能机器人：未接入，每个 session 需运行 /wecom-aibot connect",
 			"",
 			"  机器人    aibf****mO（Secret 已配置）",
 			"  默认推送  private-user（单聊）",
@@ -106,7 +106,7 @@ test("a registration adds the gateway and task rows and shows what it uses, not 
 		}),
 	);
 	const lines = text.split("\n");
-	assert.equal(lines[0], "✅ 企业微信智能机器人：已接入");
+	assert.equal(lines[0], "🔌 企业微信智能机器人：已接入");
 	assert.equal(lines[1], "待重新接入：配置文件中的凭据、默认目标或白名单已改变，运行 /wecom-aibot connect 后生效");
 	assert.deepEqual(lines.slice(3, 7), [
 		"  机器人    aibf****mO（Secret 已配置）",
@@ -123,23 +123,23 @@ test("a registration adds the gateway and task rows and shows what it uses, not 
 test("each connection state has its own icon, and the headline names the next step only when one is needed", () => {
 	const noTarget = mergeLayers({ botId: "bot-id-1234", secret: "s" }, undefined);
 	const cases: [string, Partial<StatusSnapshot>, string][] = [
-		["fresh session", {}, "⚪ 企业微信智能机器人：未接入，每个 session 需运行 /wecom-aibot connect"],
+		["fresh session", {}, "💤 企业微信智能机器人：未接入，每个 session 需运行 /wecom-aibot connect"],
 		[
 			"user disconnect",
 			{ stopReason: "disconnected by user" },
-			"⚪ 企业微信智能机器人：未接入（已由用户断开），每个 session 需运行 /wecom-aibot connect",
+			"💤 企业微信智能机器人：未接入（已由用户断开），每个 session 需运行 /wecom-aibot connect",
 		],
 		[
 			"no credentials",
 			{ resolved: mergeLayers(undefined, undefined), stopReason: "reset" },
-			"⚪ 企业微信智能机器人：未接入（配置已删除），先运行 /wecom-aibot config edit --scope global 填写凭据",
+			"💤 企业微信智能机器人：未接入（配置已删除），先运行 /wecom-aibot config edit --scope global 填写凭据",
 		],
 		[
 			"no target",
 			{ resolved: noTarget },
-			"⚪ 企业微信智能机器人：未接入，先运行 /wecom-aibot config whoami --scope global 识别默认推送目标",
+			"💤 企业微信智能机器人：未接入，先运行 /wecom-aibot config whoami --scope global 识别默认推送目标",
 		],
-		["files unusable", { resolved: undefined }, "⚪ 企业微信智能机器人：未接入"],
+		["files unusable", { resolved: undefined }, "💤 企业微信智能机器人：未接入"],
 		[
 			"first connection",
 			{ bridge: bridge({ detail: "正在注册本机共享网关" }) },
@@ -174,12 +174,12 @@ test("each connection state has its own icon, and the headline names the next st
 		[
 			"connected",
 			{ bridge: bridge({ state: "subscribed", ready: true, connectionStatus: "online" }) },
-			"✅ 企业微信智能机器人：已接入",
+			"🔌 企业微信智能机器人：已接入",
 		],
 		[
 			"refused subscription",
 			{ bridge: bridge({ state: "disconnected", stopped: true, detail: "subscribe failed: 40001" }) },
-			"❌ 企业微信智能机器人：已停止（subscribe failed: 40001），运行 /wecom-aibot connect 恢复",
+			"🛑 企业微信智能机器人：已停止（subscribe failed: 40001），运行 /wecom-aibot connect 恢复",
 		],
 		[
 			"taken over: the reason already names the command",
@@ -191,12 +191,12 @@ test("each connection state has its own icon, and the headline names the next st
 					detail: "机器人连接已被其他机器或旧客户端接管；可在任一 pi 执行 /wecom-aibot connect 恢复",
 				}),
 			},
-			"❌ 企业微信智能机器人：已停止（机器人连接已被其他机器或旧客户端接管；可在任一 pi 执行 /wecom-aibot connect 恢复）",
+			"🛑 企业微信智能机器人：已停止（机器人连接已被其他机器或旧客户端接管；可在任一 pi 执行 /wecom-aibot connect 恢复）",
 		],
 		[
 			"fatal registration failure",
 			{ stopReason: "该完整 session ID 已由另一个 pi 注册，请在当前窗口新建或切换会话。" },
-			"❌ 企业微信智能机器人：已停止（该完整 session ID 已由另一个 pi 注册，请在当前窗口新建或切换会话），运行 /wecom-aibot connect 恢复",
+			"🛑 企业微信智能机器人：已停止（该完整 session ID 已由另一个 pi 注册，请在当前窗口新建或切换会话），运行 /wecom-aibot connect 恢复",
 		],
 	];
 	for (const [name, overrides, expected] of cases) {
@@ -227,12 +227,12 @@ test("settings name the layer they come from, and the override row names the ove
 
 test("the menu title keeps the icon and the state, without the reason or the next step", () => {
 	const cases: [Pick<StatusSnapshot, "bridge" | "stopReason">, string][] = [
-		[{}, "⚪ 企业微信智能机器人：未接入"],
-		[{ stopReason: "disconnected by user" }, "⚪ 企业微信智能机器人：未接入"],
-		[{ stopReason: "registration rejected" }, "❌ 企业微信智能机器人：已停止"],
+		[{}, "💤 企业微信智能机器人：未接入"],
+		[{ stopReason: "disconnected by user" }, "💤 企业微信智能机器人：未接入"],
+		[{ stopReason: "registration rejected" }, "🛑 企业微信智能机器人：已停止"],
 		[{ bridge: bridge({ detail: "正在注册本机共享网关" }) }, "⏳ 企业微信智能机器人：正在连接"],
-		[{ bridge: bridge({ state: "subscribed", ready: true }) }, "✅ 企业微信智能机器人：已接入"],
-		[{ bridge: bridge({ stopped: true, detail: "subscribe failed" }) }, "❌ 企业微信智能机器人：已停止"],
+		[{ bridge: bridge({ state: "subscribed", ready: true }) }, "🔌 企业微信智能机器人：已接入"],
+		[{ bridge: bridge({ stopped: true, detail: "subscribe failed" }) }, "🛑 企业微信智能机器人：已停止"],
 	];
 	for (const [snapshot, title] of cases) assert.equal(statusTitle(snapshot), title);
 });

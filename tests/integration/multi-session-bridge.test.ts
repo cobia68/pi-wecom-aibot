@@ -303,7 +303,7 @@ test("a refused registration stops that pi's bridge, so status and connect see i
 	await c.command("connect");
 	await until(() => notices.some((notice) => notice.includes("另一个 pi 注册")), "duplicate refused");
 	await c.command("status");
-	assert.match(notices.at(-1)!, /^❌ 企业微信智能机器人：已停止（该完整 session ID 已由另一个 pi 注册/);
+	assert.match(notices.at(-1)!, /^🛑 企业微信智能机器人：已停止（该完整 session ID 已由另一个 pi 注册/);
 	assert.equal(server.gateway.size, 2);
 	c.state.sessionId = "session-C";
 	await c.command("connect");
