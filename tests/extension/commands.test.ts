@@ -82,7 +82,9 @@ test("option rows line up for every command with options", () => {
 });
 
 test("every topic help has a usage line; only config and reset name the paths, and none points back to the total help", () => {
-	const names = (completeWecom("", themes) ?? []).map((item) => item.value).filter((value) => !value.startsWith("-"));
+	const names = (completeWecom("", themes) ?? [])
+		.map((item) => item.value.trim())
+		.filter((value) => !value.startsWith("-"));
 	assert.equal(names.length, 7);
 	for (const name of names) {
 		const help = topicHelp(`${name} --help`);
@@ -251,12 +253,13 @@ test("config takes an action, --scope and 字段=值; reading may omit the scope
 	}
 });
 
-test("a bare action documents no options and offers no --help, while a parameterized command does", () => {
+test("a bare action documents no options, yet its completion still offers --help", () => {
 	for (const name of ["status", "connect", "disconnect", "log", "reset"]) {
 		const help = topicHelp(`${name} --help`);
 		assert.doesNotMatch(help, /^选项$/m, name);
 		assert.doesNotMatch(help, /--help/, name);
-		assert.equal(completeWecom(`${name} -`, themes), null, name);
+		assert.deepEqual(values(`${name} `), [`${name} --help`], name);
+		assert.deepEqual(values(`${name} -`), [`${name} --help`], name);
 	}
 	for (const name of ["config", "test"]) {
 		assert.match(topicHelp(`${name} --help`), /^选项$/m, name);
@@ -268,26 +271,59 @@ test("a bare action documents no options and offers no --help, while a parameter
 	}
 });
 
-test("argument completion offers subcommands, options and their values, and config's actions, fields and values", () => {
-	assert.deepEqual(values("co"), ["config", "connect"]);
+test("argument completion offers every word that may come next: subcommands, options, actions, fields and values", () => {
+	assert.deepEqual(values(""), ["status ", "config ", "connect ", "disconnect ", "test ", "log ", "reset ", "--help"]);
+	assert.deepEqual(values("co"), ["config ", "connect "]);
 	assert.deepEqual(values("--h"), ["--help"]);
+	// test's chatid is free text, so only its options are offered.
+	assert.deepEqual(values("test "), ["test --chat-type ", "test --help"]);
 	assert.deepEqual(values("test x --"), ["test x --chat-type ", "test x --help"]);
-	assert.deepEqual(values("test x --chat-type "), ["test x --chat-type 1", "test x --chat-type 2"]);
-	assert.deepEqual(values("config "), ["config show", "config edit", "config set", "config unset", "config whoami"]);
-	assert.deepEqual(values("config s"), ["config show", "config set"]);
-	// Options only after `-`, and only those that apply: --wait is whoami's.
-	assert.deepEqual(values("config set -"), ["config set --scope ", "config set --help"]);
+	assert.deepEqual(values("test x --chat-type "), ["test x --chat-type 1 ", "test x --chat-type 2 "]);
+	assert.deepEqual(values("test x --chat-type 2 "), ["test x --chat-type 2 --help"]);
+	assert.deepEqual(values("config "), [
+		"config show ",
+		"config edit ",
+		"config set ",
+		"config unset ",
+		"config whoami ",
+		"config --scope ",
+		"config --help",
+	]);
+	assert.deepEqual(values("config s"), ["config show ", "config set "]);
+	assert.deepEqual(values("config -"), ["config --scope ", "config --help"]);
+	// The scope may come before the action, which is then offered after it.
+	assert.deepEqual(values("config --scope global "), [
+		"config --scope global show ",
+		"config --scope global edit ",
+		"config --scope global set ",
+		"config --scope global unset ",
+		"config --scope global whoami ",
+		"config --scope global --help",
+	]);
+	// Only options that apply: --wait is whoami's; a used option is not offered again.
+	assert.deepEqual(values("config show "), ["config show --scope ", "config show --help"]);
+	assert.deepEqual(values("config whoami "), [
+		"config whoami --scope ",
+		"config whoami --wait ",
+		"config whoami --help",
+	]);
 	assert.deepEqual(values("config whoami --w"), ["config whoami --wait "]);
-	assert.deepEqual(values("config -"), ["config --help"]);
-	assert.deepEqual(values("config set --scope "), ["config set --scope global", "config set --scope session"]);
-	assert.deepEqual(values("config set --scope s"), ["config set --scope session"]);
-	// Credentials are never offered to set: they only go through edit.
+	assert.deepEqual(values("config show --scope global "), ["config show --scope global --help"]);
+	// edit, set and unset need --scope, so it comes first.
+	assert.deepEqual(values("config edit "), ["config edit --scope ", "config edit --help"]);
+	assert.deepEqual(values("config set -"), ["config set --scope ", "config set --help"]);
+	assert.equal(values("config set ")?.[0], "config set --scope ");
+	assert.equal(values("config unset ")?.[0], "config unset --scope ");
+	assert.deepEqual(values("config set --scope "), ["config set --scope global ", "config set --scope session "]);
+	assert.deepEqual(values("config set --scope s"), ["config set --scope session "]);
+	// Credentials are never offered to set: they only go through edit. A field= takes its value without a space.
 	assert.deepEqual(values("config set --scope global "), [
 		"config set --scope global defaultChatId=",
 		"config set --scope global defaultChatType=",
 		"config set --scope global notificationMode=",
 		"config set --scope global notificationScope=",
 		"config set --scope global screenshotTheme=",
+		"config set --scope global --help",
 	]);
 	assert.deepEqual(values("config set --scope session notificationMode=text n"), [
 		"config set --scope session notificationMode=text notificationScope=",
@@ -296,31 +332,33 @@ test("argument completion offers subcommands, options and their values, and conf
 	assert.deepEqual(values("config set n"), ["config set notificationMode=", "config set notificationScope="]);
 	// The screenshot theme offers pi's own themes; the plugin brings none.
 	assert.deepEqual(values("config set --scope session screenshotTheme=r"), [
-		"config set --scope session screenshotTheme=rainbow-prism",
+		"config set --scope session screenshotTheme=rainbow-prism ",
 	]);
 	assert.equal(values("config set --scope session screenshotTheme=")?.length, 4);
 	assert.deepEqual(values("config set --scope session notificationmode="), [
-		"config set --scope session notificationMode=text",
-		"config set --scope session notificationMode=screenshot",
+		"config set --scope session notificationMode=text ",
+		"config set --scope session notificationMode=screenshot ",
 	]);
 	assert.deepEqual(values("config unset --scope session d"), [
-		"config unset --scope session defaultChatId",
-		"config unset --scope session defaultChatType",
+		"config unset --scope session defaultChatId ",
+		"config unset --scope session defaultChatType ",
 	]);
-	// A finished token or a value position shows no list: Enter must run the command, not apply a completion.
+	// A finished token, a free value or a word after --help shows no list: Enter must run the command.
 	for (const done of [
 		"config",
 		"config show",
-		"config show ",
-		"config edit ",
 		"config set --scope session",
 		"config set --scope session screenshotTheme=light",
 		"config set --scope session defaultChatId=",
 		"config whoami --wait ",
+		"config show --help ",
+		"config show extra ",
+		"config bogus ",
+		"test x y ",
 		"whoami --w",
 		"--help",
+		"--help ",
 		"connect x",
-		"connect ",
 	]) {
 		assert.equal(completeWecom(done, themes), null, done);
 	}

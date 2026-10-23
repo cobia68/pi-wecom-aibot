@@ -53,17 +53,19 @@ function realProvider(): AutocompleteProvider {
 }
 
 /** Types `text` into pi's real editor and presses Tab, so the editor's own trigger check and auto-apply run too. */
-async function pressTab(text: string): Promise<{ text: string; listed: boolean }> {
+async function pressTab(text: string, times = 1): Promise<{ text: string; listed: boolean; rendered: string }> {
 	const id = (s: string) => s;
-	const editor = new Editor({ requestRender() {} } as unknown as TUI, {
+	const editor = new Editor({ requestRender() {}, terminal: { rows: 40 } } as unknown as TUI, {
 		borderColor: id,
 		selectList: { selectedPrefix: id, selectedText: id, description: id, scrollInfo: id, noMatch: id },
 	});
 	editor.setAutocompleteProvider(wecomTabCompletion(realProvider()));
 	editor.setText(text);
-	editor.handleInput("\t");
-	await tick();
-	return { text: editor.getText(), listed: editor.isShowingAutocomplete() };
+	for (let i = 0; i < times; i++) {
+		editor.handleInput("\t");
+		await tick();
+	}
+	return { text: editor.getText(), listed: editor.isShowingAutocomplete(), rendered: editor.render(120).join("\n") };
 }
 
 test("only a completed /wecom-aibot command name on the first line opens the argument context", () => {
@@ -85,7 +87,9 @@ test("only a completed /wecom-aibot command name on the first line opens the arg
 });
 
 test("Tab after the command name lists subcommands instead of files", async () => {
-	assert.deepEqual(await pressTab("/wecom-aibot "), { text: "/wecom-aibot ", listed: true });
+	const top = await pressTab("/wecom-aibot ");
+	assert.equal(top.text, "/wecom-aibot ");
+	assert.equal(top.listed, true);
 	const provider = wecomTabCompletion(realProvider());
 	const text = "/wecom-aibot ";
 	const suggestions = await provider.getSuggestions([text], 0, text.length, {
@@ -102,7 +106,23 @@ test("Tab keeps completing deeper argument levels", async () => {
 		signal: new AbortController().signal,
 		force: true,
 	});
-	assert.deepEqual(values(suggestions), ["config show", "config set"]);
+	assert.deepEqual(values(suggestions), ["config show ", "config set "]);
+});
+
+test("a chosen word that can be followed gets its space, so the next Tab goes a level deeper", async () => {
+	// One match is applied by the first Tab; the second lists config's actions and options.
+	assert.equal((await pressTab("/wecom-aibot conf")).text, "/wecom-aibot config ");
+	const deeper = await pressTab("/wecom-aibot conf", 2);
+	assert.equal(deeper.text, "/wecom-aibot config ");
+	assert.equal(deeper.listed, true);
+	assert.match(deeper.rendered, /→ show /);
+	assert.match(deeper.rendered, /\(1\/7\)/, "five actions, --scope and --help");
+	// Two matches: the first Tab lists them, the second applies the selected one with its space.
+	assert.equal((await pressTab("/wecom-aibot c", 2)).text, "/wecom-aibot config ");
+	assert.equal((await pressTab("/wecom-aibot config sh", 2)).text, "/wecom-aibot config show ");
+	// --help ends the command, so it gets no space.
+	assert.equal((await pressTab("/wecom-aibot --h")).text, "/wecom-aibot --help");
+	assert.equal((await pressTab("/wecom-aibot status ")).text, "/wecom-aibot status --help");
 });
 
 test("the wrapper drops force only inside the argument context", async () => {
@@ -117,17 +137,22 @@ test("the wrapper drops force only inside the argument context", async () => {
 });
 
 test("Tab after a complete argument completes nothing, even when a file matches", async () => {
-	assert.deepEqual(await pressTab("/wecom-aibot test"), { text: "/wecom-aibot test", listed: false });
-	assert.deepEqual(await pressTab("/wecom-aibot test "), { text: "/wecom-aibot test ", listed: false });
+	const done = await pressTab("/wecom-aibot test");
+	assert.equal(done.text, "/wecom-aibot test");
+	assert.equal(done.listed, false);
+	const options = await pressTab("/wecom-aibot test ");
+	assert.equal(options.text, "/wecom-aibot test ");
+	assert.equal(options.listed, true);
+	assert.match(options.rendered, /--chat-type/);
+	assert.doesNotMatch(options.rendered, /tests\//);
 });
 
 test("Tab elsewhere keeps pi's file completion", async () => {
-	assert.deepEqual(await pressTab("see tes"), { text: "see tests/", listed: false });
-	assert.deepEqual(
-		await pressTab("note\n/wecom-aibot tes"),
-		{ text: "note\n/wecom-aibot tests/", listed: false },
-		"a later line is plain text, not a command",
-	);
+	assert.equal((await pressTab("see tes")).text, "see tests/");
+	assert.equal((await pressTab("see tes")).listed, false);
+	const later = await pressTab("note\n/wecom-aibot tes");
+	assert.equal(later.text, "note\n/wecom-aibot tests/", "a later line is plain text, not a command");
+	assert.equal(later.listed, false);
 });
 
 test("completion is applied by the provider the wrapper wraps", () => {

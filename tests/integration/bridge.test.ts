@@ -1839,22 +1839,23 @@ test("without an interactive UI, connect never replaces a registration that stil
 
 test("argument completion through pi offers subcommands, options and config's grammar", () => {
 	const values = (prefix: string) => complete(prefix)?.map((item) => item.value) ?? null;
-	assert.deepEqual(values("co"), ["config", "connect"]);
+	assert.deepEqual(values("co"), ["config ", "connect "]);
 	assert.deepEqual(values("se"), null, "setup is gone");
 	assert.deepEqual(values("--h"), ["--help"]);
 	assert.deepEqual(values("config set --scope session screenshotTheme="), [
-		"config set --scope session screenshotTheme=system",
-		"config set --scope session screenshotTheme=dark",
-		"config set --scope session screenshotTheme=light",
+		"config set --scope session screenshotTheme=system ",
+		"config set --scope session screenshotTheme=dark ",
+		"config set --scope session screenshotTheme=light ",
 	]);
 	assert.deepEqual(values("test x --"), ["test x --chat-type ", "test x --help"]);
 	assert.deepEqual(values("config whoami --w"), ["config whoami --wait "]);
-	assert.deepEqual(values("config edit --scope "), ["config edit --scope global", "config edit --scope session"]);
-	// A command with nothing to pass has no --help to offer: `connect` and `status` are bare actions.
-	assert.equal(values("connect -"), null);
-	assert.equal(values("status -"), null);
+	assert.deepEqual(values("config edit --scope "), ["config edit --scope global ", "config edit --scope session "]);
+	assert.deepEqual(values("config show "), ["config show --scope ", "config show --help"]);
+	// A bare action still offers --help, so the list is complete at every position.
+	assert.deepEqual(values("connect -"), ["connect --help"]);
+	assert.deepEqual(values("status "), ["status --help"]);
 	assert.deepEqual(values("test -"), ["test --chat-type ", "test --help"]);
-	for (const done of ["config", "config show ", "config whoami --wait ", "--help", "connect x", "connect "]) {
+	for (const done of ["config", "config whoami --wait ", "--help", "connect x", "connect --help "]) {
 		assert.equal(complete(done), null, done);
 	}
 });

@@ -645,11 +645,14 @@ interface Candidate {
 	value: string;
 	name?: string;
 	description: string;
+	/** An option that still needs its value, so a space always follows it. */
+	takesValue?: boolean;
 }
 
 /**
- * Each returned value replaces all text after "/wecom-aibot ". Options are offered only after `-`, and a
- * complete token gets no list, so Enter runs the command instead of applying a completion.
+ * Each returned value replaces all text after "/wecom-aibot ". Every word that may come next is offered, and
+ * one that can be followed gets its trailing space, so the next Tab goes a level deeper. A complete token gets
+ * no list, so Enter runs the command instead of applying a completion.
  */
 export function completeWecom(
 	prefix: string,
@@ -658,59 +661,58 @@ export function completeWecom(
 	const tokens = prefix.trimStart().split(/\s+/);
 	const current = (tokens.pop() ?? "").toLowerCase();
 	const head = tokens.length ? `${tokens.join(" ")} ` : "";
-	const offer = (all: readonly Candidate[]) => {
-		const labels = columns(all.map((item) => [item.name ?? item.value, item.description] as const));
-		const shown = all.flatMap((item, index) =>
-			item.value.toLowerCase().startsWith(current) ? [{ value: item.value, label: labels[index] }] : [],
-		);
-		return shown.length && !shown.some((item) => item.value.trim().toLowerCase() === current)
-			? shown.map((item) => ({ ...item, value: head + item.value }))
-			: null;
-	};
-	if (!tokens.length) return offer(topLevel());
+	const all = candidatesAt(tokens, current, themes);
+	const labels = columns(all.map((item) => [item.name ?? item.value, item.description] as const));
+	const shown = all.flatMap((item, index) =>
+		item.value.toLowerCase().startsWith(current) ? [{ item, label: labels[index] }] : [],
+	);
+	if (!shown.length || shown.some(({ item }) => item.value.toLowerCase() === current)) return null;
+	const spaced = (item: Candidate) =>
+		item.takesValue || (!item.value.endsWith("=") && candidatesAt([...tokens, item.value], "", themes).length > 0);
+	return shown.map(({ item, label }) => ({ value: `${head}${item.value}${spaced(item) ? " " : ""}`, label }));
+}
+
+/** The words that may follow `tokens`: required options, positionals, optional options, then --help. */
+function candidatesAt(tokens: string[], current: string, themes: () => readonly string[]): Candidate[] {
+	if (!tokens.length) return topLevel();
 	const command = commandNamed(tokens[0]);
-	if (!command) return null;
-	const words = positionals(command, tokens.slice(1));
-	const previous = tokens.at(-1)?.toLowerCase();
-	const pending = command.options.find((option) => previous === `--${option.name}`);
-	if (pending)
-		return pending.choices ? offer(pending.choices.map(([value, description]) => ({ value, description }))) : null;
-	if (!current.startsWith("-"))
-		return command === CONFIG_COMMAND ? offer(configCandidates(words, current, themes)) : null;
-	const used = new Set(
-		tokens.filter((token) => token.startsWith("--")).map((token) => token.slice(2).split("=")[0].toLowerCase()),
-	);
-	const options = [...applicableOptions(command, words), ...(hasOptionsOrArgs(command) ? [HELP_OPTION] : [])].filter(
-		(option) => !used.has(option.name),
-	);
-	return offer(
-		options.map((option) => ({
-			value: option.value ? `--${option.name} ` : `--${option.name}`,
-			name: `--${option.name}${option.value ? ` ${option.value}` : ""}`,
-			description: option.description,
-		})),
-	);
-}
-
-function applicableOptions(command: WeComCommand, words: string[]): WeComOption[] {
-	if (command !== CONFIG_COMMAND) return command.options;
-	const action = words[0]?.toLowerCase();
-	if (!action || !CONFIG_ACTIONS.includes(action)) return [];
-	return command.options.filter((option) => option.name !== "wait" || action === "whoami");
-}
-
-function positionals(command: WeComCommand, tokens: string[]): string[] {
+	const rest = tokens.slice(1).map((token) => token.toLowerCase());
+	if (!command || rest.includes("--help")) return [];
+	const pending = command.options.find((option) => rest.at(-1) === `--${option.name}`);
+	if (pending) return (pending.choices ?? []).map(([value, description]) => ({ value, description }));
+	const used = new Set<string>();
 	const words: string[] = [];
-	for (let i = 0; i < tokens.length; i++) {
-		const token = tokens[i];
-		if (token.startsWith("-")) {
-			const takesValue = command.options.some((option) => token.toLowerCase() === `--${option.name}`);
-			if (takesValue) i++;
-			continue;
-		}
-		words.push(token);
+	for (let i = 0; i < rest.length; i++) {
+		if (!rest[i].startsWith("-")) words.push(rest[i]);
+		else if (command.options.some((option) => rest[i] === `--${option.name}`)) used.add(rest[i++].slice(2));
+		else used.add(rest[i].slice(2).split("=")[0]);
 	}
-	return words;
+	const option = (item: WeComOption): Candidate => ({
+		value: `--${item.name}`,
+		name: `--${item.name}${item.value ? ` ${item.value}` : ""}`,
+		description: item.description,
+		takesValue: !!item.value,
+	});
+	const help = option(HELP_OPTION);
+	if (command !== CONFIG_COMMAND) {
+		if (words.length > command.maxArgs) return [];
+		return [...command.options.filter((item) => !used.has(item.name)).map(option), help];
+	}
+	const action = words[0];
+	if (action !== undefined && !CONFIG_ACTIONS.includes(action)) return [];
+	if (action !== undefined && action !== "set" && action !== "unset" && words.length > 1) return [];
+	const options = command.options
+		.filter((item) => !used.has(item.name) && (item.name !== "wait" || action === "whoami"))
+		.map(option);
+	const required = ["edit", "set", "unset"].includes(action ?? "")
+		? options.filter((item) => item.value === "--scope")
+		: [];
+	return [
+		...required,
+		...configCandidates(words, current, themes),
+		...options.filter((item) => !required.includes(item)),
+		help,
+	];
 }
 
 function topLevel(): Candidate[] {
