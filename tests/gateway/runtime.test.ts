@@ -200,12 +200,12 @@ test("send names its target, and the target receives exactly the prompt", () => 
 	assert.equal(a.peer.messages()[0].task.message.text, "检查构建");
 });
 
-test("a task's message gets one reply, its result: nothing while it runs, no second push", async () => {
+test("a task's result is its session's control card in that chat; the message itself gets no reply", async () => {
 	const a = add("A", SESSION_A);
 	const frames: any[] = [];
 	a.ws.onSend = (frame: any) => {
 		frames.push(frame);
-		if (frame.cmd === "aibot_respond_msg") a.ws.acknowledge(frame);
+		a.ws.acknowledge(frame);
 	};
 	const task = send(SESSION_A, "task");
 	const id = task.headers.req_id;
@@ -219,24 +219,28 @@ test("a task's message gets one reply, its result: nothing while it runs, no sec
 	await gateway.notify(
 		"A",
 		{ chatId: "user", chatType: 1 },
-		{ kind: "result", source: a.value.source, text: "RESULT-BODY", taskId: id, title: "✅ 完成" },
+		{
+			kind: "result",
+			source: a.value.source,
+			text: "RESULT-BODY",
+			title: "✅ 完成",
+			...controlled(a.value.source),
+		},
 	);
-	const replies = frames.filter((frame) => frame.cmd === "aibot_respond_msg");
-	assert.equal(replies.length, 1, "one reply");
-	const [finish] = replies;
-	assert.equal(finish.body.stream.finish, true);
-	// The reply is the full Markdown result and opens with the session line a quote routes by.
-	assert.match(finish.body.stream.content, new RegExp(`^🆔 session: ${SESSION_A}`));
-	assert.match(finish.body.stream.content, /RESULT-BODY$/);
-	assert.equal(frames.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "one bubble per task");
+	assert.equal(frames.filter((frame) => frame.cmd === "aibot_respond_msg").length, 0, "no reply to the message");
+	const pushes = frames.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(pushes.length, 1, "one card per task");
+	assert.equal(pushes[0].body.chatid, "user");
+	assert.equal(pushes[0].body.msgtype, "template_card");
+	assert.ok(controlCardFor(pushes[0].body.template_card.task_id, SESSION_A), "its session's control card");
+	assert.equal(gateway.taskStatus("A", id, "failed"), false, "the task is closed, nothing more goes to the message");
 });
-
-test("a result the reply refuses is pushed as a card, and the message gets no other reply", async () => {
+test("a result whose card WeCom refuses goes to the chat as Markdown naming the session, never as a reply", async () => {
 	const a = add("A", SESSION_A);
 	const frames: any[] = [];
 	a.ws.onSend = (frame: any) => {
 		frames.push(frame);
-		if (frame.cmd === "aibot_respond_msg" && /RESULT-BODY/.test(frame.body.stream.content))
+		if (frame.cmd === "aibot_send_msg" && frame.body.msgtype === "template_card")
 			a.ws.receive({ headers: frame.headers, errcode: 40008, errmsg: "refused" });
 		else a.ws.acknowledge(frame);
 	};
@@ -246,56 +250,26 @@ test("a result the reply refuses is pushed as a card, and the message gets no ot
 	await gateway.notify(
 		"A",
 		{ chatId: "user", chatType: 1 },
-		{ kind: "result", source: a.value.source, text: "RESULT-BODY", taskId: id, ...controlled(a.value.source) },
+		{ kind: "result", source: a.value.source, text: "RESULT-BODY", ...controlled(a.value.source) },
 	);
-	const replies = frames.filter((frame) => frame.cmd === "aibot_respond_msg");
-	assert.equal(replies.length, 1, "the refused result alone");
-	assert.equal(gateway.taskStatus("A", id, "failed"), false, "the task is closed, not left to expire");
+	assert.equal(frames.filter((frame) => frame.cmd === "aibot_respond_msg").length, 0);
 	const pushes = frames.filter((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(pushes.length, 1);
-	assert.equal(pushes[0].body.msgtype, "template_card");
-	assert.ok(controlCardFor(pushes[0].body.template_card.task_id, SESSION_A), "its session's control card");
+	assert.deepEqual(
+		pushes.map((frame) => frame.body.msgtype),
+		["template_card", "markdown"],
+	);
+	assert.match(pushes[1].body.markdown.content, new RegExp(`^🆔 session: ${SESSION_A}`));
+	assert.match(pushes[1].body.markdown.content, /RESULT-BODY$/);
 });
-
-test("a late result cannot become another task's reply even in the same chat", async () => {
+test("a settled task is closed: a later stop never answers its message, whatever the result does", async () => {
 	const a = add("A", SESSION_A);
-	a.ws.onSend = (frame) => {
-		if (frame.cmd === "aibot_send_msg" || frame.cmd === "aibot_respond_msg") a.ws.acknowledge(frame);
-	};
-	const old = send(SESSION_A, "old task").headers.req_id;
-	gateway.taskStatus("A", old, "running");
-	gateway.taskStatus("A", old, "settled");
-	const current = send(SESSION_A, "current task").headers.req_id;
-	gateway.taskStatus("A", current, "running");
-	gateway.taskStatus("A", current, "settled");
-	await gateway.notify(
-		"A",
-		{ chatId: "user", chatType: 1 },
-		{ kind: "result", source: a.value.source, text: "CURRENT-RESULT", taskId: current },
-	);
-	await gateway.notify(
-		"A",
-		{ chatId: "user", chatType: 1 },
-		{
-			kind: "notice",
-			source: a.value.source,
-			text: "OLDER-NOTIFICATION",
-			taskId: old,
-			...controlled(a.value.source),
-		},
-	);
-	const currentReplies = a.ws.sent.filter(
-		(frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === current,
-	);
-	assert.match(currentReplies.at(-1).body.stream.content, /CURRENT-RESULT$/);
-	assert.doesNotMatch(currentReplies.at(-1).body.stream.content, /OLDER/);
-	// A scheduled notification owns its task's end: the card carries it, the message keeps no reply.
-	const oldReplies = a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === old);
-	assert.equal(oldReplies.length, 0);
-	const card = a.ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.template_card;
-	assert.equal(card.main_title.title, "📁 project-A");
+	a.ws.onSend = (frame) => a.ws.acknowledge(frame);
+	const id = send(SESSION_A, "task").headers.req_id;
+	assert.equal(gateway.taskStatus("A", id, "running"), true);
+	assert.equal(gateway.taskStatus("A", id, "settled"), true);
+	assert.equal(gateway.taskStatus("A", id, "stopped"), false, "nothing is left to answer");
+	assert.equal(a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").length, 0);
 });
-
 test("temporary identity registrations are hidden and cannot be targeted or publish notifications", async () => {
 	const a = add("A", SESSION_A);
 	const identifying = add("I", "identity-session", (value) => {
@@ -976,11 +950,12 @@ test("replacement by an external client stops reconnecting but retains registrat
 	assert.equal(b.peer.messages().length, 1);
 });
 
-test("a task that runs past ten minutes still answers its own message: the reply starts with the result", async (t) => {
+test("a task that runs past ten minutes still ends in its card, and its message is never answered", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
 	const a = add("A", SESSION_A);
 	a.ws.onSend = (frame) => {
-		if (frame.cmd === "ping" || frame.cmd === "aibot_respond_msg") a.ws.acknowledge(frame);
+		if (frame.cmd === "ping" || frame.cmd === "aibot_respond_msg" || frame.cmd === "aibot_send_msg")
+			a.ws.acknowledge(frame);
 	};
 	const task = send(SESSION_A, "long task");
 	const replies = () =>
@@ -992,12 +967,16 @@ test("a task that runs past ten minutes still answers its own message: the reply
 	await gateway.notify(
 		"A",
 		{ chatId: "user", chatType: 1 },
-		{ kind: "result", source: a.value.source, text: "LATE-RESULT", taskId: task.headers.req_id },
+		{
+			kind: "result",
+			source: a.value.source,
+			text: "LATE-RESULT",
+			...controlled(a.value.source),
+		},
 	);
-	assert.equal(replies().length, 1);
-	assert.match(replies()[0].body.stream.content, /LATE-RESULT$/);
+	assert.equal(replies().length, 0);
+	assert.equal(a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
 });
-
 test("a reply WeCom could not take while disconnected is sent after the reconnect", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
 	const a = add("A", SESSION_A);

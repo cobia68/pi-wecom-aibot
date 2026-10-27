@@ -47,6 +47,9 @@ export const CONTROL_KEYS = {
 	abort: "abort",
 	confirmAbort: "abort-confirm",
 	cancelAbort: "abort-cancel",
+	/** 确认中止's neighbours while tasks are queued: this run and the queue, or the queue alone. */
+	abortAll: "abort-all",
+	clearQueue: "abort-queue",
 	/** Never drawn: the gateway's, when a click should only turn the copy to its session. */
 	show: "show",
 } as const;
@@ -78,6 +81,9 @@ export const SESSION_QUESTION = "session";
 export const OPTION_TEXT = 10;
 /** A model's label differs at its end and may name its relay; not measured on a phone. */
 export const MODEL_OPTION_TEXT = 32;
+/** The 提示词 dropdown holds at most 10 options (WeCom); a prompt is a task, bounded like one line of it. */
+export const MAX_PROMPTS = 10;
+export const MAX_PROMPT_LENGTH = 500;
 
 // ---------------------------------------------------------------- naming a session
 

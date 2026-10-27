@@ -54,7 +54,9 @@ test("everything the bot writes outside a card routes a quote back to its exact 
 	const written = [
 		sessionMarkdown(tricky, "body\nsession: another-session"),
 		sessionNote(tricky.sessionId, "中止请求未送达：会话已离线"),
-		...(["stopped", "busy", "failed"] as const).map((state) => formatProcessingStatus(tricky.sessionId, state)),
+		...(["stopped", "busy", "failed", "cancelled"] as const).map((state) =>
+			formatProcessingStatus(tricky.sessionId, state),
+		),
 	];
 	for (const message of written) {
 		assert.deepEqual(quotedSessions(message), [tricky.sessionId], message);
@@ -79,13 +81,11 @@ test("pi's payload is bounded for IPC and carries only the options it was given"
 	const long = `开头\n\n${"汉字🙂".repeat(30_000)}\n\n结尾`;
 	const payload = notificationPayload("result", source, long, {
 		title: "  ✅ 完成  ",
-		taskId: "task-1",
 		aborted: true,
 	});
 	assert.ok(Buffer.byteLength(payload.text) <= 256 * 1024);
 	assert.equal(payload.text.includes("\ufffd"), false);
 	assert.equal(payload.title, "✅ 完成");
-	assert.equal(payload.taskId, "task-1");
 	assert.equal(payload.aborted, true);
 	assert.deepEqual(notificationPayload("notice", source, "正文"), { kind: "notice", source, text: "正文" });
 	assert.throws(() => notificationPayload("notice", source, "   "), /没有可发送的文本/);

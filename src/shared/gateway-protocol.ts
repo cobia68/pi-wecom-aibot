@@ -15,7 +15,7 @@ import type { DeliveryFailure } from "./delivery.ts";
 import type { GatewayNotification, SessionSource } from "./notification-types.ts";
 import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComState } from "./wecom-protocol.ts";
 
-export const GATEWAY_PROTOCOL_VERSION = 12;
+export const GATEWAY_PROTOCOL_VERSION = 13;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;
 export const IPC_MAX_BYTES = 1_048_576;
@@ -107,10 +107,12 @@ export interface GatewayTask {
 }
 
 /**
- * running: pi took the task; settled: its result follows and becomes the reply. busy/failed: the task was not
- * accepted, and stopped revokes forwarding; each replies with why.
+ * running: pi took the task; settled: it ran, its result follows as a card and its message gets no reply.
+ * busy/failed: the task was not accepted, cancelled: it was cleared from the queue, and stopped revokes
+ * forwarding; each replies with why.
  */
-export type TaskState = "running" | "settled" | "stopped" | "busy" | "failed";
+export type TaskState = "running" | "settled" | "stopped" | "busy" | "failed" | "cancelled";
+const TASK_STATES = new Set<TaskState>(["running", "settled", "stopped", "busy", "failed", "cancelled"]);
 
 export type ClientFrame =
 	| { type: "hello"; version: number; nonce: string }
@@ -221,7 +223,6 @@ export function validNotification(value: unknown): value is GatewayNotification 
 		Buffer.byteLength(notification.text) <= 512 * 1024 &&
 		(notification.title === undefined ||
 			(typeof notification.title === "string" && notification.title.length <= 1024)) &&
-		(notification.taskId === undefined || validRequestId(notification.taskId)) &&
 		(notification.aborted === undefined || typeof notification.aborted === "boolean") &&
 		// Every kind may be its session's control card: a result, a wecom_send notice, the deployment test.
 		(notification.control === undefined ||
@@ -357,7 +358,7 @@ export function verifyProof(proof: unknown, expected: string): boolean {
 export type FrameParse<Frame> = { ok: true; frame: Frame } | { ok: false; reason: string };
 
 export function isTaskState(value: unknown): value is TaskState {
-	return value === "running" || value === "settled" || value === "stopped" || value === "busy" || value === "failed";
+	return TASK_STATES.has(value as TaskState);
 }
 
 const WE_COM_STATES = new Set<WeComState>(["disconnected", "connecting", "connected", "subscribed"]);

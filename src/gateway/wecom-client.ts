@@ -347,7 +347,7 @@ export class WeComClient {
 		return this.isReady() && this.send({ cmd: "aibot_respond_msg", headers: { req_id: reqId }, body }) === undefined;
 	}
 
-	/** respondMsg that resolves only once WeCom acknowledged it, for a reply that carries a result. */
+	/** respondMsg that resolves only once WeCom acknowledged it (scripts/card-probe.ts tries reply formats with it). */
 	respondMsgAck(reqId: string, body: unknown): Promise<WeComResponse> {
 		return this.sendCommand("aibot_respond_msg", body, reqId);
 	}

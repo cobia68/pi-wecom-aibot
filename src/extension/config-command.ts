@@ -5,6 +5,7 @@
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { MAX_PROMPTS } from "../shared/control-card.ts";
 import type { ChatIdentity } from "../shared/gateway-protocol.ts";
 import { errorMessage, sentences } from "../shared/text.ts";
 import {
@@ -17,6 +18,7 @@ import {
 	WHOAMI_WAIT_SECONDS,
 } from "./commands.ts";
 import {
+	addAllowedUser,
 	type ChoiceField,
 	type Connection,
 	chatIdProblem,
@@ -28,7 +30,6 @@ import {
 	type Layer,
 	type LayerChange,
 	layerFile,
-	MAX_PROMPTS,
 	type ManagedFields,
 	mergeLayers,
 	type PromptsField,
@@ -236,7 +237,7 @@ class ConfigCommand {
 		if (!identity) return;
 		const command = (layer: string) =>
 			`/wecom-aibot config --scope ${layer} set defaultChatId=${identity.chatId} defaultChatType=${identity.chatType}`;
-		const allowlist = this.allowlistNote(identity);
+		const allowlist = await this.offerAllowlist(identity);
 		const report = (...lines: (string | false | undefined)[]) =>
 			this.notify([found(identity), ...lines, allowlist].filter(Boolean).join("\n"));
 		if (!scope) {
@@ -290,6 +291,28 @@ class ConfigCommand {
 
 	private bot(scope: ConfigScope | undefined): Connection | undefined {
 		return connectionOf(scope === "global" ? mergeLayers(readLayer("global"), undefined) : this.config.read());
+	}
+
+	/**
+	 * whoami found someone the allowlist leaves out: offer to add them to the global file. Without an allowlist
+	 * anyone may send tasks, so starting one for a single person is left to a hand edit.
+	 */
+	private async offerAllowlist(identity: ChatIdentity): Promise<string | undefined> {
+		const allowed = this.previous()?.allowedUserIds;
+		if (!allowed?.length || allowed.includes(identity.userid) || !this.ctx.hasUI) return this.allowlistNote(identity);
+		const ok = await this.ctx.ui.confirm(
+			`把 ${identity.userid} 加入 allowedUserIds？`,
+			`写进全局配置 ${this.file("global")}；运行 /wecom-aibot connect 后，这个人才能给 pi 发任务`,
+		);
+		if (!ok) return this.allowlistNote(identity);
+		try {
+			addAllowedUser(identity.userid);
+		} catch (error) {
+			return `没有加入 allowedUserIds：${errorMessage(error)}`;
+		}
+		const resolved = this.previous();
+		if (resolved) this.host.changed(resolved);
+		return `已把 ${identity.userid} 加入 allowedUserIds；运行 /wecom-aibot connect 后生效`;
 	}
 
 	private allowlistNote(identity: ChatIdentity): string | undefined {

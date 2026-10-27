@@ -32,6 +32,7 @@ const {
 	patchLayer,
 	readLayer,
 	writeLayer,
+	addAllowedUser,
 } = await import("../../src/extension/config.ts");
 const readJson = (file = CONFIG_FILE) => JSON.parse(readFileSync(file, "utf8"));
 const bot = { botId: "bot", secret: "secret" };
@@ -406,6 +407,16 @@ test("unset takes field names and removes whole groups", () => {
 	assert.deepEqual(result.problems.length, 2);
 	assert.match(result.problems[0], /unset 只写字段名，不带 =/);
 	assert.match(result.problems[1], /未知字段 bogus.*secret/);
+});
+
+test("whoami's 加入白名单 adds one userid to the global file and keeps everything else in it", () => {
+	writeFileSync(
+		CONFIG_FILE,
+		JSON.stringify({ ...bot, allowedUserIds: ["boss"], futureField: 1, notificationMode: "screenshot" }),
+	);
+	addAllowedUser("alice");
+	addAllowedUser("alice");
+	assert.deepEqual(readJson(), { ...bot, allowedUserIds: ["boss", "alice"], futureField: 1 });
 });
 
 test("clearConfig removes the global file only, and never hides a real deletion error", (t) => {

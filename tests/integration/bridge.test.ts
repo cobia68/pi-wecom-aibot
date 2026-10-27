@@ -48,15 +48,10 @@ let sessionHeader: { parentSession?: string } | null;
 let autoAcknowledge: boolean;
 /** Simulate pi refusing the prompt: no before_agent_start and no agent_settled, exactly as the SDK does it. */
 let refusePrompt: boolean;
+/** pi's prompt sections, kept from one run to the next as pi keeps them. */
+let promptSections: Record<string, string>;
 const modelA = { id: "model-a", name: "Model A", provider: "test-provider" };
 const modelB = { id: "model-b", name: "Model B", provider: "another-provider" };
-
-/** Text the bot writes outside a card (a task's result, a full text) opens with the session, then its source. */
-function assertSource(content: string, modelName = "Model A", provider = "test-provider"): void {
-	const header = `🆔 session: pi-session-1  \n🏷️ ${basename(sandbox)} · ${provider} · ${modelName}\n\n`;
-	assert.ok(content.startsWith(header), content.slice(0, 200));
-	assert.equal(content.includes(dirname(sandbox)), false, "parent directories must not appear in source metadata");
-}
 
 /**
  * Whatever pi publishes is a new copy of its session's control card: its directory, model · provider and
@@ -94,6 +89,29 @@ function assertResultCard(frame: any, note: string, label = "已完成"): void {
 	assert.match(card.horizontal_content_list.at(-1).value, new RegExp(`^\\d\\d:\\d\\d ${note}$`));
 	assert.deepEqual(buttons(frame).at(0), "refresh");
 	assert.equal(JSON.stringify(card).includes(dirname(sandbox)), false, "parent directories must not appear on a card");
+}
+
+/** Result cards the bridge published to a chat: a task's result is a card there, never a reply to its message. */
+function resultCards(chatId = "test-user", frames = ws.sent): any[] {
+	return frames.filter(
+		(frame) =>
+			frame.cmd === "aibot_send_msg" &&
+			frame.body.chatid === chatId &&
+			isControlCardId(frame.body?.template_card?.task_id) &&
+			["已完成", "已中止", "未执行"].includes(frame.body.template_card.source?.desc),
+	);
+}
+
+/** Replies to the task's own message. */
+function replies(frames = ws.sent): any[] {
+	return frames.filter((frame) => frame.cmd === "aibot_respond_msg");
+}
+
+/** What pi published with a card: its whole answer, on the session's page. */
+function bodyOf(frame: any): string {
+	const published = notified.find((notification) => notification.control?.cardId === frame.body.template_card.task_id);
+	assert.ok(published, "the card came with its notification");
+	return published.text;
 }
 
 /**
@@ -192,7 +210,10 @@ async function emit(type: string, event: any = {}, context = ctx): Promise<void>
 			message: event.message,
 		});
 	}
-	for (const handler of handlers.get(type) ?? []) await handler({ type, ...event }, context);
+	for (const handler of handlers.get(type) ?? []) {
+		const prompt = type === "before_agent_start" ? { systemPromptOptions: { sections: promptSections } } : {};
+		await handler({ type, ...prompt, ...event }, context);
+	}
 }
 
 async function drain(): Promise<void> {
@@ -296,6 +317,7 @@ beforeEach(async (t) => {
 	sessionId = "pi-session-1";
 	sessionEntries = [];
 	sessionHeader = null;
+	promptSections = {};
 	await rm(SESSIONS_DIR, { recursive: true, force: true });
 	// The machine's record of document pages is shared by every pi; each test starts without one.
 	await rm(join(sandbox, "wecom-aibot", "session-doc.json"), { force: true });
@@ -579,15 +601,11 @@ test("a task pi refused is reported instead of taking the next local answer", as
 	idle = true;
 	await emit("agent_settled", { aborted: false });
 	await drain();
-	const status = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1)!;
-	assert.equal(
-		ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length,
-		0,
-		"the failure replaces the status message",
-	);
-	assert.equal(status.body.stream.finish, true);
-	assert.match(status.body.stream.content, /没有接受/);
-	assert.doesNotMatch(status.body.stream.content, /LOCAL-ONLY-ANSWER/);
+	assert.equal(replies().length, 0, "the message itself gets no reply");
+	const [card] = resultCards();
+	assertResultCard(card, "⚠️ 未执行：refused-task", "未执行");
+	assert.match(bodyOf(card), /没有接受/);
+	assert.doesNotMatch(bodyOf(card), /LOCAL-ONLY-ANSWER/);
 	// The local run uses the configured default, never the refused task's source chat.
 	await sendNotification({ content: "LOCAL-PUSH" });
 	const localPush = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)!;
@@ -606,14 +624,14 @@ test("a task pi silently refused fails while the session stays idle", async () =
 	refusePrompt = true;
 	inbound("silently-refused");
 	await drain();
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+	assert.equal(resultCards().length, 0);
 	idle = true;
 	clock.tick(5_000);
 	await drain();
-	const status = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1)!;
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
-	assert.match(status.body.stream.content, /没有接受/);
-	assert.equal(status.body.stream.finish, true);
+	assert.equal(replies().length, 0);
+	const [card] = resultCards();
+	assertResultCard(card, "⚠️ 未执行：silently-refused", "未执行");
+	assert.match(bodyOf(card), /没有接受/);
 });
 
 test("changing pi sessions closes the old connection and discards its active request without reconnecting", async () => {
@@ -669,16 +687,15 @@ test("a scheduled notification for another chat does not suppress the sender's r
 	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "RESULT" }] } });
 	idle = true;
 	await emit("agent_settled", { aborted: false });
-	const targets = ws.sent
-		.filter((frame) => frame.cmd === "aibot_send_msg")
-		.map((frame) => [frame.body.chatid, frame.body.chat_type]);
-	assert.deepEqual(targets, [["another-chat", 2]], "the source chat's result replaces its status message");
-	const status = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1)!;
-	assert.equal(status.body.stream.finish, true);
-	assert.match(status.body.stream.content, /\n\nRESULT$/);
+	await drain();
+	assert.equal(resultCards("another-chat").length, 1, "the scheduled notice goes where it was asked");
+	const [card] = resultCards();
+	assertResultCard(card, "✅ 完成：other-target");
+	assert.equal(bodyOf(card), "RESULT");
+	assert.equal(replies().length, 0);
 });
 
-test("assistant streaming sends nothing: the message's one reply is the final answer", async () => {
+test("assistant streaming sends nothing: the task's one message is its result card", async () => {
 	inbound("stream");
 	await drain();
 	await emit("message_start", { message: { role: "assistant" } });
@@ -687,7 +704,8 @@ test("assistant streaming sends nothing: the message's one reply is the final an
 	await emit("message_start", { message: { role: "assistant", model: "model-b", provider: "another-provider" } });
 	await emit("message_update", { assistantMessageEvent: { type: "text_delta", delta: "NEW-ANSWER" } });
 	clock.tick(5000);
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").length, 0, "no status, no partials");
+	assert.equal(replies().length, 0, "no status, no partials");
+	assert.equal(resultCards().length, 0);
 	await emit("message_end", {
 		message: {
 			role: "assistant",
@@ -698,14 +716,15 @@ test("assistant streaming sends nothing: the message's one reply is the final an
 	});
 	idle = true;
 	await emit("agent_settled", { aborted: false });
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
-	const result = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body.stream.content;
-	assertSource(result, "Model B", "another-provider");
-	assert.match(result, /\n\nNEW-ANSWER$/);
-	assert.doesNotMatch(result, /OLD-TOOL-TURN/);
+	await drain();
+	assert.equal(replies().length, 0);
+	const cards = resultCards();
+	assert.equal(cards.length, 1);
+	assertCard(cards[0], "Model B", "another-provider");
+	assert.equal(bodyOf(cards[0]), "NEW-ANSWER");
 });
 
-test("a completed reply survives reconnect and ignores unrelated local output", async () => {
+test("a completed result survives reconnect and ignores unrelated local output", async () => {
 	inbound("reconnect");
 	await drain();
 	ws.close();
@@ -735,13 +754,12 @@ test("a completed reply survives reconnect and ignores unrelated local output", 
 	nextWs.open();
 	nextWs.acknowledge();
 	await drain();
-	const status = nextWs.sent.find((frame) => frame.cmd === "aibot_respond_msg");
-	assert.equal(status.headers.req_id, "callback-reconnect");
-	assert.equal(status.body.stream.finish, true);
-	assertSource(status.body.stream.content);
-	assert.match(status.body.stream.content, /\n\nREMOTE-RESULT$/);
-	assert.doesNotMatch(status.body.stream.content, /LOCAL-ONLY|UNRELATED|Model B/);
-	assert.equal(nextWs.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+	assert.equal(replies(nextWs.sent).length, 0);
+	const cards = resultCards("test-user", nextWs.sent);
+	assert.equal(cards.length, 1);
+	assertResultCard(cards[0], "✅ 完成：reconnect");
+	assert.equal(bodyOf(cards[0]), "REMOTE-RESULT");
+	assert.doesNotMatch(JSON.stringify(cards[0].body), /UNRELATED|Model B/);
 });
 
 test("a finished run's result is a new control card: the window's last lines, its outcome, then the live state on a click", async () => {
@@ -919,48 +937,48 @@ test("config --scope session set notificationScope applies to the running sessio
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
 });
 
-test("a task longer than ten minutes still answers its own message, with no card", async () => {
+test("a task longer than ten minutes still ends in its result card", async () => {
 	inbound("long-task");
 	await drain();
 	clock.tick(30 * 60_000);
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").length, 0, "nothing while it runs");
+	assert.equal(replies().length, 0, "nothing while it runs");
 	await emit("message_end", {
 		message: { role: "assistant", content: [{ type: "text", text: "FINAL-LONG-RESULT" }] },
 	});
 	idle = true;
 	await emit("agent_settled", { aborted: false });
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
-	const replies = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg");
-	assert.equal(replies.length, 1);
-	assert.equal(replies[0].body.stream.finish, true);
-	assertSource(replies[0].body.stream.content);
-	assert.match(replies[0].body.stream.content, /FINAL-LONG-RESULT$/);
+	await drain();
+	assert.equal(replies().length, 0);
+	const cards = resultCards();
+	assert.equal(cards.length, 1);
+	assertResultCard(cards[0], "✅ 完成：long-task");
+	assert.equal(bodyOf(cards[0]), "FINAL-LONG-RESULT");
 });
 
-test("long Chinese and emoji replies remain valid UTF-8 within the byte limit", async () => {
+test("long Chinese and emoji answers reach the result card whole and valid", async () => {
 	inbound("long-text");
 	await drain();
+	const answer = "汉字🙂".repeat(4000);
 	await emit("message_end", {
-		message: { role: "assistant", content: [{ type: "text", text: "汉字🙂".repeat(4000) }] },
+		message: { role: "assistant", content: [{ type: "text", text: answer }] },
 	});
 	idle = true;
 	await emit("agent_settled", { aborted: false });
-	const content = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body.stream.content;
-	assertSource(content);
-	assert.ok(Buffer.byteLength(content, "utf8") <= 20_480);
-	assert.equal(content.includes("\ufffd"), false);
-	assert.match(content, /已截断/);
+	await drain();
+	const [card] = resultCards();
+	assert.equal(bodyOf(card), answer, "the page shows it whole");
+	assert.equal(JSON.stringify(card.body).includes("\ufffd"), false);
 });
 
-test("an aborted task ends its status and includes the cancellation in its result", async () => {
+test("an aborted task's result card says it was stopped", async () => {
 	inbound("aborted");
 	await drain();
 	idle = true;
 	await emit("agent_settled", { aborted: true });
-	const status = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
-	assert.equal(status.body.stream.finish, true);
-	assert.equal((status.body.stream.content.match(/已中止/g) ?? []).length, 1);
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+	await drain();
+	assert.equal(replies().length, 0);
+	const [card] = resultCards();
+	assertResultCard(card, "⛔ 已中止：aborted", "已中止");
 });
 
 test("the pi bridge also checks the allowlist before accepting a task", async () => {
@@ -1267,7 +1285,7 @@ test("wecom_send without a target replies to the chat that sent the WeCom task",
 	await emit("agent_settled", { aborted: false });
 });
 
-test("group messages addressed to the bot reach pi and receive a reply in that conversation", async () => {
+test("group messages addressed to the bot reach pi and their result card goes to that conversation", async () => {
 	inbound("group-request", {
 		chattype: "group",
 		chatid: "test-group",
@@ -1280,15 +1298,18 @@ test("group messages addressed to the bot reach pi and receive a reply in that c
 	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "检查完成" }] } });
 	idle = true;
 	await emit("agent_settled", { aborted: false });
-	const reply = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
-	assert.equal(reply.headers.req_id, "callback-group-request");
-	assert.match(reply.body.stream.content, /\n\n检查完成$/);
-	assertSource(reply.body.stream.content);
+	await drain();
+	assert.equal(replies().length, 0);
 	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(pushes.length, 1, "the first task in a new chat introduces its control card, not a second result");
-	assert.ok(controlCardFor(pushes[0].body.template_card.task_id, sessionId));
-	assert.equal(pushes[0].body.chatid, "test-group");
-	assert.equal(pushes[0].body.chat_type, 2);
+	assert.equal(pushes.length, 2, "the first task in a new chat introduces its control card, then its result");
+	for (const push of pushes) {
+		assert.ok(controlCardFor(push.body.template_card.task_id, sessionId));
+		assert.equal(push.body.chatid, "test-group");
+		assert.equal(push.body.chat_type, 2);
+	}
+	const [card] = resultCards("test-group");
+	assertResultCard(card, "✅ 完成：帮我检查项目");
+	assert.equal(bodyOf(card), "检查完成");
 });
 
 for (const reconnectEarly of [false, true])
@@ -1350,7 +1371,7 @@ test("overlapping settlement events wait for one push rather than duplicating an
 	await Promise.all([first, second]);
 });
 
-test("a newer queued task keeps its reply while an older completion awaits ACK after reconnect", async () => {
+test("a newer queued task keeps its own result while an older completion awaits ACK after reconnect", async () => {
 	autoAcknowledge = false;
 	idle = false;
 	await sendNotification({ chatid: "test-user", after_settle: true, content: "OLDER-COMPLETION" });
@@ -1368,20 +1389,22 @@ test("a newer queued task keeps its reply while an older completion awaits ACK a
 	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "NEWER-REPLY" }] } });
 	idle = true;
 	const settled = emit("agent_settled", { aborted: false });
-	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(pushes.length, 1, "the newer reply replaces its own status message");
-	assert.match(shown(pushes[0]), /OLDER-COMPLETION/);
-	const reply = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
-	assert.match(reply.body.stream.content, /NEWER-REPLY/);
-	ws.acknowledge(pushes[0]);
 	await drain();
+	const older = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg" && /OLDER-COMPLETION/.test(shown(frame)));
+	assert.equal(older.length, 1, "the older completion is out, waiting for its ACK");
+	for (let round = 0; round < 3; round++) {
+		for (const frame of ws.sent.filter((frame) => frame.cmd === "aibot_send_msg")) ws.acknowledge(frame);
+		await drain();
+	}
 	await settled;
+	const newer = resultCards().filter((frame) => bodyOf(frame) === "NEWER-REPLY");
+	assert.equal(newer.length, 1, "the newer task has its own card");
+	assertResultCard(newer[0], "✅ 完成：newer-task");
+	assert.equal(replies().length, 0);
+	const pushed = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length;
 	await emit("agent_settled", { aborted: false });
-	assert.equal(
-		ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length,
-		1,
-		"the merged reply is not pushed twice",
-	);
+	await drain();
+	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, pushed, "nothing is pushed twice");
 });
 
 test("an offline completion notification retains its snapshot until reconnect", async () => {
@@ -1814,6 +1837,33 @@ test("config whoami without a scope only reports the chat and the command that w
 	assert.match(report, /未配置 allowedUserIds/);
 });
 
+for (const accept of [true, false]) {
+	test(`config whoami offers to add someone the allowlist leaves out; ${accept ? "accepted" : "declined"}`, async (t) => {
+		const config = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
+		await writeFile(CONFIG_FILE, JSON.stringify({ ...config, allowedUserIds: ["test-user"] }));
+		const asked: string[] = [];
+		const notices = identityDialogs(t, async (...args: unknown[]) => {
+			asked.push(String(args[0]));
+			return accept;
+		});
+		const pending = command("config whoami", ctx);
+		await drain();
+		plain(notices.codes[0], { from: { userid: "colleague" } });
+		await pending;
+		assert.deepEqual(asked, ["把 colleague 加入 allowedUserIds？"]);
+		assert.deepEqual(
+			JSON.parse(await readFile(CONFIG_FILE, "utf8")).allowedUserIds,
+			accept ? ["test-user", "colleague"] : ["test-user"],
+		);
+		assert.match(
+			notices.at(-1)!,
+			accept
+				? /已把 colleague 加入 allowedUserIds；运行 \/wecom-aibot connect 后生效$/
+				: /userid colleague 不在 allowedUserIds 中/,
+		);
+	});
+}
+
 test("a reconnect during the confirmation keeps a chat identified with the same bot", async (t) => {
 	const notices = identityDialogs(t, async () => {
 		await command("disconnect", ctx);
@@ -2146,7 +2196,7 @@ test("a file from WeCom is saved in the project with a .gitignore that keeps it 
 	const deadline = performance.now() + 4000;
 	while (!sent.length && performance.now() < deadline) await drain();
 	const saved = join(sandbox, ".pi-wecom-aibot-files", "file-1-file.pdf");
-	assert.ok(sent[0].content[0].text.includes(`[文件已保存到：${saved}]`));
+	assert.ok(sent[0].content[0].text.includes(`[attachments]\n文件：${saved}\n[/attachments]`));
 	assert.equal(await readFile(saved, "utf8"), "%PDF-1.4 test");
 	assert.match(await readFile(join(sandbox, ".pi-wecom-aibot-files", ".gitignore"), "utf8"), /^\*$/m);
 });
@@ -2391,7 +2441,7 @@ test("the test card is the control card; its abort acts on the live session", as
 	assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort"]);
 });
 
-test("an automatic result is the task's reply: the stream carries the answer, never the terminal", async () => {
+test("an automatic result is the task's card: its page carries the answer, its quote the terminal", async () => {
 	const fixture = await tuiStart();
 	fixture.state.lines = ["SCREEN-ANSWER", "tool output"];
 	inbound("result-task");
@@ -2400,11 +2450,10 @@ test("an automatic result is the task's reply: the stream carries the answer, ne
 	idle = true;
 	await emit("agent_settled", { aborted: false });
 	await drain();
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
-	const reply = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1);
-	assertSource(reply.body.stream.content);
-	assert.match(reply.body.stream.content, /FINAL-ANSWER$/);
-	assert.doesNotMatch(reply.body.stream.content, /SCREEN-ANSWER/);
+	assert.equal(replies().length, 0);
+	const [card] = resultCards();
+	assertResultCard(card, "✅ 完成：result-task");
+	assert.equal(bodyOf(card), "FINAL-ANSWER");
 });
 
 test("wecom_send sends one card quoting the terminal as it is, never the notice's own content", async () => {
@@ -2842,6 +2891,92 @@ test("发送 runs the chosen prompt as this session's task, and its result comes
 		0,
 		"a click has no status message",
 	);
+});
+
+test("a WeCom task's run is told where its answer goes; a later terminal run only when it is reported", async () => {
+	inbound("guided-task");
+	await drain();
+	assert.equal(sent.length, 1);
+	assert.match(sent[0].content[0].text, /^\[wecom\|from:test-user\|chat:单聊\]\n/);
+	assert.match(promptSections.wecom, /task sent from WeCom/);
+	await emit("message_end", {
+		message: { role: "assistant", content: [{ type: "text", text: '结果\n<!-- wecom_next ["下一步"] -->' }] },
+	});
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	await drain();
+	assert.equal(replies().length, 0);
+	const [card] = resultCards();
+	assert.equal(bodyOf(card), "结果", "nothing sent to WeCom carries the comment");
+	assert.doesNotMatch(JSON.stringify(card.body), /wecom_next/);
+	clickCard(card, "send");
+	await drain();
+	assert.deepEqual(
+		lastUpdate().body.template_card.button_selection.option_list.map((option: { text: string }) => option.text),
+		["下一步"],
+		"a WeCom task's card offers its answer's next steps too",
+	);
+	await emit("before_agent_start", { messageType: "user", prompt: "LOCAL" });
+	assert.equal(promptSections.wecom, undefined, "a terminal run nobody reports gets nothing");
+	await command("config --scope global set notificationScope=all-runs", ctx);
+	await emit("before_agent_start", { messageType: "user", prompt: "LOCAL-REPORTED" });
+	assert.match(promptSections.wecom, /published to the default chat/);
+});
+
+test("a card's answer offers its next steps first in that card's 提示词; the comment never reaches WeCom", async (t) => {
+	await documentStart(docService(t));
+	await command("config --scope global set controlPrompts=继续", ctx);
+	clickCard(initialControl, "send-confirm", "default-user", { prompt: CONTINUE });
+	await drain();
+	assert.equal(sent.length, 1);
+	assert.match(promptSections.wecom, /control card/);
+	ws.sent.length = 0;
+	await emit("message_end", {
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: '已继续\n\n<!-- wecom_next ["运行测试", "继续"] -->' }],
+		},
+	});
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	await drain();
+	const result = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
+	assertResultCard(result, "✅ 完成：继续");
+	assert.equal(notified.at(-1)!.text, "已继续");
+	clickCard(result, "send", "default-user");
+	await drain();
+	assert.deepEqual(
+		lastUpdate().body.template_card.button_selection.option_list.map((option: { text: string }) => option.text),
+		["运行测试", "继续"],
+		"the answer's steps first; one already in controlPrompts is listed once",
+	);
+	clickCard(result, "send-confirm", "default-user", { prompt: promptOptions(["运行测试"])[0].id });
+	await drain();
+	assert.deepEqual(sent.at(-1)!.content, [{ type: "text", text: "运行测试" }]);
+});
+
+test("中止任务 with tasks queued can stop this run and the queue; each cleared message is told it did not run", async () => {
+	const aborts: number[] = [];
+	Object.assign(ctx, { abort: () => aborts.push(1) });
+	inbound("running-task");
+	await drain();
+	assert.equal(sent.length, 1);
+	inbound("waiting-1");
+	inbound("waiting-2");
+	await drain();
+	assert.equal(sent.length, 1, "the others wait");
+	clickCard(initialControl, "abort", "default-user");
+	await drain();
+	assert.equal(lastUpdate().body.template_card.source.desc, "等待确认中止 · 排队 2");
+	assert.deepEqual(buttons(lastUpdate()), ["abort-confirm", "abort-all", "abort-queue", "abort-cancel"]);
+	clickCard(initialControl, "abort-all", "default-user");
+	await drain();
+	assert.equal(aborts.length, 1);
+	assert.match(noteOf(lastUpdate()), /已请求中止当前运行。已清空排队的 2 条$/);
+	const replies = ws.sent
+		.filter((frame) => frame.cmd === "aibot_respond_msg")
+		.map((frame) => String(frame.body?.stream?.content ?? ""));
+	assert.equal(replies.filter((content) => /这条消息没有执行：已在控制卡上清空排队$/.test(content)).length, 2);
 });
 
 test("发送 while pi is busy queues the prompt and says how many come first; an unknown option is refused", async (t) => {

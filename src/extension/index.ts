@@ -30,12 +30,14 @@ import { CONTROL_CARD_ENTRY, ControlReceipts } from "./control-receipts.ts";
 import { DocMcpClient, docUrlSecrets } from "./doc-mcp.ts";
 import { FooterStatus } from "./footer-status.ts";
 import { GatewayClient, type GatewayClientOptions } from "./gateway-client.ts";
+import { splitNextSteps, withoutNextSteps } from "./next-steps.ts";
 import { type CompletionRequest, completionTitle } from "./notification-outbox.ts";
 import { captureModelIdentity, captureSessionSource, latestAssistantReply } from "./session-data.ts";
 import { SessionDoc } from "./session-doc.ts";
 import { statusReport, statusTitle } from "./status-report.ts";
 import { TerminalCapture } from "./terminal/capture.ts";
 import { maskText, plainLines } from "./terminal/text.ts";
+import { turnGuidance, WECOM_SECTION } from "./turn-guidance.ts";
 import { Whoami } from "./whoami.ts";
 
 export interface ExtensionOptions {
@@ -321,11 +323,16 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 
 	pi.on("model_select", (_event, ctx) => refreshSource(ctx));
 	pi.on("before_agent_start", (event, ctx) => {
+		// pi keeps prompt sections from one run to the next: this run's guidance replaces the last one's.
+		delete event.systemPromptOptions.sections[WECOM_SECTION];
 		if (event.messageType !== "user") return;
 		sessionCtx = ctx;
 		const current = bridge;
 		if (!current || current.sessionId !== ctx.sessionManager.getSessionId()) return;
-		if (!current.promptStarted(event.prompt, event.images?.length ?? 0)) wecomSourceChat = undefined;
+		const origin = current.promptStarted(event.prompt, event.images?.length ?? 0);
+		if (!origin) wecomSourceChat = undefined;
+		const guidance = turnGuidance(origin ?? (current.reportsLocalRuns() ? "local" : undefined));
+		if (guidance) event.systemPromptOptions.sections[WECOM_SECTION] = guidance;
 	});
 	pi.on("agent_start", (_event, ctx) => {
 		// Emitted before the run's prompt is persisted, so the leaf still belongs to the previous run.
@@ -579,7 +586,8 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 			"The user must have messaged the robot before. " +
 			"Omit content to send pi's latest visible reply from the current run; to resend an earlier answer, pass it as content. " +
 			"For a completion notification, set after_settle=true, omit content, then continue the task and produce its final answer. " +
-			"session_id validates the current session; it does not switch or resume another session.",
+			"session_id validates the current session; it does not switch or resume another session. " +
+			'To offer next steps on the card, end content with <!-- wecom_next ["prompt", ...] --> (at most 10); it is removed before sending.',
 		parameters: Type.Object({
 			chatid: Type.Optional(
 				Type.String({
@@ -625,7 +633,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 				...target,
 				source: captureSessionSource(ctx),
 				content,
-				...(content !== undefined ? { title: titleOf(content) } : {}),
+				...(content !== undefined ? { title: titleOf(withoutNextSteps(content)) } : {}),
 				afterEntryId: ctx.sessionManager.getLeafId(),
 			};
 			const details = {
@@ -652,14 +660,17 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 				);
 			}
 			if (answer) request.source = { ...request.source, ...captureModelIdentity(ctx, answer) };
-			const body = content ?? answer?.text;
-			if (body === undefined) throw new Error("本轮还没有可摘录的文本回复");
+			const raw = content ?? answer?.text;
+			if (raw === undefined) throw new Error("本轮还没有可摘录的文本回复");
+			// The card offers the body's next steps; the body sent to WeCom no longer has their comment.
+			const body = splitNextSteps(raw);
+			if (!body.text) throw new Error("content 只有下一步注释，没有正文");
 			await current.notify(
 				{ chatId: request.chatId, chatType: request.chatType },
-				notificationPayload("notice", request.source, body, {
+				notificationPayload("notice", request.source, body.text, {
 					title: request.title ?? (params.after_settle ? completionTitle(false) : "会话通知"),
 				}),
-				{ ctx, signal },
+				{ ctx, signal, steps: body.steps },
 			);
 			return {
 				content: [{ type: "text", text: `已发送到 ${request.chatId}` }],

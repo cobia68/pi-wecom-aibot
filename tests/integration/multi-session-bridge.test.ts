@@ -84,7 +84,8 @@ function piHarness(id: string) {
 	} as unknown as ExtensionAPI;
 	async function emit(type: string, event: any = {}) {
 		if (type === "message_end") state.entries.push({ type: "message", id: randomUUID(), message: event.message });
-		for (const handler of handlers.get(type) ?? []) await handler({ type, ...event }, ctx);
+		const prompt = type === "before_agent_start" ? { systemPromptOptions: { sections: {} } } : {};
+		for (const handler of handlers.get(type) ?? []) await handler({ type, ...prompt, ...event }, ctx);
 	}
 	extension(pi, {
 		createClient(options) {
@@ -325,22 +326,28 @@ test("group participants each choose their own message's session, reach separate
 	choose(askA.task_id, "alice", "session-A");
 	choose(askB.task_id, "bob", "session-B");
 	await until(() => a.state.sent.length === 1 && b.state.sent.length === 1, "chosen tasks delivered over IPC");
-	assert.equal(a.state.sent[0][0].text, "task A");
-	assert.equal(b.state.sent[0][0].text, "task B");
+	assert.equal(a.state.sent[0][0].text, "[wecom|from:alice|chat:群聊]\ntask A", "each pi learns who sent it");
+	assert.equal(b.state.sent[0][0].text, "[wecom|from:bob|chat:群聊]\ntask B");
 	await result(a, "ORIGINAL-A-RESULT");
 	await result(b, "ORIGINAL-B-RESULT");
-	await until(() => ws.sent.filter((frame) => frame.body?.stream?.finish === true).length === 2, "both results");
-	const results = ws.sent.filter((frame) => frame.body?.stream?.finish === true);
-	assert.ok(
-		results.some(
-			(frame) => /session-A/.test(frame.body.stream.content) && /ORIGINAL-A-RESULT/.test(frame.body.stream.content),
-		),
-		"each result replies to its own message",
-	);
-	assert.ok(
-		results.some(
-			(frame) => /session-B/.test(frame.body.stream.content) && /ORIGINAL-B-RESULT/.test(frame.body.stream.content),
-		),
+	// Each result is its session's card in the group, named by the task it answers; no message gets a reply.
+	const resultOf = (sessionId: string, task: string) =>
+		ws.sent.find(
+			(frame) =>
+				frame.cmd === "aibot_send_msg" &&
+				frame.body.chatid === "group-1" &&
+				controlCardFor(frame.body.template_card?.task_id, sessionId) &&
+				/完成：/.test(frame.body.template_card.horizontal_content_list?.at(-1)?.value ?? "") &&
+				new RegExp(`完成：${task}$`).test(frame.body.template_card.horizontal_content_list.at(-1).value),
+		);
+	await until(() => !!resultOf("session-A", "task A") && !!resultOf("session-B", "task B"), "both results");
+	assert.equal(
+		ws.sent.filter(
+			(frame) =>
+				frame.cmd === "aibot_respond_msg" && frame.body?.stream?.finish && /RESULT/.test(frame.body.stream.content),
+		).length,
+		0,
+		"results are cards, not replies",
 	);
 	// Alice's next message is asked about again: her earlier choice is not remembered.
 	chatMessage({ chattype: "group", chatid: "group-1", from: { userid: "alice" }, text: { content: "@bot now B" } });
@@ -349,7 +356,7 @@ test("group participants each choose their own message's session, reach separate
 	choose(again.task_id, "alice", "session-B");
 	await until(() => b.state.sent.length === 2, "Alice's later task reaches B");
 	assert.equal(a.state.sent.length, 1);
-	assert.equal(b.state.sent[1][0].text, "now B");
+	assert.equal(b.state.sent[1][0].text, "[wecom|from:alice|chat:群聊]\nnow B");
 });
 
 test("each connect publishes a new card listing every session online then: one, then two, then three", async () => {

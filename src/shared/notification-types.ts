@@ -15,7 +15,7 @@ export interface SessionSource {
  */
 export type NotificationKind = "result" | "notice" | "test";
 
-/** A notification snapshot; the gateway renders it as a card, or as the end of its task's stream. */
+/** A notification snapshot; the gateway renders it as its session's control card, or as Markdown. */
 export interface GatewayNotification {
 	kind: NotificationKind;
 	source: SessionSource;
@@ -23,8 +23,6 @@ export interface GatewayNotification {
 	text: string;
 	/** The card's headline; the gateway falls back to a title for the kind. */
 	title?: string;
-	/** Exact inbound task whose status this notification may finish; never inferred from chat alone. */
-	taskId?: string;
 	aborted?: boolean;
 	/**
 	 * The notification as its session's control card (a new copy: a finished run's in its done state); the

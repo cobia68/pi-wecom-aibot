@@ -17,6 +17,7 @@ import {
 } from "../shared/control-card.ts";
 import type { SessionSource } from "../shared/notification-types.ts";
 import { type ModelChoice, modelOptions, modelPage } from "./model-options.ts";
+import { withoutNextStepLines } from "./next-steps.ts";
 
 /** done, aborted, failed: a finished run's copy, until a click shows the live state. */
 export type ControlStatus = "idle" | "running" | "confirming" | "doc-problem" | "done" | "aborted" | "failed";
@@ -34,6 +35,8 @@ export interface ControlView {
 	/** The session document's copy of pi's logo; the gateway draws a public one without it. */
 	icon?: string;
 	prompts?: readonly string[];
+	/** Tasks waiting behind the current run, counted when the card is drawn; a finished run's copy leaves it out. */
+	queued?: number;
 }
 
 export interface PromptOption {
@@ -53,6 +56,7 @@ const STATUS: Record<ControlStatus, { text: string; tone: CardTone }> = {
 	failed: { text: "未执行", tone: "danger" },
 };
 const WINDOW_ROW = "窗口记录";
+const FINISHED: ReadonlySet<ControlStatus> = new Set(["done", "aborted", "failed"]);
 /** WeCom shows three lines of a quote (measured 2026-10). */
 const QUOTE_LINES = 3;
 const QUOTE_LIMIT = 1500;
@@ -70,6 +74,13 @@ const BUTTONS = {
 	],
 	confirming: [
 		[CONTROL_KEYS.confirmAbort, "确认中止", 3],
+		[CONTROL_KEYS.cancelAbort, "取消中止", 2],
+	],
+	/** With tasks queued: this run only, or with the queue; the queue only; never. */
+	confirmingQueue: [
+		[CONTROL_KEYS.confirmAbort, "确认中止", 3],
+		[CONTROL_KEYS.abortAll, "全部中止", 3],
+		[CONTROL_KEYS.clearQueue, "清空排队", 3],
 		[CONTROL_KEYS.cancelAbort, "取消中止", 2],
 	],
 	prompt: [
@@ -93,7 +104,9 @@ export function sessionControlCard(source: SessionSource, view: ControlView): Ca
 	const models = modelPage(all, view.modelPage);
 	const mode =
 		view.status === "confirming"
-			? "confirming"
+			? view.queued
+				? "confirmingQueue"
+				: "confirming"
 			: view.choosing === "prompt" && prompts.length
 				? "prompt"
 				: view.choosing === "model" && models.options.length
@@ -106,6 +119,7 @@ export function sessionControlCard(source: SessionSource, view: ControlView): Ca
 	// 确认中止 acts on the session shown: no dropdown may point elsewhere while it is asked.
 	const selection: CardSelection | undefined = {
 		confirming: undefined,
+		confirmingQueue: undefined,
 		prompt: { key: PROMPT_QUESTION, title: "提示词", options: options(prompts) },
 		model: {
 			key: MODEL_QUESTION,
@@ -117,8 +131,10 @@ export function sessionControlCard(source: SessionSource, view: ControlView): Ca
 	}[mode];
 	const head = sessionHead(source);
 	const status = STATUS[view.status];
+	// A finished run's copy says how that run ended; the live queue is a click away.
+	const queued = FINISHED.has(view.status) ? 0 : (view.queued ?? 0);
 	return {
-		label: status.text,
+		label: queued ? `${status.text} · 排队 ${queued}` : status.text,
 		tone: status.tone,
 		...(view.icon ? { icon: view.icon } : {}),
 		title: head.title,
@@ -147,9 +163,11 @@ export function promptOptions(prompts: readonly string[]): PromptOption[] {
 	}));
 }
 
-/** The last lines with words, whole: no cut to a phone's width. */
+/** The last lines with words, whole: no cut to a phone's width; a reply's next-step comment is not shown. */
 export function quoteTail(lines: readonly string[]): string[] {
-	return lines.filter((line) => /[\p{L}\p{N}]/u.test(line)).slice(-QUOTE_LINES);
+	return withoutNextStepLines(lines)
+		.filter((line) => /[\p{L}\p{N}]/u.test(line))
+		.slice(-QUOTE_LINES);
 }
 
 /** No screen: pi has no terminal (RPC, print), or none was read yet; the page still has the replies. */

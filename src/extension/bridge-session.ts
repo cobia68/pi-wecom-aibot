@@ -16,6 +16,7 @@ import {
 	CONTROL_KEYS,
 	controlCardFor,
 	controlCardId,
+	MAX_PROMPTS,
 	MODEL_QUESTION,
 	PROMPT_QUESTION,
 	parseControlKey,
@@ -33,7 +34,7 @@ import type {
 } from "../shared/gateway-protocol.ts";
 import { NO_REPLY_TEXT, sessionNote } from "../shared/notification.ts";
 import type { GatewayNotification, SessionSource } from "../shared/notification-types.ts";
-import { errorMessage } from "../shared/text.ts";
+import { errorMessage, sentences } from "../shared/text.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 import { type Connection, connectionKey, type Settings } from "./config.ts";
 import { type BridgeConnectionStatus, ConnectionNotices } from "./connection-notices.ts";
@@ -67,6 +68,8 @@ const DISPATCH_REJECTED =
 const ABORT_CONFIRM_MS = 60_000;
 /** Pages of models remembered at once, one per viewer's copy of a card. */
 const MODEL_PAGES = 50;
+/** Cards whose offered next steps are remembered at once; an older card offers only controlPrompts. */
+const CARD_STEPS = 50;
 
 /** What a click did, for the card's 窗口记录; `only`: in a group just the clicker's copy changes. */
 interface ClickAnswer {
@@ -160,6 +163,8 @@ export class BridgeSession {
 	private pendingAbort: { userid: string; chat: string; until: number } | undefined;
 	/** The page of models each viewer's copy shows while 切换模型 waits (modelKey). */
 	private readonly modelPages = new Map<string, number>();
+	/** Each published card's next steps, offered before controlPrompts in its 提示词 dropdown. */
+	private readonly cardSteps = new Map<string, string[]>();
 	/** /wecom-aibot connect before the registration is ready: the first ready state publishes a card. */
 	private announceOnReady = false;
 
@@ -178,8 +183,8 @@ export class BridgeSession {
 			subscription: () => this.subscription,
 			context: () => this.host.context(),
 			send: (chat, notification) => this.client.notify(chat, notification),
-			controlCard: (ctx, outcome, note, source) =>
-				this.publishedCard(ctx, outcome === "live" ? undefined : outcome, note, source),
+			controlCard: (ctx, outcome, note, source, steps) =>
+				this.publishedCard(ctx, outcome === "live" ? undefined : outcome, note, source, steps),
 			log: (line) => this.host.log(line),
 			notify: (message, type) => this.host.notify(message, type),
 		});
@@ -320,7 +325,7 @@ export class BridgeSession {
 			const click = request.click;
 			void this.click(ctx, click)
 				.then(({ note, only, choosing, modelPage }) => {
-					const viewer = { viewer: click.userid, chat: click.chat, choosing, modelPage };
+					const viewer = { viewer: click.userid, chat: click.chat, cardId, choosing, modelPage };
 					answer({
 						ok: true,
 						note: clamp(note, 120),
@@ -359,7 +364,7 @@ export class BridgeSession {
 				case CONTROL_KEYS.show:
 					return { note: `已切换到本会话；${await this.refreshControl(ctx, click.userid)}`, only: true };
 				case CONTROL_KEYS.send:
-					return this.choosePrompt();
+					return this.choosePrompt(click);
 				case CONTROL_KEYS.confirmSend:
 					return { note: this.sendPrompt(ctx, click) };
 				case CONTROL_KEYS.cancelSend:
@@ -378,7 +383,11 @@ export class BridgeSession {
 				case CONTROL_KEYS.abort:
 					return this.requestAbort(ctx, click);
 				case CONTROL_KEYS.confirmAbort:
-					return { note: this.confirmAbort(ctx, click) };
+					return { note: this.confirmAbort(ctx, click, "run") };
+				case CONTROL_KEYS.abortAll:
+					return { note: this.confirmAbort(ctx, click, "all") };
+				case CONTROL_KEYS.clearQueue:
+					return { note: this.confirmAbort(ctx, click, "queue") };
 				case CONTROL_KEYS.cancelAbort:
 					this.pendingAbort = undefined;
 					return { note: "已取消中止", only: true };
@@ -398,8 +407,8 @@ export class BridgeSession {
 
 	// ---------------------------------------------------------------- the control card
 
-	private choosePrompt(): ClickAnswer {
-		if (!this.host.settings().controlPrompts.length) return { note: "没有提示词：先在 pi 里设置 controlPrompts" };
+	private choosePrompt(click: CardClick): ClickAnswer {
+		if (!this.promptsFor(click.cardId).length) return { note: "没有提示词：先在 pi 里设置 controlPrompts" };
 		return { note: "选好提示词后点「确认发送」", only: true, choosing: "prompt" };
 	}
 
@@ -466,6 +475,8 @@ export class BridgeSession {
 		options: {
 			viewer?: string;
 			chat?: ChatRef;
+			/** The copy being drawn: its own next steps join its prompts. */
+			cardId?: string;
 			status?: ControlStatus;
 			choosing?: "prompt" | "model";
 			/** The model that wrote what the card is published with; a click shows the live one. */
@@ -477,7 +488,8 @@ export class BridgeSession {
 		const icon = this.page.icon();
 		return sessionControlCard(options.source ?? captureSessionSource(ctx), {
 			status: options.status ?? this.controlStatus(ctx, options.viewer, options.chat),
-			prompts: this.host.settings().controlPrompts,
+			prompts: this.promptsFor(options.cardId),
+			queued: this.waiting,
 			...(options.choosing ? { choosing: options.choosing } : {}),
 			...(options.choosing === "model"
 				? {
@@ -501,12 +513,26 @@ export class BridgeSession {
 		status: RunOutcome | undefined,
 		note: string,
 		source?: SessionSource,
+		steps?: readonly string[],
 	): GatewayNotification["control"] {
 		if (this.identifyOnly) return undefined;
 		this.readScreen(ctx, "control card without a fresh screen");
-		const card = withNote(this.controlCard(ctx, { status, source }), note);
+		const cardId = controlCardId(this.sessionId);
+		if (steps?.length) this.rememberSteps(cardId, steps);
+		const card = withNote(this.controlCard(ctx, { status, source, cardId }), note);
 		void this.page.write();
-		return { cardId: controlCardId(this.sessionId), card };
+		return { cardId, card };
+	}
+
+	private rememberSteps(cardId: string, steps: readonly string[]): void {
+		this.cardSteps.set(cardId, [...steps]);
+		for (const old of this.cardSteps.keys()) if (this.cardSteps.size > CARD_STEPS) this.cardSteps.delete(old);
+	}
+
+	/** A card's 提示词: the steps its answer offered, then controlPrompts, each once and at most MAX_PROMPTS. */
+	private promptsFor(cardId: string | undefined): string[] {
+		const steps = (cardId && this.cardSteps.get(cardId)) || [];
+		return [...new Set([...steps, ...this.host.settings().controlPrompts])].slice(0, MAX_PROMPTS);
 	}
 
 	/** The terminal now, for the card's three lines and the page; without one (RPC, print) the last stays. */
@@ -545,7 +571,7 @@ export class BridgeSession {
 	 * The list is read now: a prompt removed or edited since the card was drawn is not sent.
 	 */
 	private sendPrompt(ctx: ExtensionContext, click: CardClick): string {
-		const options = promptOptions(this.host.settings().controlPrompts);
+		const options = promptOptions(this.promptsFor(click.cardId));
 		const id = click.selections?.[PROMPT_QUESTION] ?? options[0]?.id;
 		const option = options.find((item) => item.id === id);
 		if (!option)
@@ -570,15 +596,29 @@ export class BridgeSession {
 	}
 
 	private requestAbort(ctx: ExtensionContext, click: CardClick): ClickAnswer {
-		if (ctx.isIdle()) {
+		if (ctx.isIdle() && !this.queue.length) {
 			this.pendingAbort = undefined;
 			return { note: "当前没有运行中的任务" };
 		}
 		this.pendingAbort = { userid: click.userid, chat: chatKey(click.chat), until: Date.now() + ABORT_CONFIRM_MS };
-		return { note: "60 秒内点「确认中止」才会中止", only: true };
+		const waiting = this.waiting;
+		return {
+			note: waiting
+				? `60 秒内选：「确认中止」只停这一轮，「全部中止」连排队的 ${waiting} 条一起清掉，「清空排队」只清排队`
+				: "60 秒内点「确认中止」才会中止",
+			only: true,
+		};
 	}
 
-	private confirmAbort(ctx: ExtensionContext, click: CardClick): string {
+	/** Tasks behind the current run; with nothing running, the queue's head is about to start, so it is not waiting. */
+	private get waiting(): number {
+		const ctx = this.host.context();
+		const running = !!this.currentTask || this.host.settling() || (ctx !== undefined && !ctx.isIdle());
+		return Math.max(0, this.queue.length - (running ? 0 : 1));
+	}
+
+	/** run: this run only; all: this run and the queue; queue: the queue only. Asked for by 中止任务 first. */
+	private confirmAbort(ctx: ExtensionContext, click: CardClick, scope: "run" | "all" | "queue"): string {
 		const pending = this.pendingAbort;
 		if (!pending || pending.chat !== chatKey(click.chat) || Date.now() >= pending.until) {
 			if (pending && Date.now() >= pending.until) this.pendingAbort = undefined;
@@ -586,9 +626,25 @@ export class BridgeSession {
 		}
 		if (pending.userid !== click.userid) return "只有发起中止的人能确认";
 		this.pendingAbort = undefined;
-		if (ctx.isIdle()) return "任务已结束，无需中止";
-		this.host.abort();
-		return "已请求中止当前运行";
+		const cleared = scope === "run" ? 0 : this.clearQueue();
+		const running = !ctx.isIdle();
+		if (running && scope !== "queue") this.host.abort();
+		const queue = cleared ? `已清空排队的 ${cleared} 条` : "排队是空的";
+		if (scope === "queue") return queue;
+		const run = running ? "已请求中止当前运行" : "任务已结束，无需中止";
+		return scope === "all" ? sentences(run, queue) : run;
+	}
+
+	/** Every waiting task is dropped; a WeCom message's is answered that it was not run. */
+	private clearQueue(): number {
+		const dropped = this.queue.splice(0);
+		for (const task of dropped) {
+			task.prepared?.release();
+			task.prepared = undefined;
+			this.report(task, "cancelled");
+		}
+		if (dropped.length) this.host.log(`cleared ${dropped.length} queued task(s) from the control card`);
+		return dropped.length;
 	}
 
 	/** pi chooses the ID, journals the delivery and draws the card; `note` says why the card is here. */
@@ -686,22 +742,28 @@ export class BridgeSession {
 
 	/**
 	 * pi confirms a dispatch only through before_agent_start: a run echoing the prompt handed over belongs
-	 * to the WeCom task; any other prompt means pi refused it and the user started a local run.
+	 * to the WeCom task, a card's or a message's; any other prompt means pi refused it and the user started a
+	 * local run.
 	 */
-	promptStarted(prompt: string, images: number): boolean {
+	promptStarted(prompt: string, images: number): "card" | "message" | undefined {
 		const dispatched = this.dispatched;
 		this.dispatched = undefined;
 		clearTimeout(this.dispatchTimer);
 		this.dispatchTimer = undefined;
-		if (!dispatched || this.disposed || this.currentTask !== dispatched.task) return false;
+		if (!dispatched || this.disposed || this.currentTask !== dispatched.task) return undefined;
 		const task = dispatched.task;
 		if (dispatched.text !== prompt || dispatched.images !== images) {
 			this.failTask(task, DISPATCH_REJECTED);
-			return false;
+			return undefined;
 		}
 		this.startedTask = task;
 		this.host.taskStarted?.({ chatId: task.chatId, chatType: task.chatType, userid: task.userid });
-		return true;
+		return task.fromCard ? "card" : "message";
+	}
+
+	/** A terminal run's answer is published to WeCom only with notificationScope=all-runs and a default target. */
+	reportsLocalRuns(): boolean {
+		return !this.identifyOnly && this.host.settings().notificationScope === "all-runs" && !!this.connection.target;
 	}
 
 	settle(ctx: ExtensionContext, aborted: boolean): Promise<void> {
@@ -747,6 +809,8 @@ export class BridgeSession {
 		options: {
 			ctx?: ExtensionContext;
 			signal?: AbortSignal;
+			/** What the notice offers as next steps on its card. */
+			steps?: readonly string[];
 		} = {},
 	): Promise<void> {
 		const signal = options.signal ?? this.lifetime.signal;
@@ -757,7 +821,7 @@ export class BridgeSession {
 			throw new Error("pi session_id 已改变，已取消通知");
 		// A notice or the deployment test is this session's control card too, drawn as the terminal is now.
 		if (!notification.control && notification.kind !== "result") {
-			const control = this.publishedCard(ctx, undefined, noteOf(notification), notification.source);
+			const control = this.publishedCard(ctx, undefined, noteOf(notification), notification.source, options.steps);
 			if (control) notification = { ...notification, control };
 		}
 		if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId)
@@ -872,7 +936,8 @@ export class BridgeSession {
 		const signal = this.lifetime.signal;
 		try {
 			const prepared = await this.contentPreparer.prepare(ctx.cwd, message, signal);
-			if (this.disposed || signal.aborted) {
+			// Cleared from the card while it was downloading: it was already answered as not run.
+			if (this.disposed || signal.aborted || !this.queue.includes(queued)) {
 				prepared.release();
 				return;
 			}
@@ -882,7 +947,8 @@ export class BridgeSession {
 		} catch (err) {
 			if (this.disposed || signal.aborted) return;
 			const index = this.queue.indexOf(queued);
-			if (index >= 0) this.queue.splice(index, 1);
+			if (index < 0) return;
+			this.queue.splice(index, 1);
 			this.host.log(`message preparation failed: ${errorMessage(err)}`);
 			this.report(queued, "failed");
 		}
@@ -990,7 +1056,6 @@ export class BridgeSession {
 		if (!active || active.result === undefined) return;
 		if (!active.notificationQueued) {
 			this.outbox.queueResult({
-				...(active.fromCard ? {} : { taskId: active.taskId }),
 				chatId: active.chatId,
 				chatType: active.chatType,
 				source: active.source,

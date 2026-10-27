@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { pluginDirectory } from "../shared/agent-path.ts";
+import { MAX_PROMPT_LENGTH, MAX_PROMPTS } from "../shared/control-card.ts";
 import { errorMessage, sentences } from "../shared/text.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
 import { docUrlProblem } from "./doc-mcp.ts";
@@ -84,10 +85,6 @@ export interface PromptsField extends FieldBase {
 }
 
 export type SettingField = ChoiceField | PromptsField;
-
-/** The dropdown holds at most 10 options (WeCom); a prompt is a task, bounded like one line of it. */
-export const MAX_PROMPTS = 10;
-export const MAX_PROMPT_LENGTH = 500;
 
 /** Global only, typed only in `config edit`: the address is a credential, shown as set or not set. */
 export interface DocumentField extends FieldBase {
@@ -308,6 +305,18 @@ export function patchLayer(scope: Scope, change: LayerChange, guard?: (current: 
 export function clearConfig(): void {
 	// force only tolerates a missing file; permissions, sharing violations, etc. must reach the caller.
 	rmSync(CONFIG_FILE, { force: true });
+}
+
+/** whoami's 加入白名单: the global file's allowedUserIds gains one userid; everything else in it is kept. */
+export function addAllowedUser(userid: string): void {
+	const file = layerFile("global");
+	const raw = readObject(file) ?? {};
+	const current: unknown[] = Array.isArray(raw.allowedUserIds) ? raw.allowedUserIds : [];
+	if (current.includes(userid)) return;
+	const next: Record<string, unknown> = { ...raw, allowedUserIds: [...current, userid] };
+	for (const name of OBSOLETE) delete next[name];
+	parseLayer(next, "global");
+	writeJson(file, next, false);
 }
 
 function readObject(file: string): Record<string, unknown> | undefined {

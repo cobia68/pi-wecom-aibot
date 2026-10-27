@@ -13,6 +13,7 @@ const STATUS_TEXT = {
 	stopped: "转发已停止",
 	busy: "当前等待任务较多，请稍后重试",
 	failed: "消息处理失败，请检查消息内容后重试",
+	cancelled: "这条消息没有执行：已在控制卡上清空排队",
 } as const;
 export type ProcessingState = keyof typeof STATUS_TEXT;
 
@@ -78,7 +79,7 @@ export function notificationPayload(
 	kind: NotificationKind,
 	source: SessionSource,
 	text: string,
-	options: Pick<GatewayNotification, "title" | "taskId" | "aborted" | "control"> = {},
+	options: Pick<GatewayNotification, "title" | "aborted" | "control"> = {},
 ): GatewayNotification {
 	if (!text.trim()) throw new Error("当前 pi 会话没有可发送的文本回复");
 	validateSessionId(source.sessionId);
@@ -91,7 +92,6 @@ export function notificationPayload(
 		source: { ...source },
 		text: bounded,
 		...(options.title?.trim() ? { title: options.title.trim() } : {}),
-		...(options.taskId ? { taskId: options.taskId } : {}),
 		...(options.aborted ? { aborted: true } : {}),
 		...(options.control ? { control: options.control } : {}),
 	};

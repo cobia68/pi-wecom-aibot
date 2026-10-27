@@ -4,6 +4,7 @@ import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { NO_REPLY_TEXT } from "../shared/notification.ts";
 import type { SessionSource } from "../shared/notification-types.ts";
+import { withoutNextSteps } from "./next-steps.ts";
 
 type ModelIdentity = Pick<Model<Api>, "id" | "name" | "provider">;
 type ReplyModel = Partial<Pick<AssistantMessage, "model" | "provider">>;
@@ -119,12 +120,13 @@ export function pageActivity(entries: readonly SessionEntry[]): { rounds: PageRo
 		} else if (message.role === "assistant") {
 			for (const block of message.content) {
 				if (notices.length >= PAGE_ROUNDS) break;
-				const content =
-					block.type === "toolCall" && block.name === "wecom_send" ? block.arguments.content : undefined;
-				if (typeof content === "string" && content.trim() && !failed.has((block as { id: string }).id))
+				const raw = block.type === "toolCall" && block.name === "wecom_send" ? block.arguments.content : undefined;
+				const content = typeof raw === "string" ? withoutNextSteps(raw) : "";
+				if (content.trim() && !failed.has((block as { id: string }).id))
 					notices.push({ at: new Date(entry.timestamp), content });
 			}
-			reply ??= assistantReplyText(message) || undefined;
+			// The page shows what WeCom got: a reply's next-step comment is left out.
+			reply ??= withoutNextSteps(assistantReplyText(message)) || undefined;
 		} else if (message.role === "user") {
 			if (rounds.length < PAGE_ROUNDS)
 				rounds.push({

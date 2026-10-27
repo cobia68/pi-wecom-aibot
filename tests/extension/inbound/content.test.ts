@@ -25,16 +25,29 @@ const text = (prepared: Awaited<ReturnType<InboundContentPreparer["prepare"]>>) 
 		.map((part) => part.text)
 		.join("\n");
 
-test("the source conversation is never injected into the prompt", async (t) => {
+test("a WeCom prompt opens with its sender and chat type, never the chat's ID; a quote is a block of its own", async (t) => {
 	t.mock.method(globalThis, "fetch", async () => png());
 	const preparer = new InboundContentPreparer();
 	const signal = new AbortController().signal;
 	const plain = await preparer.prepare(tmpdir(), { ...message("plain", []), text: "用户正文" }, signal);
-	assert.equal(text(plain), "用户正文");
-	assert.doesNotMatch(text(plain), /\[企业微信|chatid=/);
+	assert.equal(text(plain), "[wecom|from:user|chat:单聊]\n用户正文");
 	plain.release();
+	const group = await preparer.prepare(
+		tmpdir(),
+		{
+			...message("group", []),
+			chat: { chatId: "group-chat-id", chatType: 2 },
+			userid: "ali ce|x]",
+			text: "看看",
+			quoteText: "上一条结果\n第二行",
+		},
+		signal,
+	);
+	assert.equal(text(group), "[wecom|from:ali_ce_x_|chat:群聊]\n[quote]\n上一条结果\n第二行\n[/quote]\n看看");
+	assert.doesNotMatch(text(group), /group-chat-id/, "the chat's ID never reaches the model");
+	group.release();
 	const imageOnly = await preparer.prepare(tmpdir(), message("image-only"), signal);
-	assert.equal(text(imageOnly), "", "the old placeholder/header is gone");
+	assert.equal(text(imageOnly), "[wecom|from:user|chat:单聊]", "the [图片] placeholder goes; the image is attached");
 	assert.equal(images(imageOnly).length, 1);
 	imageOnly.release();
 });

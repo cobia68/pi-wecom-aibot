@@ -9,6 +9,7 @@ import { NO_REPLY_TEXT, notificationPayload } from "../shared/notification.ts";
 import type { GatewayNotification, SessionSource } from "../shared/notification-types.ts";
 import { errorMessage } from "../shared/text.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
+import { splitNextSteps } from "./next-steps.ts";
 import { captureModelIdentity, latestAssistantReply } from "./session-data.ts";
 
 const MAX_QUEUE_SIZE = 50;
@@ -18,7 +19,6 @@ export type RunOutcome = "done" | "aborted" | "failed";
 
 /** A wecom_send with after_settle or the result of a finished run; control cards have their own lifecycle. */
 export interface CompletionRequest {
-	taskId?: string;
 	chatId: string;
 	chatType: 1 | 2;
 	source: SessionSource;
@@ -49,6 +49,7 @@ export interface OutboxHost {
 		outcome: RunOutcome | "live",
 		note: string,
 		source?: SessionSource,
+		steps?: readonly string[],
 	): GatewayNotification["control"];
 	log(line: string): void;
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -86,13 +87,7 @@ export class NotificationOutbox {
 	/** A scheduled notification to the same conversation owns the final delivery; handed-over entries never absorb it. */
 	queueResult(request: CompletionRequest): void {
 		const key = keyOf(request);
-		const scheduled = this.waiting.get(key);
-		if (scheduled) {
-			scheduled.request.taskId = request.taskId;
-			if (scheduled.phase.kind === "ready")
-				scheduled.phase.notification = { ...scheduled.phase.notification, taskId: request.taskId };
-			return;
-		}
+		if (this.waiting.has(key)) return;
 		this.waiting.set(key, { request, phase: { kind: "pending" } });
 	}
 
@@ -115,24 +110,21 @@ export class NotificationOutbox {
 				// An extracted completion is titled by how its run ended, known only now.
 				const title = request.title ?? (request.content === undefined ? completionTitle(ended) : undefined);
 				const kind = request.result !== undefined ? "result" : "notice";
+				// The card offers the body's next steps; nothing sent carries their comment.
+				const body = splitNextSteps(request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT);
 				// The session's control card, drawn now while the terminal shows how the run ended.
 				const control = this.controlCard(
 					ctx,
 					request.failed ? "failed" : ended ? "aborted" : "done",
 					kind === "result" ? (title ?? completionTitle(ended)) : noteOf({ kind, title }),
 					request.source,
+					body.steps,
 				);
-				const notification = notificationPayload(
-					kind,
-					request.source,
-					request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT,
-					{
-						title,
-						aborted: ended,
-						taskId: request.taskId,
-						...(control ? { control } : {}),
-					},
-				);
+				const notification = notificationPayload(kind, request.source, body.text || NO_REPLY_TEXT, {
+					title,
+					aborted: ended,
+					...(control ? { control } : {}),
+				});
 				entry.phase = { kind: "ready", notification };
 			} catch (error) {
 				this.cancel(key, entry, error);
@@ -210,9 +202,10 @@ export class NotificationOutbox {
 		outcome: RunOutcome,
 		note: string,
 		source: SessionSource,
+		steps: readonly string[],
 	): GatewayNotification["control"] {
 		try {
-			return this.host.controlCard?.(ctx, outcome, note, source);
+			return this.host.controlCard?.(ctx, outcome, note, source, steps);
 		} catch (error) {
 			this.host.log(`sent as Markdown: the control card could not be drawn: ${errorMessage(error)}`);
 			return undefined;

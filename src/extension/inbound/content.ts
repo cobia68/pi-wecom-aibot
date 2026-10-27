@@ -98,10 +98,13 @@ async function buildUserContent(
 	reserveImage: (bytes: number) => void,
 ): Promise<{ content: (TextContent | ImageContent)[]; label: string }> {
 	signal.throwIfAborted();
+	// The source line names who sent it and where, never the chat's ID; a quote and saved files are blocks of their own.
+	const header = `[wecom|from:${field(message.userid)}|chat:${message.chat.chatType === 2 ? "群聊" : "单聊"}]`;
+	const quote = message.quoteText ? `[quote]\n${message.quoteText}\n[/quote]` : "";
 	let text = message.text;
-	if (message.quoteText) text = `> 引用：${message.quoteText}\n\n${text}`;
 
 	const images: ImageContent[] = [];
+	const saved: string[] = [];
 	const notes: string[] = [];
 
 	const addImage = async (attachment: Attachment): Promise<void> => {
@@ -127,7 +130,7 @@ async function buildUserContent(
 			signal.throwIfAborted();
 			const dir = await mediaDirectory(cwd);
 			const file = await saveMedia(dir, `${message.msgId || "media"}-${kind}`, media, signal);
-			notes.push(`[${kind === "video" ? "视频" : "文件"}已保存到：${file}]`);
+			saved.push(`${kind === "video" ? "视频" : "文件"}：${file}`);
 		} catch (err) {
 			signal.throwIfAborted();
 			notes.push(`[${kind}处理失败：${errorMessage(err)}]`);
@@ -142,15 +145,15 @@ async function buildUserContent(
 
 	if (images.length && /^\[图片\]$/.test(text.trim())) text = "";
 	signal.throwIfAborted();
-	const full = [text, ...notes].filter(Boolean).join("\n");
-
-	const content: (TextContent | ImageContent)[] = [];
-	if (full) content.push({ type: "text", text: full });
-	content.push(...images);
-	// A message with neither text nor a usable image still needs one content part.
-	if (!content.length) content.push({ type: "text", text: "（来自企业微信的消息）" });
+	const attachments = saved.length ? `[attachments]\n${saved.join("\n")}\n[/attachments]` : "";
+	const full = [header, quote, text, attachments, ...notes].filter(Boolean).join("\n");
 	return {
-		content,
+		content: [{ type: "text", text: full }, ...images],
 		label: `${message.chat.chatType === 2 ? "group" : "single"}/${message.msgtype}`,
 	};
+}
+
+/** A userid as a header value: no line break or delimiter can end the line early. */
+function field(value: string): string {
+	return value.replace(/[\s|\]]+/g, "_");
 }

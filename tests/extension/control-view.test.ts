@@ -17,6 +17,32 @@ function buttons(card: ReturnType<typeof sessionControlCard>): [string, string, 
 	});
 }
 
+test("the source line counts waiting tasks while live; a finished run's copy says only how it ended", () => {
+	assert.equal(sessionControlCard(source, { status: "running", queued: 2 }).label, "执行中 · 排队 2");
+	assert.equal(sessionControlCard(source, { status: "idle", queued: 0 }).label, "空闲");
+	assert.equal(sessionControlCard(source, { status: "done", queued: 3 }).label, "已完成");
+});
+
+test("确认中止 with tasks queued offers this run, everything or the queue alone, two by two", () => {
+	assert.deepEqual(
+		buttons(sessionControlCard(source, { status: "confirming", queued: 2 })).map(([action, text]) => [action, text]),
+		[
+			["abort-confirm", "确认中止"],
+			["abort-all", "全部中止"],
+			["abort-queue", "清空排队"],
+			["abort-cancel", "取消中止"],
+		],
+	);
+	assert.deepEqual(
+		buttons(sessionControlCard(source, { status: "confirming" })).map(([action]) => action),
+		["abort-confirm", "abort-cancel"],
+	);
+});
+
+test("a reply's next-step comment never shows in the card's quote", () => {
+	assert.deepEqual(quoteTail(["一", "二", "结论", '<!-- wecom_next ["运行测试"] -->']), ["一", "二", "结论"]);
+});
+
 test("before any refresh the card names the session; its four buttons are always there, in two rows", () => {
 	const card = sessionControlCard(source, { status: "idle" });
 	assert.equal(card.label, "空闲");

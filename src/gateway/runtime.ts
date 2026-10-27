@@ -72,8 +72,6 @@ const MAX_WATCH_MS = 10 * 60_000;
 const REQUEST_TIMEOUT_MS = 20_000;
 /** How long a session list waits for each pi to say whether it is busy. */
 const STATE_TIMEOUT_MS = 2_000;
-/** Settle and its result notification travel one IPC channel; this is the most a task waits for its result. */
-const MERGE_GRACE_MS = 1_000;
 /**
  * WeCom takes a card update within 5 seconds of the click; pi gets most of that, the update the rest. A
  * control card's refresh writes its WeCom document page inside this window (about 2 seconds measured).
@@ -113,16 +111,16 @@ interface SessionsPoll {
 	timer?: ReturnType<typeof setTimeout>;
 }
 
-/** A message routed to a pi, by callback req_id: its one reply is the result, sent within 24 hours. */
+/**
+ * A message routed to a pi, by callback req_id, until it settles: its result is a card in the chat, so only a
+ * task that did not run is answered, within 24 hours.
+ */
 interface Task {
 	target: SessionTarget;
 	directory: string;
 	streamId: string;
 	chat: ChatRef;
 	expiresAt: number;
-	started?: boolean;
-	awaitingResult?: boolean;
-	mergeTimer?: ReturnType<typeof setTimeout>;
 	unsent?: ProcessingState;
 }
 
@@ -297,7 +295,6 @@ export class WeComGateway {
 		for (const asked of this.asks.values()) clearTimeout(asked.timer);
 		this.asks.clear();
 		this.askBySender.clear();
-		for (const task of this.tasks.values()) clearTimeout(task.mergeTimer);
 		this.tasks.clear();
 		this.watches.clear();
 	}
@@ -311,40 +308,24 @@ export class WeComGateway {
 			this.closeTask(taskId);
 			return false;
 		}
-		if (state === "running") {
-			task.started = true;
-			return true;
-		}
+		if (state === "running") return true;
+		// It ran: its result follows as a card, and its message gets no reply.
 		if (state === "settled") {
-			// The result follows on the same IPC channel; a scheduled notification may carry it as a card instead.
-			if (!task.awaitingResult) {
-				task.awaitingResult = true;
-				task.mergeTimer = setTimeout(() => this.closeTask(taskId), MERGE_GRACE_MS);
-			}
+			this.closeTask(taskId);
 			return true;
 		}
 		return this.answer(taskId, task, state);
 	}
 
 	/**
-	 * A task's own result is its message's reply, as Markdown naming the session; anything else is a card.
-	 * WeCom shows no card inside a reply stream (probed 2026-10).
+	 * Every result and notice is the session's control card, sent to the chat: a task's result too, so its card
+	 * offers the answer's next steps. WeCom shows no card inside a reply stream (probed 2026-10).
 	 */
 	async notify(instanceId: string, chat: ChatRef, notification: GatewayNotification): Promise<void> {
 		const { member, client } = this.publisher(instanceId);
 		if (notification.source.sessionId !== member.source.sessionId)
 			throw new Error("通知的 session 与发送 pi 不匹配，已拒绝发送");
 		if (!notification.text.trim()) throw new Error("当前 pi 会话没有可发送的文本回复");
-		const awaiting = notification.taskId ? this.awaitingTask(member, chat, notification.taskId) : undefined;
-		if (awaiting && notification.kind === "result") {
-			const content = sessionMarkdown(
-				notification.source,
-				notification.text,
-				notification.aborted ? ABORTED_SUFFIX : "",
-			);
-			const outcome = await this.replyResult(client, awaiting.taskId, awaiting.task, content);
-			if (outcome === "delivered" || outcome === "unknown") return;
-		} else if (awaiting) this.closeTask(awaiting.taskId);
 		await this.publishCard(client, member, chat, notification);
 	}
 
@@ -466,37 +447,6 @@ export class WeComGateway {
 		return sent;
 	}
 
-	/** Only this result's own task: an earlier scheduled notification cannot take a newer reply. */
-	private awaitingTask(member: Member, chat: ChatRef, taskId: string): { taskId: string; task: Task } | undefined {
-		const task = this.tasks.get(taskId);
-		if (!task?.awaitingResult || !task.started) return undefined;
-		if (!sameTarget(task.target, sessionTarget(member))) return undefined;
-		if (task.chat.chatId !== chat.chatId || task.chat.chatType !== chat.chatType) return undefined;
-		return { taskId, task };
-	}
-
-	/** One attempt: a result the reply refuses goes out as a card, an unknown outcome not at all. */
-	private async replyResult(
-		client: WeComClient,
-		taskId: string,
-		task: Task,
-		content: string,
-	): Promise<"delivered" | "not_sent" | "rejected" | "unknown"> {
-		try {
-			await client.respondMsgAck(taskId, {
-				msgtype: "stream",
-				stream: { id: task.streamId, finish: true, content },
-			});
-			return "delivered";
-		} catch (error) {
-			const outcome = deliveryFailure(error);
-			this.log(`结果未能回复到原消息（${outcome}）：${errorMessage(error)}`);
-			return outcome;
-		} finally {
-			this.closeTask(taskId);
-		}
-	}
-
 	private flushUnsent(): void {
 		for (const [taskId, task] of [...this.tasks]) if (task.unsent) this.answer(taskId, task, task.unsent);
 	}
@@ -511,7 +461,6 @@ export class WeComGateway {
 	private closeTask(taskId: string): void {
 		const task = this.tasks.get(taskId);
 		if (!task) return;
-		clearTimeout(task.mergeTimer);
 		this.tasks.delete(taskId);
 	}
 
