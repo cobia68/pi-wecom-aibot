@@ -7,8 +7,9 @@
 import { stripVTControlCharacters } from "node:util";
 import type { WeComState } from "../shared/wecom-protocol.ts";
 import type { BridgeSession } from "./bridge-session.ts";
+import { table } from "./commands.ts";
 import { CONFIG_FILE, connectionOf, FIELDS, type Resolved } from "./config.ts";
-import { describe, display, table } from "./config-command.ts";
+import { describe, display } from "./config-display.ts";
 
 export type ReportedBridge = Pick<
 	BridgeSession,

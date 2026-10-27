@@ -33,7 +33,7 @@ test("the list is its sessions, one row each, with no session singled out", () =
 			["状态未知", "project-2 · 0002 · model-2"],
 		],
 	);
-	assert.match(card.sub_title_text, /^下拉框选会话，再点按钮，卡片换成它的控制卡；/);
+	assert.match(card.sub_title_text, /^下拉框选会话，点「打开会话」发出它的控制卡，列表留着接着用；/);
 	assert.doesNotMatch(JSON.stringify(card), /session-id|01234567/, "no session ID on the list");
 	// The dropdown names the same sessions in the same order, from the first row, as WeCom draws it anyway.
 	assert.equal(card.button_selection.question_key, PICKER_QUESTION);
@@ -50,13 +50,12 @@ test("the list is its sessions, one row each, with no session singled out", () =
 			button.style,
 		]),
 		[
-			[`pick@show@${fingerprintOf(0)}`, "查看会话", 1],
-			[`pick@send@${fingerprintOf(0)}`, "发提示词", 2],
-			[`pick@model@${fingerprintOf(0)}`, "切换模型", 2],
-			[`pick@abort@${fingerprintOf(0)}`, "中止任务", 3],
+			[`pick@show@${fingerprintOf(0)}`, "打开会话", 1],
+			[`pick@refresh@${fingerprintOf(0)}`, "刷新列表", 2],
 		],
+		"every action is done on the control card it opens",
 	);
-	assert.ok(isControlCardId(drawn.cardId), "it becomes a control card once a button is pressed");
+	assert.ok(isControlCardId(drawn.cardId), "the gateway routes the list's clicks by a control card's ID form");
 	assert.ok(controlCardFor(drawn.cardId, sessions(1)[0].source.sessionId));
 });
 
@@ -71,8 +70,8 @@ test("more than five sessions are paged five at a time; the pages are turned by 
 	assert.deepEqual(
 		first.card.actions.map((action) => [action.key, action.text]),
 		[
-			[`pick@show@${fingerprintOf(0)}`, "查看会话"],
-			[`pick@send@${fingerprintOf(0)}`, "发提示词"],
+			[`pick@show@${fingerprintOf(0)}`, "打开会话"],
+			[`pick@refresh@${fingerprintOf(0)}`, "刷新列表"],
 			["pick@prev@2", "上一页"],
 			["pick@next@1", "下一页"],
 		],
@@ -95,6 +94,11 @@ test("more than five sessions are paged five at a time; the pages are turned by 
 		two.card.actions.slice(2).map((action) => action.key),
 		["pick@prev@1", "pick@next@1"],
 	);
+	// A session opened stays chosen: the dropdown and the buttons name it; one off the page falls back to the first row.
+	const kept = sessionPicker(all, 0, new Date(), fingerprintOf(3))!.card;
+	assert.equal(kept.selection!.selected, fingerprintOf(3));
+	assert.equal(kept.actions[0].key, `pick@show@${fingerprintOf(3)}`);
+	assert.equal(sessionPicker(all, 0, new Date(), fingerprintOf(7))!.card.selection!.selected, fingerprintOf(0));
 	assert.equal(pageOf(all, fingerprintOf(11)), 2);
 	assert.equal(pageOf(all, "gone"), 0);
 });
@@ -120,23 +124,20 @@ test("no session online draws no list", () => {
 	assert.equal(sessionPicker([]), undefined);
 });
 
-test("only the list's keys are actions; the old lists' keys are none", () => {
-	assert.deepEqual(pickerAction(`pick@show@${fingerprintOf(0)}`), {
-		kind: "act",
-		action: CONTROL_KEYS.show,
+test("only the list's keys are actions; every button of the lists before opens the control card", () => {
+	assert.deepEqual(pickerAction(`pick@show@${fingerprintOf(0)}`), { kind: "open", fingerprint: fingerprintOf(0) });
+	assert.deepEqual(pickerAction(`pick@refresh@${fingerprintOf(0)}`), {
+		kind: "refresh",
 		fingerprint: fingerprintOf(0),
 	});
-	assert.deepEqual(pickerAction("pick@abort"), { kind: "act", action: CONTROL_KEYS.abort }, "the list before");
+	for (const action of [CONTROL_KEYS.send, CONTROL_KEYS.model, CONTROL_KEYS.abort])
+		assert.deepEqual(pickerAction(`pick@${action}@${fingerprintOf(1)}`), {
+			kind: "open",
+			fingerprint: fingerprintOf(1),
+		});
+	assert.deepEqual(pickerAction("pick@abort"), { kind: "open" }, "the list before keys named no session");
 	assert.deepEqual(pickerAction("pick@next@12"), { kind: "page", page: 12 });
 	assert.deepEqual(pickerAction("pick@prev@0"), { kind: "page", page: 0 });
-	for (const key of [
-		"pick@abort-confirm",
-		"pick@refresh",
-		"pick@page@1",
-		"page@1",
-		"card@session",
-		"select@session",
-		"send",
-	])
+	for (const key of ["pick@abort-confirm", "pick@page@1", "page@1", "card@session", "select@session", "send"])
 		assert.equal(pickerAction(key), undefined, key);
 });

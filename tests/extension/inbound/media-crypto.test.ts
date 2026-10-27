@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { createCipheriv } from "node:crypto";
 import { test } from "node:test";
-import { decryptAes256Cbc, decryptAes256CbcPrefix, parseAesKey } from "../../src/shared/media-crypto.ts";
-import { encryptMedia, MEDIA_KEY as key } from "../support/media.ts";
+import { decryptAes256Cbc, parseAesKey } from "../../../src/extension/inbound/media-crypto.ts";
+import { encryptMedia, MEDIA_KEY as key } from "../../support/media.ts";
 
 test("decrypts WeCom media with every possible 32-byte padding length", () => {
 	for (let length = 0; length < 64; length++) {
@@ -31,19 +31,4 @@ test("rejects corrupted padding even when the last padding byte is plausible", (
 	const cipher = createCipheriv("aes-256-cbc", key, key.subarray(0, 16));
 	cipher.setAutoPadding(false);
 	assert.throws(() => decryptAes256Cbc(Buffer.concat([cipher.update(padded), cipher.final()]), key), /padding/);
-});
-
-test("the head of an encrypted file decrypts on its own, whole blocks only", () => {
-	const plain = Buffer.from(Array.from({ length: 200 }, (_, index) => index));
-	const encrypted = encryptMedia(plain);
-	for (const length of [0, 15, 16, 17, 64, 100]) {
-		const whole = length - (length % 16);
-		assert.deepEqual(
-			decryptAes256CbcPrefix(encrypted.subarray(0, length), key),
-			plain.subarray(0, whole),
-			`prefix ${length}`,
-		);
-	}
-	// The whole file includes the padding a prefix never needs to understand.
-	assert.deepEqual(decryptAes256CbcPrefix(encrypted, key).subarray(0, plain.length), plain);
 });

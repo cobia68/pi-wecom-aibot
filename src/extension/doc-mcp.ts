@@ -11,7 +11,7 @@ const CALL_TIMEOUT_MS = 10_000;
 
 export type DocErrorKind = "http" | "rpc" | "tool" | "network" | "protocol";
 
-/** errcode is WeCom's, when the tool answered with one. */
+/** errcode is WeCom's when the tool answered with one; for kind "http" it is the HTTP status. */
 export class DocError extends Error {
 	constructor(
 		message: string,
@@ -62,11 +62,6 @@ export class DocMcpClient {
 
 	constructor(private readonly url: string) {
 		this.secrets = docUrlSecrets(url);
-	}
-
-	/** The words that must never leave this client: the address and its key. */
-	get secretValues(): readonly string[] {
-		return this.secrets;
 	}
 
 	/** The tool's text parts; an errcode other than 0, or isError, is thrown as a DocError. */

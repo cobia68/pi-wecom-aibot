@@ -2353,31 +2353,31 @@ test("an uncertain manual control delivery is reported as unknown, never as defi
 	assert.doesNotMatch(note.body.markdown.content, /未发出/);
 });
 
-test("the session list's 查看会话 turns the clicker's copy into this session's control card, in place", async () => {
+test("the session list's 打开会话 publishes this session's control card as a new message; the list stays", async () => {
 	plain("/wecom-aibot sessions");
 	await drain();
 	const list = ws.sent.find((frame) => frame.body?.template_card?.button_selection?.question_key === "pick");
 	const keys = buttons(list);
 	assert.deepEqual(
 		keys.map((key) => key.replace(/@[0-9a-f]{64}$/, "")),
-		["pick@show", "pick@send", "pick@model", "pick@abort"],
+		["pick@show", "pick@refresh"],
 	);
 	ws.sent.length = 0;
 	clickCard(list, keys[0]);
 	await drain();
-	const opened = ws.sent.find((frame) => frame.cmd === "aibot_respond_update_msg");
-	assert.ok(opened, "the list itself is redrawn, no new message");
-	const card = opened.body.template_card;
-	assert.equal(card.task_id, list.body.template_card.task_id);
-	assert.equal(card.main_title.title, `📁 ${basename(sandbox)}`);
-	assert.equal(card.sub_title_text, `🆔 session-id: ${sessionId}`);
-	assert.deepEqual(buttons(opened), ["refresh", "send", "model", "abort"]);
-	assert.match(noteOf(opened), /已切换到本会话/);
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "nothing is pushed");
+	const published = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(published.length, 1, "a new message");
+	assertCard(published[0]);
+	assert.notEqual(published[0].body.template_card.task_id, list.body.template_card.task_id);
+	assert.equal(noteOf(published[0]), "已补发控制卡");
+	const kept = ws.sent.find((frame) => frame.cmd === "aibot_respond_update_msg");
+	assert.equal(kept.body.template_card.task_id, list.body.template_card.task_id, "the list itself stays");
+	assert.equal(kept.body.template_card.button_selection.question_key, "pick");
+	assert.match(noteOf(kept), /^已打开「.+」的控制卡$/);
 	assert.equal(sent.length, 0, "nothing runs");
-	// From here it is this session's control card: its own buttons act on it.
+	// The card opened is this session's: its own buttons act on it.
 	ws.sent.length = 0;
-	clickCard(opened, "refresh");
+	clickCard(published[0], "refresh");
 	await drain();
 	assert.ok(ws.sent.some((frame) => frame.cmd === "aibot_respond_update_msg"));
 });

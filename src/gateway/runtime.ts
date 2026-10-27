@@ -10,10 +10,12 @@ import {
 	controlKey,
 	isControlCardId,
 	PI_ICON_URL,
+	PUBLISH_KEY,
 	parseControlKey,
 	publisherFingerprint,
 	SESSION_QUESTION,
 	sessionFingerprint,
+	sessionLabel,
 } from "../shared/control-card.ts";
 import { DeliveryError, deliveryFailure } from "../shared/delivery.ts";
 import {
@@ -32,6 +34,7 @@ import {
 import {
 	ABORTED_SUFFIX,
 	formatProcessingStatus,
+	MAX_NOTIFICATION_BYTES,
 	type ProcessingState,
 	quotedSessions,
 	sessionMarkdown,
@@ -53,6 +56,7 @@ import {
 	ASK_CHOICES,
 	ASK_MS,
 	ASK_QUESTION,
+	type AskAction,
 	type AskedMessage,
 	type AskOutcome,
 	askAction,
@@ -63,15 +67,14 @@ import {
 } from "./ask-card.ts";
 import { helpText, parseWeComCommand, sessionCommand, type WeComCommand } from "./command.ts";
 import { PICKER_QUESTION, type PickerAction, pageOf, pickerAction, sessionPicker } from "./session-picker.ts";
-import { stateLabel, withSessions } from "./session-view.ts";
+import { SessionPoller } from "./session-poller.ts";
+import { sessionsText, sessionText, withSessions } from "./session-view.ts";
 import { WeComClient, type WeComClientOptions, type WeComInbound } from "./wecom-client.ts";
 
 const MAX_SESSIONS = 100;
 const MAX_TASKS = 10_000;
 const MAX_WATCH_MS = 10 * 60_000;
 const REQUEST_TIMEOUT_MS = 20_000;
-/** How long a session list waits for each pi to say whether it is busy. */
-const STATE_TIMEOUT_MS = 2_000;
 /**
  * WeCom takes a card update within 5 seconds of the click; pi gets most of that, the update the rest. A
  * control card's refresh writes its WeCom document page inside this window (about 2 seconds measured).
@@ -102,15 +105,6 @@ interface PendingRequest {
 	timer: ReturnType<typeof setTimeout>;
 }
 
-interface SessionsPoll {
-	members: Member[];
-	busy: Map<string, boolean>;
-	finish: (members: Member[], busy: ReadonlyMap<string, boolean>) => void;
-	pending: number;
-	done: boolean;
-	timer?: ReturnType<typeof setTimeout>;
-}
-
 /**
  * A message routed to a pi, by callback req_id, until it settles: its result is a card in the chat, so only a
  * task that did not run is answered, within 24 hours.
@@ -119,35 +113,47 @@ interface Task {
 	target: SessionTarget;
 	directory: string;
 	streamId: string;
-	chat: ChatRef;
 	expiresAt: number;
 	unsent?: ProcessingState;
 }
 
-/** A session list sent as a new message, as the day's welcome, or over the list clicked (only the clicker's copy in a group). */
+/**
+ * A session list sent as a new message, as the day's welcome, or over the list clicked (only the clicker's copy
+ * in a group); `deadline`: WeCom takes the welcome or the update only until then.
+ */
 type PickerReply =
-	| { kind: "message" | "welcome"; reqId: string; chat: ChatRef }
-	| { kind: "update"; reqId: string; chat: ChatRef; cardId: string; userids?: string[] };
+	| { kind: "message"; reqId: string; chat: ChatRef }
+	| { kind: "welcome"; reqId: string; chat: ChatRef; deadline: number }
+	| { kind: "update"; reqId: string; chat: ChatRef; cardId: string; userids?: string[]; deadline: number };
+type ListUpdate = Extract<PickerReply, { kind: "update" }>;
 
 /** A click handed to its pi, answered within CLICK_ANSWER_MS or not at all. */
 interface PendingClick {
 	instanceId: string;
 	target: SessionTarget;
-	control: boolean;
 	eventReqId: string;
 	cardId: string;
 	sessionId: string;
 	chat: ChatRef;
 	userid: string;
 	/** Where the copy its clicker saw is recorded; it takes the note when no answer comes. */
-	copy?: string;
+	copy: string;
+	/** 打开会话 on a list: the answer redraws the list, its dropdown on the session opened. */
+	opens?: ListOpening;
 	timer: ReturnType<typeof setTimeout>;
+}
+
+interface ListOpening {
+	reply: ListUpdate;
+	fingerprint: string;
+	note: string;
 }
 
 /** How a click reaches its pi as a control card's: the card ID, the dropdowns, the copy to note on a timeout. */
 interface ControlForward {
 	selections?: Record<string, string>;
-	copy?: string;
+	copy: string;
+	opens?: ListOpening;
 }
 
 export class WeComGateway {
@@ -155,7 +161,7 @@ export class WeComGateway {
 	private readonly seen = new Set<string>();
 	private readonly tasks = new Map<string, Task>();
 	private readonly requests = new Map<string, PendingRequest>();
-	private readonly stateQueries = new Map<string, { poll: SessionsPoll; instanceId: string }>();
+	private readonly poller = new SessionPoller<Member>((member) => this.members.get(member.instanceId) === member);
 	/** Cards to redraw on a click, by task_id; a control card per session it showed (cardKey). */
 	private readonly cards = new Map<string, CardModel>();
 	/** Messages that named no session, by their question card; one per sender and chat (askBySender). */
@@ -231,7 +237,7 @@ export class WeComGateway {
 				},
 				onMessage: (inbound) => this.receive(() => this.route(inbound)),
 				onEvent: (inbound) => this.receive(() => this.event(inbound)),
-				log: (message) => this.broadcast({ type: "log", message }),
+				log: (message) => this.log(message),
 			});
 			this.client.start();
 		} else if (resume) {
@@ -243,7 +249,7 @@ export class WeComGateway {
 		if (this.members.get(instanceId)?.peer !== peer) return;
 		this.members.delete(instanceId);
 		this.watches.delete(instanceId);
-		for (const [id, query] of [...this.stateQueries]) if (query.instanceId === instanceId) this.answerState(id);
+		this.poller.left(instanceId);
 		for (const [id, click] of [...this.clicks])
 			if (click.instanceId === instanceId) this.finishClick(id, "会话已离线");
 		this.broadcastStatus();
@@ -287,8 +293,7 @@ export class WeComGateway {
 		this.members.clear();
 		for (const request of this.requests.values()) clearTimeout(request.timer);
 		this.requests.clear();
-		for (const { poll } of this.stateQueries.values()) clearTimeout(poll.timer);
-		this.stateQueries.clear();
+		this.poller.stop();
 		for (const click of this.clicks.values()) clearTimeout(click.timer);
 		this.clicks.clear();
 		this.cards.clear();
@@ -305,13 +310,13 @@ export class WeComGateway {
 		const member = this.members.get(instanceId);
 		if (!task || !member || member.identifyOnly || !sameTarget(task.target, sessionTarget(member))) return false;
 		if (task.expiresAt < Date.now()) {
-			this.closeTask(taskId);
+			this.tasks.delete(taskId);
 			return false;
 		}
 		if (state === "running") return true;
 		// It ran: its result follows as a card, and its message gets no reply.
 		if (state === "settled") {
-			this.closeTask(taskId);
+			this.tasks.delete(taskId);
 			return true;
 		}
 		return this.answer(taskId, task, state);
@@ -324,8 +329,8 @@ export class WeComGateway {
 	async notify(instanceId: string, chat: ChatRef, notification: GatewayNotification): Promise<void> {
 		const { member, client } = this.publisher(instanceId);
 		if (notification.source.sessionId !== member.source.sessionId)
-			throw new Error("通知的 session 与发送 pi 不匹配，已拒绝发送");
-		if (!notification.text.trim()) throw new Error("当前 pi 会话没有可发送的文本回复");
+			throw new DeliveryError("通知的 session 与发送 pi 不匹配，已拒绝发送", "rejected");
+		if (!notification.text.trim()) throw new DeliveryError("当前 pi 会话没有可发送的文本回复", "rejected");
 		await this.publishCard(client, member, chat, notification);
 	}
 
@@ -339,14 +344,16 @@ export class WeComGateway {
 			await this.sendControl(client, member, chat, item);
 			return;
 		}
-		if (Buffer.byteLength(item.text, "utf8") > 20_480) throw new DeliveryError("推送正文超过 20480 字节", "rejected");
+		if (Buffer.byteLength(item.text, "utf8") > MAX_NOTIFICATION_BYTES)
+			throw new DeliveryError(`推送正文超过 ${MAX_NOTIFICATION_BYTES} 字节`, "rejected");
 		await client.sendMsg(chat.chatId, chat.chatType, { msgtype: "markdown", markdown: { content: item.text } });
 	}
 
 	private publisher(instanceId: string): { member: Member; client: WeComClient } {
 		const member = this.members.get(instanceId);
-		if (!member || !this.client) throw new Error("pi 尚未注册");
-		if (member.identifyOnly) throw new Error("临时识别连接不能发送通知；请完成配置后运行 /wecom-aibot connect");
+		if (!member || !this.client) throw new DeliveryError("pi 尚未注册", "not_sent");
+		if (member.identifyOnly)
+			throw new DeliveryError("临时识别连接不能发送通知；请完成配置后运行 /wecom-aibot connect", "rejected");
 		return { member, client: this.client };
 	}
 
@@ -415,7 +422,7 @@ export class WeComGateway {
 		const model = { ...card, icon: this.icon ?? card.icon ?? PI_ICON_URL };
 		if (model.selection?.key !== SESSION_QUESTION) return model;
 		const userid = "userid" in viewer ? viewer.userid : viewer.chatType === 1 ? viewer.chatId : undefined;
-		const online = (userid === undefined ? [...this.members.values()] : this.eligible(userid)).filter(
+		const online = (userid === undefined ? [...this.members.values()] : this.allowing(userid)).filter(
 			(member) => !member.identifyOnly,
 		);
 		return withSessions(model, online);
@@ -425,7 +432,9 @@ export class WeComGateway {
 		if (card.icon && card.icon !== PI_ICON_URL) this.icon = card.icon;
 	}
 
+	/** The newest use goes last, so a card still being clicked is the last to be forgotten. */
 	private rememberCard(cardId: string, card: CardModel): void {
+		this.cards.delete(cardId);
 		this.cards.set(cardId, card);
 		const oldest = this.cards.keys().next().value;
 		if (this.cards.size > MAX_CARDS && oldest !== undefined) this.cards.delete(oldest);
@@ -442,7 +451,7 @@ export class WeComGateway {
 					content: formatProcessingStatus(task.target.sessionId, state, task.directory),
 				},
 			}) ?? false;
-		if (sent) this.closeTask(taskId);
+		if (sent) this.tasks.delete(taskId);
 		else task.unsent = state;
 		return sent;
 	}
@@ -452,29 +461,22 @@ export class WeComGateway {
 	}
 
 	private track(taskId: string, task: Task): void {
-		this.closeTask(taskId);
+		this.tasks.delete(taskId);
 		this.tasks.set(taskId, task);
 		const oldest = this.tasks.keys().next().value;
-		if (this.tasks.size > MAX_TASKS && oldest !== undefined) this.closeTask(oldest);
-	}
-
-	private closeTask(taskId: string): void {
-		const task = this.tasks.get(taskId);
-		if (!task) return;
-		this.tasks.delete(taskId);
+		if (this.tasks.size > MAX_TASKS && oldest !== undefined) this.tasks.delete(oldest);
 	}
 
 	private broadcast(frame: ServerFrame): void {
 		for (const member of this.members.values()) member.peer.send(frame);
 	}
 
-	private receive(action: () => void | Promise<void>): void {
-		const failed = (error: unknown) => this.log(`gateway inbound failed: ${errorMessage(error)}`);
+	/** A callback's handler failing is logged; the connection and the other callbacks carry on. */
+	private receive(handle: () => void): void {
 		try {
-			const running = action();
-			running?.catch(failed);
+			handle();
 		} catch (error) {
-			failed(error);
+			this.log(`gateway inbound failed: ${errorMessage(error)}`);
 		}
 	}
 
@@ -483,7 +485,8 @@ export class WeComGateway {
 		this.broadcast({ type: "status", status: this.status });
 	}
 
-	private eligible(userid: string): Member[] {
+	/** Every member whose allowlist admits the user, temporary identification registrations too. */
+	private allowing(userid: string): Member[] {
 		return [...this.members.values()].filter(
 			(member) => !member.config.allowedUserIds?.length || member.config.allowedUserIds.includes(userid),
 		);
@@ -491,7 +494,7 @@ export class WeComGateway {
 
 	/** The sessions a user may send to; an allowlist that excludes them everywhere gets silence. */
 	private permitted(userid: string): Member[] {
-		return this.eligible(userid).filter((member) => !member.identifyOnly);
+		return this.allowing(userid).filter((member) => !member.identifyOnly);
 	}
 
 	/** A session online now, by fingerprint, whoever may use it. */
@@ -514,13 +517,12 @@ export class WeComGateway {
 				this.identify(watcher, inbound.reqId, { ...message.chat, userid: message.userid });
 			return;
 		}
-		const permitted = this.eligible(userid);
-		if (!permitted.length) {
+		if (!this.allowing(userid).length) {
 			// WeCom outlives the last pi by a moment; a sender only an allowlist excludes gets silence.
 			if (!this.members.size) this.reply(inbound.reqId, NO_ONLINE_SESSION);
 			return;
 		}
-		const eligible = permitted.filter((member) => !member.identifyOnly);
+		const eligible = this.permitted(userid);
 		if (!this.firstSeen(message?.msgId || inbound.reqId)) return;
 		if (!message) {
 			this.reply(inbound.reqId, "无法识别这条消息，请重新发送");
@@ -545,29 +547,25 @@ export class WeComGateway {
 
 	/** The card a message without a session gets: which pi takes it. Only this message waits for the answer. */
 	private ask(reqId: string, message: InboundMessage, eligible: Member[], reason?: string): void {
-		if (!eligible.length) {
-			this.listSessions(reqId, eligible, reason);
-			return;
-		}
 		const sender = senderKey(message);
 		const previous = this.askBySender.get(sender);
 		if (previous) this.dropAsk(previous, "这条消息没有发出：之后又发了一条，以那条为准");
-		this.pollSessions(eligible, (online, busy) => {
+		this.poller.poll(eligible, (online, sessions) => {
 			const client = this.client;
 			if (!client) return;
 			if (!online.length) {
-				this.reply(reqId, sessionsText(online, busy));
+				this.reply(reqId, sessionsText(sessions, reason));
 				return;
 			}
 			const cardId = askCardId();
-			const card = askCard(message, states(online, busy), reason);
+			const card = askCard(message, sessions, reason);
 			const timer = setTimeout(
 				() => this.dropAsk(cardId, "这条消息没有发出：4 分钟内没有选择会话，请重新发送"),
 				ASK_MS,
 			);
 			timer.unref?.();
 			const choices = online.slice(0, ASK_CHOICES).map((member) => sessionFingerprint(member.source.sessionId));
-			this.asks.set(cardId, { reqId, message, choices, expiresAt: Date.now() + ASK_MS, timer });
+			this.asks.set(cardId, { reqId, message, choices, timer });
 			this.askBySender.set(sender, cardId);
 			this.rememberCard(cardId, card);
 			void client
@@ -604,12 +602,10 @@ export class WeComGateway {
 	private askClick(
 		eventReqId: string,
 		cardId: string,
-		key: string,
+		action: AskAction,
 		identity: ChatIdentity,
 		selections?: Record<string, string>,
 	): void {
-		const action = askAction(cardId, key);
-		if (!action) return;
 		const asked = this.asks.get(cardId);
 		if (!asked) {
 			const card = this.cards.get(cardId);
@@ -640,7 +636,7 @@ export class WeComGateway {
 			return;
 		}
 		this.forgetAsk(cardId);
-		// The message's own req_id: its result replies to the message itself.
+		// The message's own req_id: if it cannot be delivered, that message is told why.
 		if (this.members.get(target.instanceId) !== target || !this.deliver(target, asked.reqId, asked.message)) {
 			this.listSessions(asked.reqId, eligible, TARGET_GONE);
 			this.settleAsk(eventReqId, cardId, identity, { kind: "closed" }, "会话刚刚离线");
@@ -651,7 +647,7 @@ export class WeComGateway {
 			cardId,
 			identity,
 			{ kind: "sent", source: target.source },
-			"已发出，跑完后回复你这条消息",
+			"已发出，跑完后结果卡发到这个聊天",
 		);
 	}
 
@@ -715,21 +711,14 @@ export class WeComGateway {
 	}
 
 	private showSession(reqId: string, target: Member, userid: string): void {
-		this.pollSessions([target], (online, busy) => {
-			const member = online[0];
-			if (!member) {
-				this.listSessions(reqId, this.permitted(userid), TARGET_MISSING);
-				return;
-			}
-			this.reply(reqId, sessionText(member, busy.get(member.instanceId)));
+		this.poller.poll([target], (online, sessions) => {
+			if (online.length) this.reply(reqId, sessionText(sessions[0]));
+			else this.listSessions(reqId, this.permitted(userid), TARGET_MISSING);
 		});
 	}
 
 	private listSessions(reqId: string, eligible: Member[], prefix?: string): void {
-		this.pollSessions(eligible, (online, busy) => {
-			const text = sessionsText(online, busy);
-			this.reply(reqId, prefix ? `${prefix}\n\n${text}` : text);
-		});
+		this.poller.poll(eligible, (_online, sessions) => this.reply(reqId, sessionsText(sessions, prefix)));
 	}
 
 	/** The session list, asking each pi whether it is busy; `page` may be the page a session is listed on. */
@@ -739,11 +728,12 @@ export class WeComGateway {
 		page: number | { fingerprint?: string } = 0,
 		note?: string,
 	): void {
-		const deadline = reply.kind === "message" ? undefined : Date.now() + EVENT_REPLY_MS;
-		this.pollSessions(eligible, (online, busy) => {
-			const fallback = sessionsText(online, busy);
-			const sessions = states(online, busy);
-			const list = sessionPicker(sessions, typeof page === "number" ? page : pageOf(sessions, page.fingerprint));
+		const deadline = reply.kind === "message" ? undefined : reply.deadline;
+		const fingerprint = typeof page === "number" ? undefined : page.fingerprint;
+		this.poller.poll(eligible, (_online, sessions) => {
+			const fallback = sessionsText(sessions);
+			const at = typeof page === "number" ? page : pageOf(sessions, fingerprint);
+			const list = sessionPicker(sessions, at, new Date(), fingerprint);
 			if (!list) {
 				if (reply.kind === "message") this.reply(reply.reqId, fallback);
 				else if (reply.kind === "update") this.redraw(reply.reqId, reply.cardId, undefined, reply.chat, NO_LISTED);
@@ -792,40 +782,6 @@ export class WeComGateway {
 		}
 	}
 
-	private pollSessions(members: Member[], finish: SessionsPoll["finish"]): void {
-		const poll: SessionsPoll = { members, busy: new Map(), finish, pending: 0, done: false };
-		const queries = members.map((member) => ({ id: randomUUID(), member }));
-		// Registered before the first send: a pi may answer before the loop ends.
-		for (const { id, member } of queries) this.stateQueries.set(id, { poll, instanceId: member.instanceId });
-		poll.pending = queries.length;
-		if (queries.length) poll.timer = setTimeout(() => this.finishPoll(poll), STATE_TIMEOUT_MS);
-		for (const { id, member } of queries) {
-			const request = { action: "state" as const, target: sessionTarget(member) };
-			if (!member.peer.send({ type: "request", id, request })) this.answerState(id);
-		}
-		if (!poll.pending) this.finishPoll(poll);
-	}
-
-	private answerState(id: string, busy?: boolean): void {
-		const query = this.stateQueries.get(id);
-		if (!query) return;
-		this.stateQueries.delete(id);
-		const { poll } = query;
-		if (busy !== undefined) poll.busy.set(query.instanceId, busy);
-		poll.pending -= 1;
-		if (!poll.pending) this.finishPoll(poll);
-	}
-
-	private finishPoll(poll: SessionsPoll): void {
-		if (poll.done) return;
-		poll.done = true;
-		clearTimeout(poll.timer);
-		for (const [id, query] of [...this.stateQueries]) if (query.poll === poll) this.stateQueries.delete(id);
-		// A pi that left or registered again while it was asked is not listed.
-		const online = poll.members.filter((member) => this.members.get(member.instanceId) === member);
-		poll.finish(online, poll.busy);
-	}
-
 	private request(action: "cancel" | "card", target: Member, reqId: string, chat: ChatRef, userid: string): void {
 		const id = randomUUID();
 		const timer = setTimeout(() => {
@@ -838,7 +794,7 @@ export class WeComGateway {
 		this.requests.set(id, { reqId, instanceId: target.instanceId, action, timer });
 		const request =
 			action === "card"
-				? { action: "click" as const, target: sessionTarget(target), click: { key: "control", userid, chat } }
+				? { action: "click" as const, target: sessionTarget(target), click: { key: PUBLISH_KEY, userid, chat } }
 				: { action, target: sessionTarget(target) };
 		if (target.peer.send({ type: "request", id, request })) return;
 		clearTimeout(timer);
@@ -847,17 +803,15 @@ export class WeComGateway {
 	}
 
 	response(instanceId: string, id: string, response: BridgeResponse): void {
-		if (this.stateQueries.get(id)?.instanceId === instanceId) {
-			this.answerState(id, response.ok ? response.busy : undefined);
-			return;
-		}
+		if (this.poller.answer(id, instanceId, response.ok ? response.busy : undefined)) return;
 		const click = this.clicks.get(id);
 		if (click?.instanceId === instanceId) {
 			const member = this.members.get(instanceId);
 			if (!member || !sameTarget(click.target, sessionTarget(member))) this.finishClick(id, "会话已离线或重新接入");
 			else if (!response.ok) this.finishClick(id, `处理失败：${response.error ?? "未知原因"}`);
-			else if (click.control && !response.card) this.finishClick(id, "会话没有返回控制卡状态");
-			else this.finishClick(id, response.note, click.control ? response.card : undefined, response.userids);
+			else if (click.opens) this.listOpened(id, click.opens);
+			else if (!response.card) this.finishClick(id, "会话没有返回控制卡状态");
+			else this.finishClick(id, response.note, response.card, response.userids);
 			return;
 		}
 		const pending = this.requests.get(id);
@@ -886,12 +840,12 @@ export class WeComGateway {
 		const cardId = typeof event?.task_id === "string" ? event.task_id : "";
 		const key = typeof event?.event_key === "string" ? event.event_key : "";
 		if (!userid || !cardId || !key) return;
-		const msgId = typeof body?.msgid === "string" && body.msgid ? body.msgid : inbound.reqId;
-		if (!this.firstSeen(msgId)) return;
+		if (!this.firstSeen(callbackId(body, inbound.reqId))) return;
 		const chat = eventChat(body, userid);
 		if (!chat) return;
-		if (askAction(cardId, key)) {
-			this.askClick(inbound.reqId, cardId, key, { ...chat, userid }, cardSelections(event));
+		const asked = askAction(cardId, key);
+		if (asked) {
+			this.askClick(inbound.reqId, cardId, asked, { ...chat, userid }, cardSelections(event));
 			return;
 		}
 		const picked = pickerAction(key);
@@ -961,9 +915,9 @@ export class WeComGateway {
 	}
 
 	/**
-	 * A session list's button: a page, or an action on the session the dropdown names (else the page's first
-	 * row). The answer is that session's control card, so the clicker's copy becomes it; every action but
-	 * 查看会话 is a first step that still asks to confirm there.
+	 * A session list's button: a page, the list again, or 打开会话 for the session the dropdown names (else the
+	 * one it showed when drawn). That session publishes a new copy of its control card; the list stays, its
+	 * dropdown on the session opened, so the same list opens the next one.
 	 */
 	private pickClick(
 		eventReqId: string,
@@ -975,35 +929,57 @@ export class WeComGateway {
 		const permitted = this.permitted(identity.userid);
 		if (!permitted.length) return;
 		const chat: ChatRef = { chatId: identity.chatId, chatType: identity.chatType };
-		const reply: PickerReply = {
+		const reply: ListUpdate = {
 			kind: "update",
 			reqId: eventReqId,
 			chat,
 			cardId,
 			...(chat.chatType === 2 ? { userids: [identity.userid] } : {}),
+			deadline: Date.now() + EVENT_REPLY_MS,
 		};
 		if (picked.kind === "page") {
 			this.showPicker(reply, permitted, picked.page);
 			return;
 		}
-		const target = this.online(selections?.[PICKER_QUESTION] ?? picked.fingerprint ?? publisherFingerprint(cardId));
+		const chosen = selections?.[PICKER_QUESTION] ?? picked.fingerprint ?? publisherFingerprint(cardId);
+		if (picked.kind === "refresh") {
+			this.showPicker(reply, permitted, { fingerprint: chosen }, "已刷新");
+			return;
+		}
+		const target = this.online(chosen);
 		if (!target) {
 			this.showPicker(reply, permitted, { fingerprint: picked.fingerprint }, "选的会话已离线，请选另一个");
 			return;
 		}
 		if (!permitted.includes(target)) return;
-		const key = controlKey(picked.action, target.source.sessionId);
-		this.forwardClick(eventReqId, cardId, target, identity, key, { copy: cardId });
+		const fingerprint = sessionFingerprint(target.source.sessionId);
+		const note = `已打开「${sessionLabel(target.source.sessionId, target.source.directoryName)}」的控制卡`;
+		this.forwardClick(eventReqId, cardId, target, identity, PUBLISH_KEY, {
+			copy: cardId,
+			opens: { reply, fingerprint, note },
+		});
 	}
 
-	/** `control`: the click is a control card's, answered with the card. A session the clicker may not use gets silence. */
+	/** The session published its control card: the list is drawn again, its dropdown on that session. */
+	private listOpened(id: string, opening: ListOpening): void {
+		const click = this.clicks.get(id);
+		if (!click) return;
+		clearTimeout(click.timer);
+		this.clicks.delete(id);
+		this.showPicker(opening.reply, this.permitted(click.userid), { fingerprint: opening.fingerprint }, opening.note);
+	}
+
+	/**
+	 * The click goes to the session it acts on, which answers with its control card; for a list's 打开会话 it
+	 * publishes a new copy instead, so no card ID goes with it.
+	 */
 	private forwardClick(
 		eventReqId: string,
 		cardId: string,
 		target: Member,
 		identity: ChatIdentity,
 		key: string,
-		control?: ControlForward,
+		control: ControlForward,
 	): void {
 		const id = randomUUID();
 		const timer = setTimeout(() => this.finishClick(id, "会话没有及时响应"), CLICK_ANSWER_MS);
@@ -1012,13 +988,13 @@ export class WeComGateway {
 		this.clicks.set(id, {
 			instanceId: target.instanceId,
 			target: targetId,
-			control: control !== undefined,
 			eventReqId,
 			cardId,
 			sessionId: target.source.sessionId,
 			chat,
 			userid: identity.userid,
-			...(control?.copy ? { copy: control.copy } : {}),
+			copy: control.copy,
+			...(control.opens ? { opens: control.opens } : {}),
 			timer,
 		});
 		const request = {
@@ -1028,8 +1004,8 @@ export class WeComGateway {
 				key,
 				userid: identity.userid,
 				chat,
-				...(control ? { cardId } : {}),
-				...(control?.selections ? { selections: control.selections } : {}),
+				...(control.opens ? {} : { cardId }),
+				...(control.selections ? { selections: control.selections } : {}),
 			},
 		};
 		if (!target.peer.send({ type: "request", id, request })) this.finishClick(id, "会话已离线");
@@ -1052,7 +1028,7 @@ export class WeComGateway {
 					model,
 					// A single chat has one copy; only a group's are per member.
 					userids: click.chat.chatType === 2 ? userids : undefined,
-					...(click.copy && !model ? { key: click.copy } : {}),
+					...(model ? {} : { key: click.copy }),
 				},
 			);
 	}
@@ -1127,11 +1103,10 @@ export class WeComGateway {
 			target: targetId,
 			directory: target.source.directoryName,
 			streamId: `pi-${randomUUID()}`,
-			chat: { ...message.chat },
 			expiresAt: Date.now() + WECOM_REPLY_WINDOW_MS,
 		});
 		if (target.peer.send({ type: "task", target: targetId, task: { id: taskId, message } })) return true;
-		this.closeTask(taskId);
+		this.tasks.delete(taskId);
 		this.unregister(target.instanceId, target.peer);
 		target.peer.close();
 		return false;
@@ -1156,9 +1131,16 @@ export class WeComGateway {
 			if (!userid || body?.chattype === "group") return;
 			const eligible = this.permitted(userid);
 			if (!eligible.length) return;
-			const msgId = typeof body?.msgid === "string" && body.msgid ? body.msgid : inbound.reqId;
-			if (this.firstSeen(msgId))
-				this.showPicker({ kind: "welcome", reqId: inbound.reqId, chat: { chatId: userid, chatType: 1 } }, eligible);
+			if (this.firstSeen(callbackId(body, inbound.reqId)))
+				this.showPicker(
+					{
+						kind: "welcome",
+						reqId: inbound.reqId,
+						chat: { chatId: userid, chatType: 1 },
+						deadline: Date.now() + EVENT_REPLY_MS,
+					},
+					eligible,
+				);
 			return;
 		}
 		if (eventType !== "disconnected_event") return;
@@ -1168,16 +1150,16 @@ export class WeComGateway {
 
 	private expire(): void {
 		const now = Date.now();
-		for (const [taskId, task] of [...this.tasks]) if (task.expiresAt < now) this.closeTask(taskId);
+		for (const [taskId, task] of [...this.tasks]) if (task.expiresAt < now) this.tasks.delete(taskId);
 		for (const [key, watch] of this.watches) if (watch.expiresAt < now) this.watches.delete(key);
 	}
 }
 
 /** When the question card cannot be shown: how a message names its session without one. */
 const ASK_FALLBACK = [
-	"这条消息没有发出，请指定会话：",
-	"1. 引用机器人发来的结果，再输入消息；卡片引用不了",
-	`2. 用命令：${sessionCommand("<id>", "send")}`,
+	"这条消息没有发出，请用命令指定会话：",
+	sessionCommand("<id>", "send"),
+	"session ID 写在会话的控制卡上",
 ].join("\n");
 /** What a card from an earlier version turns into when pressed: task_id only matters on a send. */
 const RETIRED_CARD: CardModel = {
@@ -1195,7 +1177,8 @@ const QUOTE_FAILED = "引用的消息或图片看不出是哪个在线会话";
 /** WeCom hands the bot nothing of a quoted card, so a card can never name its session this way. */
 const QUOTE_OPAQUE = "引用的是卡片：企业微信不给卡片内容，看不出是哪个会话";
 /** A session list redrawn after its last session left. */
-const NO_LISTED = "没有在线会话了；在 pi 中运行 /wecom-aibot connect 后再发 /wecom-aibot sessions";
+/** A list redrawn after its last session left; the note row is short. */
+const NO_LISTED = "没有在线会话了；在 pi 里 connect 后再列";
 const NO_ONLINE_SESSION = "当前没有在线的 pi 会话：最后一个会话已断开。请重新打开 pi 并运行 /wecom-aibot connect";
 
 /** Where a control card is recorded: its ID and the session it shows. */
@@ -1207,43 +1190,10 @@ function fingerprintKey(cardId: string, fingerprint: string): string {
 	return `${cardId}#${fingerprint}`;
 }
 
-function states(members: readonly Member[], busy: ReadonlyMap<string, boolean>) {
-	return members.map((member) => ({ source: member.source, busy: busy.get(member.instanceId) }));
-}
-
 function quotedMember(eligible: Member[], quoteText: string): Member | undefined {
 	const ids = quotedSessions(quoteText);
 	if (ids.length !== 1 || !ids[0]) return undefined;
 	return eligible.find((member) => member.source.sessionId === ids[0]);
-}
-
-function sessionSummary(member: Member, busy: boolean | undefined): string {
-	return `· ${display(member.source.directoryName)} · ${display(member.source.provider)} · ${display(member.source.modelName)} · ${stateLabel(busy)}`;
-}
-
-function sessionText(member: Member, busy: boolean | undefined): string {
-	return [
-		sessionSummary(member, busy),
-		"",
-		sessionCommand(member.source.sessionId, "send"),
-		sessionCommand(member.source.sessionId, "card"),
-		sessionCommand(member.source.sessionId, "cancel"),
-	].join("\n");
-}
-
-function sessionsText(eligible: Member[], busy: ReadonlyMap<string, boolean>): string {
-	if (!eligible.length) return "当前没有可用的在线会话。请先在 pi 中运行 /wecom-aibot connect";
-	const lines = [`当前有 ${eligible.length} 个在线会话：`];
-	for (const member of eligible) {
-		const entry = `${sessionSummary(member, busy.get(member.instanceId))}\n  session: ${member.source.sessionId}`;
-		if (Buffer.byteLength(lines.join("\n\n") + entry, "utf8") > 18_000) {
-			lines.push("（其余会话未显示，可先断开一些 pi）");
-			break;
-		}
-		lines.push(entry);
-	}
-	lines.push(`把任务发给其中一个：\n${sessionCommand("<上面的 session ID>", "send", "你的任务")}`);
-	return lines.join("\n\n");
 }
 
 /** Where a card event happened: the group it is in, or the single chat with its clicker. */
@@ -1262,11 +1212,9 @@ function identityText(identity: ChatIdentity): string {
 	].join("\n\n");
 }
 
-function display(value: string): string {
-	return [...value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")]
-		.slice(0, 60)
-		.join("")
-		.replace(/[\\`*_#[\]<>]/g, "\\$&");
+/** A callback's own ID, for dedup: its msgid, else the req_id it came with. */
+function callbackId(body: Record<string, unknown> | undefined, reqId: string): string {
+	return typeof body?.msgid === "string" && body.msgid ? body.msgid : reqId;
 }
 
 /** One waiting message per sender in each chat. */

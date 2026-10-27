@@ -10,17 +10,16 @@ import { type SessionState, sessionRow, stateOptions } from "./session-view.ts";
 export const ASK_MS = 4 * 60_000;
 export const ASK_CHOICES = 10;
 /** WeCom draws six rows; the sixth is a click's note. */
-export const ASK_ROWS = 5;
+const ASK_ROWS = 5;
 export const ASK_QUESTION = "target";
 export const SETTLED_ROW = "发送记录";
 
 export interface AskedMessage {
-	/** The message's callback req_id: its reply, the result, still uses it. */
+	/** The message's callback req_id: a reply saying why it was not sent uses it. */
 	reqId: string;
 	message: InboundMessage;
 	/** The dropdown's sessions, as fingerprints; a click without a choice means the first. */
 	choices: string[];
-	expiresAt: number;
 	timer: ReturnType<typeof setTimeout>;
 }
 

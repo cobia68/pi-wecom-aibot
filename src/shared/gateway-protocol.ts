@@ -18,7 +18,7 @@ import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComStat
 export const GATEWAY_PROTOCOL_VERSION = 13;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;
-export const IPC_MAX_BYTES = 1_048_576;
+const IPC_MAX_BYTES = 1_048_576;
 export const IPC_SEND_TIMEOUT_MS = WECOM_ACK_TIMEOUT_MS + 2_000;
 export const GATEWAY_IDLE_MS = 1_500;
 /** An incompatible gateway (other Secret, other protocol) may hold the endpoint this long, e.g. its idle exit, before a pi reports it. */
@@ -52,7 +52,7 @@ export interface SessionTarget {
 }
 
 /** What the gateway may ask one pi; none of them starts a turn. */
-export type BridgeRequestAction = "cancel" | "state" | "click";
+type BridgeRequestAction = "cancel" | "state" | "click";
 const BRIDGE_REQUEST_ACTIONS: readonly string[] = ["cancel", "state", "click"] satisfies BridgeRequestAction[];
 
 /** A button on one of this pi's cards: the key, who pressed it and where its card is. */
@@ -174,7 +174,7 @@ function endpointKey(botId: string): string {
 		.slice(0, 32);
 }
 
-export function validSource(value: unknown): value is SessionSource {
+function validSource(value: unknown): value is SessionSource {
 	if (!value || typeof value !== "object") return false;
 	const source = value as Record<string, unknown>;
 	return (
@@ -188,7 +188,24 @@ export function validSource(value: unknown): value is SessionSource {
 	);
 }
 
-export function validRegistration(value: unknown): value is GatewayRegistration {
+/** Only the known fields of a validated source, so nothing a client adds reaches routing state. */
+function copySource(source: SessionSource): SessionSource {
+	const { sessionId, provider, modelName, directoryName } = source;
+	return { sessionId, provider, modelName, directoryName };
+}
+
+function copyRegistration(registration: GatewayRegistration): GatewayRegistration {
+	const { instanceId, registrationId, source, config, identifyOnly } = registration;
+	return {
+		instanceId,
+		registrationId,
+		source: copySource(source),
+		config: { botId: config.botId, ...(config.allowedUserIds ? { allowedUserIds: [...config.allowedUserIds] } : {}) },
+		...(identifyOnly ? { identifyOnly: true } : {}),
+	};
+}
+
+function validRegistration(value: unknown): value is GatewayRegistration {
 	if (!value || typeof value !== "object") return false;
 	const registration = value as GatewayRegistration;
 	const cfg = registration.config;
@@ -213,7 +230,7 @@ export function validRegistration(value: unknown): value is GatewayRegistration 
 	);
 }
 
-export function validNotification(value: unknown): value is GatewayNotification {
+function validNotification(value: unknown): value is GatewayNotification {
 	if (!value || typeof value !== "object") return false;
 	const notification = value as GatewayNotification;
 	return (
@@ -289,7 +306,7 @@ export function validChat(value: unknown): value is ChatRef {
 	);
 }
 
-export function validTask(value: unknown): value is GatewayTask {
+function validTask(value: unknown): value is GatewayTask {
 	const task = value as GatewayTask | undefined;
 	const message = task?.message;
 	return (
@@ -315,7 +332,7 @@ export function validTask(value: unknown): value is GatewayTask {
 	);
 }
 
-export function validNonce(value: unknown): value is string {
+function validNonce(value: unknown): value is string {
 	return typeof value === "string" && /^[A-Za-z0-9-]{16,128}$/.test(value);
 }
 
@@ -357,7 +374,7 @@ export function verifyProof(proof: unknown, expected: string): boolean {
 
 export type FrameParse<Frame> = { ok: true; frame: Frame } | { ok: false; reason: string };
 
-export function isTaskState(value: unknown): value is TaskState {
+function isTaskState(value: unknown): value is TaskState {
 	return TASK_STATES.has(value as TaskState);
 }
 
@@ -379,13 +396,13 @@ export function parseClientFrame(value: unknown): FrameParse<ClientFrame> {
 			if (frame.resume !== undefined && typeof frame.resume !== "boolean") return reject("无效的恢复标记");
 			return accept({
 				type: "register",
-				registration: frame.registration,
+				registration: copyRegistration(frame.registration),
 				proof: frame.proof,
 				...(frame.resume === true ? { resume: true } : {}),
 			});
 		case "source":
 			if (!validSource(frame.source)) return reject("无效的会话来源");
-			return accept({ type: "source", source: frame.source });
+			return accept({ type: "source", source: copySource(frame.source) });
 		case "response": {
 			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
 			const response = frame.response as BridgeResponse | undefined;
@@ -553,42 +570,35 @@ export function readFrames(
 ): void {
 	socket.setEncoding("utf8");
 	let pending = "";
+	const drop = (error: unknown) => {
+		onError?.(error);
+		socket.destroy();
+	};
 	socket.on("data", (chunk: string) => {
 		pending += chunk;
 		let end = pending.indexOf("\n");
 		while (end >= 0) {
 			const line = pending.slice(0, end);
 			pending = pending.slice(end + 1);
-			if (Buffer.byteLength(line) > IPC_MAX_BYTES) {
-				onError?.(new Error("frame exceeds the IPC size limit"));
-				socket.destroy();
-				return;
-			}
+			if (Buffer.byteLength(line) > IPC_MAX_BYTES) return drop(new Error("frame exceeds the IPC size limit"));
 			let frame: unknown;
 			try {
 				frame = JSON.parse(line);
-				if (!frame || typeof frame !== "object" || Array.isArray(frame))
-					throw new Error("frame is not a JSON object");
 			} catch (error) {
-				onError?.(error);
-				socket.destroy();
-				return;
+				return drop(error);
 			}
+			if (!frame || typeof frame !== "object" || Array.isArray(frame))
+				return drop(new Error("frame is not a JSON object"));
 			// A handler bug must be visible: report it and drop the connection instead of reconnecting silently.
 			try {
 				receive(frame);
 			} catch (error) {
-				onError?.(error);
-				socket.destroy();
-				return;
+				return drop(error);
 			}
 			if (socket.destroyed) return;
 			end = pending.indexOf("\n");
 		}
-		if (Buffer.byteLength(pending) > IPC_MAX_BYTES) {
-			onError?.(new Error("frame exceeds the IPC size limit"));
-			socket.destroy();
-		}
+		if (Buffer.byteLength(pending) > IPC_MAX_BYTES) drop(new Error("frame exceeds the IPC size limit"));
 	});
 }
 

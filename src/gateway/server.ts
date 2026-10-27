@@ -14,7 +14,6 @@ import {
 	parseClientFrame,
 	readFrames,
 	type ServerFrame,
-	validRegistration,
 	verifyProof,
 	writeFrame,
 } from "../shared/gateway-protocol.ts";
@@ -125,11 +124,7 @@ export async function startGatewayServer(options: GatewayServerOptions): Promise
 		/** The shape is the parser's job; the phase order and the Secret are this connection's. */
 		function acceptHello(value: unknown): void {
 			const parsed = parseClientFrame(value);
-			if (!parsed.ok || parsed.frame.type !== "hello") {
-				fail("共享网关协议版本不兼容，请退出使用该机器人的全部 pi 后重新打开");
-				return;
-			}
-			if (parsed.frame.version !== GATEWAY_PROTOCOL_VERSION) {
+			if (!parsed.ok || parsed.frame.type !== "hello" || parsed.frame.version !== GATEWAY_PROTOCOL_VERSION) {
 				fail("共享网关协议版本不兼容，请退出使用该机器人的全部 pi 后重新打开");
 				return;
 			}
@@ -154,14 +149,9 @@ export async function startGatewayServer(options: GatewayServerOptions): Promise
 				fail("网关认证失败");
 				return;
 			}
-			const candidate = copyRegistration(frame.registration);
-			if (!candidate) {
-				fail("无效的 pi 注册信息");
-				return;
-			}
 			try {
-				gateway.register(candidate, peer, frame.resume === true);
-				registration = candidate;
+				gateway.register(frame.registration, peer, frame.resume === true);
+				registration = frame.registration;
 				socket.setTimeout(IPC_LEASE_MS);
 			} catch (error) {
 				fail(errorMessage(error));
@@ -245,12 +235,7 @@ export async function startGatewayServer(options: GatewayServerOptions): Promise
 	try {
 		if (filesystemSocket(options.endpoint)) await privateDirectory(dirname(options.endpoint));
 		if (!(await listen(server, options.endpoint))) return undefined;
-	} catch (error) {
-		close();
-		throw error;
-	}
-	server.on("error", close);
-	try {
+		server.on("error", close);
 		if (filesystemSocket(options.endpoint)) await chmod(options.endpoint, 0o600);
 	} catch (error) {
 		close();
@@ -258,24 +243,6 @@ export async function startGatewayServer(options: GatewayServerOptions): Promise
 	}
 	updateIdleTimer();
 	return { gateway, closed, close };
-}
-
-/** Only the known fields, so nothing a client adds reaches routing state. */
-function copyRegistration(value: unknown): GatewayRegistration | undefined {
-	if (!validRegistration(value)) return undefined;
-	const { instanceId, registrationId, source, config } = value;
-	return {
-		instanceId,
-		registrationId,
-		source: {
-			sessionId: source.sessionId,
-			provider: source.provider,
-			modelName: source.modelName,
-			directoryName: source.directoryName,
-		},
-		config: { botId: config.botId, ...(config.allowedUserIds ? { allowedUserIds: [...config.allowedUserIds] } : {}) },
-		...(value.identifyOnly ? { identifyOnly: true } : {}),
-	};
 }
 
 function filesystemSocket(endpoint: string): boolean {

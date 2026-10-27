@@ -95,7 +95,7 @@ const COMMANDS: CommandSpec[] = [
 			"重新读取配置，仅连接当前 session，不修改配置；接入配置不变时保留当前任务和待发通知",
 			"BotID、Secret 和默认推送目标必须齐全；目标可用 /wecom-aibot config --scope <global|session> whoami 识别保存，也可用 /wecom-aibot config --scope <global|session> set defaultChatId=<ID> 填写",
 			"注册与企微订阅均成功后，为默认聊天创建或复用本 session 的控制卡；重复接入、恢复同一 session 或网络重连不重发，卡片失败不撤销连接",
-			"控制卡只在点击后刷新；找不到旧卡时，在企微发 /wecom-aibot sessions，选择会话后点「打开控制卡」补发",
+			"控制卡只在点击后刷新；找不到旧卡时，在企微发 /wecom-aibot sessions，选择会话后点「打开会话」补发",
 			"每个 session 都需手动 /wecom-aibot connect，包括新建、恢复、分叉和重载；退出或切换会话时自动断开",
 			"凭据、白名单或默认目标变化后，connect 经确认撤销旧注册及其待处理工作；没有交互界面且有待处理工作时拒绝切换",
 		],
@@ -230,14 +230,40 @@ const CONFIG_SUBCOMMANDS: readonly ConfigSubcommand[] = [
 	},
 ];
 
-const CONFIG_ACTION_ROWS: [usage: string, description: string][] = [
-	["[--scope <global|session>] show", "查看配置；不写作用域时显示合并结果并标明来源"],
-	["--scope <global|session> edit", "交互编辑一层；还没有凭据时引导填写 BotID、Secret 和默认推送目标"],
-	["--scope <global|session> set 字段=值 …", "修改字段，未给出的字段保持不变"],
-	["--scope <global|session> unset 字段 …", "删除字段，重新继承下一层；关联组整组删除"],
-	["[--scope <global|session>] whoami", "发验证码识别聊天；写了作用域时确认后设为这一层的默认推送目标"],
-];
-const CONFIG_ACTIONS = ["show", "edit", "set", "unset", "whoami"];
+/** The config actions: their usage and help, and the short description completion shows. */
+const CONFIG_ACTION_TABLE = [
+	{
+		action: "show",
+		usage: "[--scope <global|session>] show",
+		help: "查看配置；不写作用域时显示合并结果并标明来源",
+		short: "查看配置",
+	},
+	{
+		action: "edit",
+		usage: "--scope <global|session> edit",
+		help: "交互编辑一层；还没有凭据时引导填写 BotID、Secret 和默认推送目标",
+		short: "交互编辑一层",
+	},
+	{
+		action: "set",
+		usage: "--scope <global|session> set 字段=值 …",
+		help: "修改字段，未给出的字段保持不变",
+		short: "修改字段：字段=值",
+	},
+	{
+		action: "unset",
+		usage: "--scope <global|session> unset 字段 …",
+		help: "删除字段，重新继承下一层；关联组整组删除",
+		short: "删除字段，重新继承",
+	},
+	{
+		action: "whoami",
+		usage: "[--scope <global|session>] whoami",
+		help: "发验证码识别聊天；写了作用域时确认后设为这一层的默认推送目标",
+		short: "发验证码识别聊天",
+	},
+] as const;
+const CONFIG_ACTIONS: readonly string[] = CONFIG_ACTION_TABLE.map((item) => item.action);
 /** The writes: each needs a target, `config --scope <global|session> <动作>`. */
 const SCOPED_ACTIONS = ["edit", "set", "unset"];
 
@@ -250,7 +276,7 @@ export function subcommandUsage(item: ConfigSubcommand): string {
 }
 
 export function configSubcommandLines(scope?: ConfigScope): string[] {
-	return alignedRows(configSubcommands(scope).map((item) => [subcommandUsage(item), item.description]));
+	return table(configSubcommands(scope).map((item) => [subcommandUsage(item), item.description]));
 }
 
 export type Invocation =
@@ -441,8 +467,7 @@ function parseConfigArgs(args: string[], options: Map<string, string>, positionO
 		kind: "error",
 		message: sentences(message, "查看帮助：/wecom-aibot config --help"),
 	});
-	const rejected = (problems: string[]) =>
-		error(sentences(problems.map((problem) => problem.replace(/。$/, "")).join("；"), "未做任何修改"));
+	const rejected = (problems: string[]) => error(sentences(problems.join("；"), "未做任何修改"));
 	const words = args.map((arg) => arg.toLowerCase());
 	const given = options.get("scope")?.toLowerCase();
 	if (given !== undefined && !isScope(given)) return error("--scope 只能是 global 或 session");
@@ -475,7 +500,7 @@ function parseConfigArgs(args: string[], options: Map<string, string>, positionO
 	// Only a given scope is part of the result: reading without one is a different request, not an empty scope.
 	const scoped = scope ? { scope } : {};
 	if (action === undefined) return { kind: "config", config: { action: "choose", ...scoped } };
-	if (!CONFIG_ACTIONS.includes(action)) return error(`未知动作 ${args[0]}；可用 show、edit、set、unset、whoami`);
+	if (!CONFIG_ACTIONS.includes(action)) return error(`未知动作 ${args[0]}；可用 ${CONFIG_ACTIONS.join("、")}`);
 	const needsScope = (example: string) =>
 		error(`${action} 需要 --scope：/wecom-aibot config --scope session ${action}${example}，或 --scope global`);
 	switch (action) {
@@ -537,14 +562,22 @@ function invalidOptionValues(command: CommandSpec, args: string[], options: Map<
 	return undefined;
 }
 
-function alignedRows(rows: [string, string][]): string[] {
-	const width = Math.max(0, ...rows.map(([key]) => visibleWidth(key)));
+/**
+ * Indented name/value rows; groups share one value column, measured in terminal cells so Chinese names align,
+ * and are parted by a blank line. A value's later lines stay under its first.
+ */
+export function table(...groups: [string, string][][]): string[] {
+	const shown = groups.filter((rows) => rows.length);
+	const width = Math.max(0, ...shown.flat().map(([name]) => visibleWidth(name)));
 	const gap = " ".repeat(width + 2);
-	return rows.flatMap(([key, value]) => {
-		const [first, ...rest] = value.split("\n");
-		const head = first ? `  ${key}${" ".repeat(width - visibleWidth(key))}  ${first}` : `  ${key}`;
-		return [head, ...rest.map((line) => `  ${gap}${line}`)];
-	});
+	return shown.flatMap((rows, index) => [
+		...(index ? [""] : []),
+		...rows.flatMap(([name, value]) => {
+			const [first, ...rest] = value.split("\n");
+			const head = first ? `  ${name}${" ".repeat(width - visibleWidth(name))}  ${first}` : `  ${name}`;
+			return [head, ...rest.map((line) => `  ${gap}${line}`)];
+		}),
+	]);
 }
 
 /** Width is taken over the whole list, so filtering it keeps the column still. */
@@ -560,11 +593,11 @@ function section(title: string, body: string[]): string[] {
 }
 
 function hasOptionsOrArgs(command: CommandSpec): boolean {
-	return command.options.length > 0 || command.maxArgs > 0 || command === CONFIG_COMMAND;
+	return command.options.length > 0 || command.maxArgs > 0;
 }
 
 function configPaths(): string[] {
-	return alignedRows([
+	return table([
 		["配置文件", CONFIG_FILE],
 		["会话覆盖", join(SESSIONS_DIR, "<session-id>.json")],
 	]);
@@ -580,7 +613,7 @@ function totalHelpText(): string {
 		"企业微信智能机器人 — /wecom-aibot 命令帮助",
 		"用法：/wecom-aibot [子命令] [参数] [--选项 值]",
 		...section("子命令", [
-			...alignedRows(COMMANDS.map((command) => [command.name, command.description])),
+			...table(COMMANDS.map((command) => [command.name, command.description])),
 			"",
 			"  不带子命令时弹出子命令菜单",
 			"  子命令的用法与选项：/wecom-aibot <子命令> --help（只显示帮助，不执行动作）",
@@ -604,7 +637,7 @@ function optionRows(command: CommandSpec): string[] {
 	]);
 	rows.push(["--help", "显示当前命令的帮助，不执行动作"]);
 	if (command.maxArgs) rows.push(["--", "结束选项解析，后面的值都作为位置参数"]);
-	return alignedRows(rows);
+	return table(rows);
 }
 
 function topicHelpText(topic: CommandSpec): string {
@@ -620,7 +653,7 @@ function topicHelpText(topic: CommandSpec): string {
 	if (topic.name === "test")
 		lines.push(
 			...section("推送目标", [
-				...alignedRows([["chatid", "单聊填企微 userid，群聊填群 chatid；与 pi 的 session ID 是不同的标识"]]),
+				...table([["chatid", "单聊填企微 userid，群聊填群 chatid；与 pi 的 session ID 是不同的标识"]]),
 				"  不清楚 chatid：运行 /wecom-aibot config whoami，再把显示的验证码发给机器人（群聊需 @机器人）",
 				"  示例",
 				"    /wecom-aibot test your-userid",
@@ -641,8 +674,8 @@ function configHelpText(): string {
 			"说明",
 			command.details.map((detail) => `  ${detail}`),
 		),
-		...section("动作", alignedRows(CONFIG_ACTION_ROWS)),
-		...section("字段", alignedRows(FIELDS.map((spec) => [spec.name, fieldText(spec)]))),
+		...section("动作", table(CONFIG_ACTION_TABLE.map((item): [string, string] => [item.usage, item.help]))),
+		...section("字段", table(FIELDS.map((spec) => [spec.name, fieldText(spec)]))),
 		...section("选项", optionRows(command)),
 		...section("示例", [
 			"  /wecom-aibot config --scope global edit",
@@ -767,13 +800,7 @@ function configCandidates(words: string[], current: string, scope?: string): Can
 	const candidates = (items: [value: string, description: string][]): Candidate[] =>
 		items.map(([value, description]) => ({ value, description }));
 	if (action === undefined)
-		return candidates([
-			["show", "查看配置"],
-			["edit", "交互编辑一层"],
-			["set", "修改字段：字段=值"],
-			["unset", "删除字段，重新继承"],
-			["whoami", "发验证码识别聊天"],
-		]);
+		return candidates(CONFIG_ACTION_TABLE.map((item): [string, string] => [item.action, item.short]));
 	const used = new Set(rest.map((word) => word.split("=")[0]));
 	if (action === "set") {
 		const equals = current.indexOf("=");

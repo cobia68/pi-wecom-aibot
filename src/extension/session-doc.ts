@@ -7,24 +7,15 @@
  * the cards' icon.
  */
 
-import { createHash, randomUUID } from "node:crypto";
-import {
-	closeSync,
-	existsSync,
-	mkdirSync,
-	openSync,
-	readFileSync,
-	renameSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { pluginDirectory } from "../shared/agent-path.ts";
 import type { SessionSource } from "../shared/notification-types.ts";
 import { errorMessage } from "../shared/text.ts";
 import { asRecord } from "../shared/wecom-protocol.ts";
+import { writeJson } from "./config.ts";
 import { DocError, type DocMcpClient, findField } from "./doc-mcp.ts";
 import type { PageNotice, PageRound } from "./session-data.ts";
 
@@ -96,10 +87,6 @@ export class SessionDoc {
 		this.now = options.now ?? Date.now;
 	}
 
-	get secretValues(): readonly string[] {
-		return this.options.mcp.secretValues;
-	}
-
 	/** The page a session already has; reading the record never calls the service, and never fails a card. */
 	pageUrl(sessionId: string): string | undefined {
 		try {
@@ -125,19 +112,16 @@ export class SessionDoc {
 	 */
 	async ensure(source: SessionSource, viewer?: string): Promise<string> {
 		const page = await this.ensurePage(source);
-		await Promise.allSettled([
-			this.ensureIcon(page.docid),
-			viewer ? this.ensureViewer(page.docid, viewer) : undefined,
-		]);
+		await this.besides(this.ensureIcon(page.docid), viewer ? this.ensureViewer(page.docid, viewer) : undefined);
 		return page.url;
 	}
 
 	/** Overwrite the session's page, creating the document and page on first use and granting `viewer` access. */
 	async write(source: SessionSource, markdown: string, viewer?: string): Promise<PageWrite> {
 		let page = await this.ensurePage(source);
-		const viewing = viewer ? this.ensureViewer(page.docid, viewer) : Promise.resolve();
-		// Alongside the page, not before it: the icon never fails a write. A write settles only after it,
-		// so no call of this write is left running once its caller has its answer.
+		// Alongside the page, not before it: neither the viewer nor the icon fails a write. A write settles only
+		// after both, so no call of this write is left running once its caller has its answer.
+		const viewing = viewer ? this.ensureViewer(page.docid, viewer) : undefined;
 		const icon = this.ensureIcon(page.docid);
 		try {
 			try {
@@ -150,9 +134,8 @@ export class SessionDoc {
 				await this.overwrite(page.docid, page.pageId, markdown);
 			}
 		} finally {
-			await Promise.allSettled([viewing, icon]);
+			await this.besides(viewing, icon);
 		}
-		await viewing;
 		await this.locked(() => {
 			const current = this.read();
 			const entry = current?.pages[source.sessionId];
@@ -162,6 +145,12 @@ export class SessionDoc {
 		});
 		if (page.created) void this.sweep(source.sessionId);
 		return { url: page.url, created: page.created };
+	}
+
+	/** Work done beside a page's (its viewer, the icon): it never fails the page, a failure is only logged. */
+	private async besides(...steps: (Promise<void> | undefined)[]): Promise<void> {
+		for (const step of await Promise.allSettled(steps))
+			if (step.status === "rejected") this.options.log(`会话文档附带操作失败：${errorMessage(step.reason)}`);
 	}
 
 	/** Delete every page this machine created for the bot; the document itself cannot be deleted. */
@@ -315,8 +304,15 @@ export class SessionDoc {
 	}
 
 	/** Pages nobody refreshed for PAGE_RETENTION_MS, swept after a new page so a click never waits for it. */
+	/** Started without waiting: it never rejects, every failure is logged. */
 	private async sweep(keep: string): Promise<void> {
-		const current = this.read();
+		let current: DocRecord | undefined;
+		try {
+			current = this.read();
+		} catch (error) {
+			this.options.log(`过期文档页未清理：${errorMessage(error)}`);
+			return;
+		}
 		if (!current) return;
 		const cutoff = this.now() - PAGE_RETENTION_MS;
 		for (const [sessionId, entry] of Object.entries(current.pages)) {
@@ -342,42 +338,48 @@ export class SessionDoc {
 			mkdirSync(join(this.file, ".."), { recursive: true });
 			renameSync(this.earlier, this.file);
 			this.options.log(`会话文档记录已改名为 ${this.file}`);
-		} catch {
-			// No earlier record, or another pi adopted it first.
+		} catch (error) {
+			// No earlier record, or another pi adopted it first; anything else would lose its pages.
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+				this.options.log(`旧的会话文档记录 ${this.earlier} 未能改名：${errorMessage(error)}`);
 		}
 	}
 
-	private read(): DocRecord | undefined {
+	/**
+	 * Every bot's entries. The file is the only record of the pages: a broken one is an error, never an empty
+	 * record, or a new document would be made and the other bots' pages written over.
+	 */
+	private readAll(): Record<string, unknown> {
 		this.adopt();
 		let text: string;
 		try {
 			text = readFileSync(this.file, "utf8");
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
 			throw new Error(`无法读取会话文档记录 ${this.file}：${errorMessage(error)}`);
 		}
-		const all = asRecord(parseJson(text));
-		const value = asRecord(all?.[this.bot]);
-		return value && validRecord(value) ? value : undefined;
+		let all: Record<string, unknown> | undefined;
+		try {
+			all = asRecord(JSON.parse(text));
+		} catch {
+			all = undefined;
+		}
+		if (!all) throw new Error(`会话文档记录 ${this.file} 已损坏：请修好或删除它`);
+		return all;
+	}
+
+	private read(): DocRecord | undefined {
+		const value = this.readAll()[this.bot];
+		if (value === undefined) return undefined;
+		const record = asRecord(value);
+		if (!record || !validRecord(record)) throw new Error(`会话文档记录 ${this.file} 中本机器人的一项已损坏`);
+		return record;
 	}
 
 	private save(next: DocRecord): void {
-		this.adopt();
-		let all: Record<string, unknown> = {};
-		try {
-			all = asRecord(parseJson(readFileSync(this.file, "utf8"))) ?? {};
-		} catch {
-			// A missing or broken file is replaced; only this bot's entry is ours to write.
-		}
+		const all = this.readAll();
 		all[this.bot] = next;
-		mkdirSync(join(this.file, ".."), { recursive: true });
-		const temporary = `${this.file}.${randomUUID()}.tmp`;
-		try {
-			writeFileSync(temporary, `${JSON.stringify(all, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-			renameSync(temporary, this.file);
-		} finally {
-			rmSync(temporary, { force: true });
-		}
+		writeJson(this.file, all, false);
 	}
 
 	/** One pi at a time reads and changes the record; a lock left by a crashed pi expires. */
@@ -523,12 +525,4 @@ function validRecord(value: Record<string, unknown>): value is DocRecord & Recor
 			typeof page.writtenAt === "number"
 		);
 	});
-}
-
-function parseJson(text: string): unknown {
-	try {
-		return JSON.parse(text);
-	} catch {
-		return undefined;
-	}
 }

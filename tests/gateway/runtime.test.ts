@@ -349,7 +349,7 @@ test("sessions lists each session's directory, state and model; its buttons are 
 	]);
 	assert.deepEqual(
 		card.button_list.map((button: { key: string }) => button.key.replace(/@[0-9a-f]{64}$/, "")),
-		["pick@show", "pick@send", "pick@model", "pick@abort"],
+		["pick@show", "pick@refresh"],
 	);
 });
 

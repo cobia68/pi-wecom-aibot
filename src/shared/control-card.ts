@@ -34,6 +34,9 @@ export function controlCardFor(cardId: unknown, sessionId: string): boolean {
 // ---------------------------------------------------------------- button keys
 
 /** pi owns what each does; the gateway forwards them. A key names the session its copy showed (controlKey). */
+/** A click without a card: the session publishes a new copy of its control card (企微 card, 打开会话). */
+export const PUBLISH_KEY = "control";
+
 export const CONTROL_KEYS = {
 	refresh: "refresh",
 	send: "send",

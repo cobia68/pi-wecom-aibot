@@ -199,6 +199,24 @@ const MODELS = [
 	{ provider: "p2", id: "deepseek-v4-flash" },
 ];
 
+test("no control card button is longer than four characters, in any of its modes", () => {
+	const views = [
+		{ status: "idle" as const },
+		{ status: "confirming" as const },
+		{ status: "confirming" as const, queued: 2 },
+		{ status: "idle" as const, choosing: "prompt" as const, prompts: ["继续"] },
+		{ status: "idle" as const, choosing: "model" as const, models: MODELS },
+		{
+			status: "idle" as const,
+			choosing: "model" as const,
+			models: Array.from({ length: 22 }, (_, index) => ({ provider: "p", id: `m-${index}` })),
+		},
+	];
+	for (const view of views)
+		for (const [, text] of buttons(sessionControlCard(source, view)))
+			assert.ok([...text].length <= 4, `${JSON.stringify(view).slice(0, 60)}: ${text}`);
+});
+
 test("切换模型 turns the card into the models, the one in use first and selected, with 确认切换 and 取消切换", () => {
 	const card = sessionControlCard(source, {
 		status: "running",

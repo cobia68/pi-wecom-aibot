@@ -10,8 +10,8 @@ export interface SessionSource {
 
 /**
  * result: a run's automatic answer; notice: wecom_send; test: /wecom-aibot test.
- * pi sends each as its session's control card (control), or a task's own stream ends with it. Without a card,
- * or when WeCom refuses it, the gateway sends the text as Markdown.
+ * pi sends each as its session's control card (control). Without a card, or when WeCom refuses it, the gateway
+ * sends the text as Markdown.
  */
 export type NotificationKind = "result" | "notice" | "test";
 
@@ -21,12 +21,12 @@ export interface GatewayNotification {
 	source: SessionSource;
 	/** Markdown body; a card shows a plain-text excerpt of it. */
 	text: string;
-	/** The card's headline; the gateway falls back to a title for the kind. */
+	/** The headline; the Markdown fallback opens with it in bold. */
 	title?: string;
 	aborted?: boolean;
 	/**
-	 * The notification as its session's control card (a new copy: a finished run's in its done state); the
-	 * gateway sends it instead of its own card. text stays the body: a task's stream and a refused card use it.
+	 * The notification as its session's control card (a new copy: a finished run's in its done state). text
+	 * stays the body: the card's page shows it, a refused card's Markdown carries it.
 	 */
 	control?: { cardId: string; card: CardModel };
 }

@@ -11,7 +11,7 @@ import type {
 	MessageStartEvent,
 	MessageUpdateEvent,
 } from "@earendil-works/pi-coding-agent";
-import { type CardModel, clamp, plainText, withNote } from "../shared/card.ts";
+import { type CardModel, clamp, firstLine, withNote } from "../shared/card.ts";
 import {
 	CONTROL_KEYS,
 	controlCardFor,
@@ -19,6 +19,7 @@ import {
 	MAX_PROMPTS,
 	MODEL_QUESTION,
 	PROMPT_QUESTION,
+	PUBLISH_KEY,
 	parseControlKey,
 	sessionFingerprint,
 } from "../shared/control-card.ts";
@@ -40,7 +41,7 @@ import { type Connection, connectionKey, type Settings } from "./config.ts";
 import { type BridgeConnectionStatus, ConnectionNotices } from "./connection-notices.ts";
 import type { ControlReceipts } from "./control-receipts.ts";
 import { type ControlStatus, promptOptions, sessionControlCard } from "./control-view.ts";
-import type { GatewayClientOptions } from "./gateway-client.ts";
+import { type GatewayClientOptions, whoamiCancelled } from "./gateway-client.ts";
 import { InboundContentPreparer, type PreparedInboundContent } from "./inbound/content.ts";
 import { type ModelChoice, modelOptions, modelPage } from "./model-options.ts";
 import {
@@ -70,6 +71,9 @@ const ABORT_CONFIRM_MS = 60_000;
 const MODEL_PAGES = 50;
 /** Cards whose offered next steps are remembered at once; an older card offers only controlPrompts. */
 const CARD_STEPS = 50;
+/** A task's first line in its result card's 窗口记录. */
+const SUBJECT_LENGTH = 24;
+const NO_MODELS = "没有可用的模型：先在 pi 里配置模型和密钥";
 
 /** What a click did, for the card's 窗口记录; `only`: in a group just the clicker's copy changes. */
 interface ClickAnswer {
@@ -94,7 +98,7 @@ interface BridgeTask {
 	/** pi never ran it. */
 	failed?: boolean;
 	notificationQueued?: boolean;
-	/** Sent from a control card's dropdown: no WeCom message, so no status to update; the result is a card. */
+	/** Sent from a control card's dropdown: no WeCom message, so no gateway task to report to. */
 	fromCard?: boolean;
 }
 
@@ -183,8 +187,7 @@ export class BridgeSession {
 			subscription: () => this.subscription,
 			context: () => this.host.context(),
 			send: (chat, notification) => this.client.notify(chat, notification),
-			controlCard: (ctx, outcome, note, source, steps) =>
-				this.publishedCard(ctx, outcome === "live" ? undefined : outcome, note, source, steps),
+			controlCard: (ctx, outcome, note, source, steps) => this.publishedCard(ctx, outcome, note, source, steps),
 			log: (line) => this.host.log(line),
 			notify: (message, type) => this.host.notify(message, type),
 		});
@@ -195,7 +198,7 @@ export class BridgeSession {
 			live: () => !this.disposed && !this.identifyOnly,
 			context: () => this.host.context(),
 			doc: () => this.host.doc(),
-			running: (ctx) => this.busy || !ctx.isIdle(),
+			running: () => this.busy,
 			maskText: (text) => this.host.maskText(text),
 			log: (line) => this.host.log(line),
 		});
@@ -246,10 +249,12 @@ export class BridgeSession {
 	}
 	/** pi is running, or this bridge still holds a WeCom task: a task sent now would wait. */
 	get busy(): boolean {
+		return this.occupied || this.queue.length > 0;
+	}
+	/** Something runs now: this bridge's task, pi's settling, or a run of pi's own. */
+	private get occupied(): boolean {
 		const ctx = this.host.context();
-		return (
-			(ctx !== undefined && !ctx.isIdle()) || this.host.settling() || !!this.currentTask || this.queue.length > 0
-		);
+		return !!this.currentTask || this.host.settling() || (ctx !== undefined && !ctx.isIdle());
 	}
 	get pendingNotifications(): number {
 		return this.outbox.size + (this.identifyOnly ? 0 : this.host.receipts().pending);
@@ -303,9 +308,7 @@ export class BridgeSession {
 			return;
 		}
 		if (request.action === "click") {
-			// The gateway already applied every pi's allowlist; this pi checks its own configuration again.
-			const allowed = this.connection.allowedUserIds;
-			if (allowed?.length && !allowed.includes(request.click.userid)) {
+			if (!this.allows(request.click.userid)) {
 				this.host.log("ignored card click from non-allowlisted user");
 				answer({ ok: true });
 				return;
@@ -395,8 +398,8 @@ export class BridgeSession {
 					return { note: "不支持的按钮" };
 			}
 		}
-		// Without a card ID, the only key is the card command's: publish a new copy of this session's card.
-		if (key !== "control") return { note: "不支持的按钮" };
+		// Without a card ID, the only key is the one that publishes a new copy of this session's card.
+		if (key !== PUBLISH_KEY) return { note: "不支持的按钮" };
 		void this.sendControl(chat, true, "已补发控制卡").catch((error: unknown) => {
 			const outcome = deliveryFailure(error);
 			const status = outcome === "unknown" ? "发送结果未知" : outcome === "rejected" ? "被拒绝" : "尚未发出";
@@ -413,8 +416,7 @@ export class BridgeSession {
 	}
 
 	private chooseModel(ctx: ExtensionContext, click: CardClick): ClickAnswer {
-		const models = this.host.models(ctx);
-		if (!models.length) return { note: "没有可用的模型：先在 pi 里配置模型和密钥" };
+		if (!this.host.models(ctx).length) return { note: NO_MODELS };
 		this.rememberModelPage(click, 0);
 		return {
 			note: "选好模型后点「确认切换」；正在跑的一轮不变，下一轮起用新模型",
@@ -427,7 +429,7 @@ export class BridgeSession {
 	/** 上一页 / 下一页, wrapping round at either end. */
 	private turnModels(ctx: ExtensionContext, click: CardClick, step: 1 | -1): ClickAnswer {
 		const all = modelOptions(this.host.models(ctx), ctx.model);
-		if (!all.options.length) return { note: "没有可用的模型：先在 pi 里配置模型和密钥" };
+		if (!all.options.length) return { note: NO_MODELS };
 		const { pages } = modelPage(all);
 		const page = ((this.modelPages.get(modelKey(click)) ?? 0) + step + pages) % pages;
 		this.rememberModelPage(click, page);
@@ -459,14 +461,15 @@ export class BridgeSession {
 		const id = click.selections?.[MODEL_QUESTION] ?? shown.selected ?? shown.options[0]?.id;
 		const option = options.find((item) => item.id === id);
 		if (!option) return options.length ? "模型列表已变化，请重新点「切换模型」" : "没有可用的模型";
+		// The note row is short: what happened goes first, the model's long name last, where a cut costs least.
 		if (id === selected) return `模型没有改：仍是 ${option.text}`;
 		try {
-			if (!(await this.host.setModel(ctx, option.model))) return `没有切换：${option.model.provider} 没有配置密钥`;
+			if (!(await this.host.setModel(ctx, option.model))) return `没有切换：缺少密钥 · ${option.model.provider}`;
 		} catch (error) {
 			return `没有切换：${errorMessage(error)}`;
 		}
 		this.updateSource(ctx);
-		return ctx.isIdle() ? `已切换到 ${option.text}` : `已切换到 ${option.text}，下一轮起生效`;
+		return ctx.isIdle() ? `已切换到 ${option.text}` : `下一轮起换成 ${option.text}`;
 	}
 
 	/** One model per viewer: only who pressed 中止 sees 确认中止, only who chooses sees the list. */
@@ -487,7 +490,7 @@ export class BridgeSession {
 		const pageUrl = this.page.url();
 		const icon = this.page.icon();
 		return sessionControlCard(options.source ?? captureSessionSource(ctx), {
-			status: options.status ?? this.controlStatus(ctx, options.viewer, options.chat),
+			status: options.status ?? this.controlStatus(options.viewer, options.chat),
 			prompts: this.promptsFor(options.cardId),
 			queued: this.waiting,
 			...(options.choosing ? { choosing: options.choosing } : {}),
@@ -505,8 +508,9 @@ export class BridgeSession {
 	}
 
 	/**
-	 * Everything pi publishes but a task's own reply: a new copy of this session's control card, 窗口记录 saying
-	 * why it is here; `status` is a finished run's, else live. The page is rewritten at once for its quote.
+	 * Everything pi publishes (a result, a notice, the deployment test): a new copy of this session's control
+	 * card, 窗口记录 saying why it is here; `status` is a finished run's, else live. The page is rewritten at once
+	 * for its quote.
 	 */
 	private publishedCard(
 		ctx: ExtensionContext,
@@ -516,7 +520,7 @@ export class BridgeSession {
 		steps?: readonly string[],
 	): GatewayNotification["control"] {
 		if (this.identifyOnly) return undefined;
-		this.readScreen(ctx, "control card without a fresh screen");
+		this.readScreen(ctx);
 		const cardId = controlCardId(this.sessionId);
 		if (steps?.length) this.rememberSteps(cardId, steps);
 		const card = withNote(this.controlCard(ctx, { status, source, cardId }), note);
@@ -535,31 +539,33 @@ export class BridgeSession {
 		return [...new Set([...steps, ...this.host.settings().controlPrompts])].slice(0, MAX_PROMPTS);
 	}
 
-	/** The terminal now, for the card's three lines and the page; without one (RPC, print) the last stays. */
-	private readScreen(ctx: ExtensionContext, failure: string): void {
+	/**
+	 * The terminal now, for the card's three lines and the page; without one (RPC, print) the last stays and
+	 * the reason is returned.
+	 */
+	private readScreen(ctx: ExtensionContext): string | undefined {
 		try {
 			this.screen = { at: new Date(), lines: this.host.screenLines(ctx) };
+			return undefined;
 		} catch (error) {
-			this.host.log(`${failure}: ${errorMessage(error)}`);
+			const reason = errorMessage(error);
+			this.host.log(`control card without a fresh screen: ${reason}`);
+			return reason;
 		}
 	}
 
-	private controlStatus(ctx: ExtensionContext, viewer?: string, chat?: ChatRef): ControlStatus {
+	private controlStatus(viewer?: string, chat?: ChatRef): ControlStatus {
 		const pending = this.pendingAbort;
 		if (pending && viewer === pending.userid && chat && chatKey(chat) === pending.chat && Date.now() < pending.until)
 			return "confirming";
 		if (this.page.problem) return "doc-problem";
-		return this.busy || !ctx.isIdle() ? "running" : "idle";
+		return this.busy ? "running" : "idle";
 	}
 
 	/** The card's three lines from the terminal at once, then the page. */
 	private async refreshControl(ctx: ExtensionContext, viewer: string): Promise<string> {
-		try {
-			this.screen = { at: new Date(), lines: this.host.screenLines(ctx) };
-		} catch (error) {
-			return `画面读取失败：${errorMessage(error)}`;
-		}
-		return this.page.refresh(viewer);
+		const unread = this.readScreen(ctx);
+		return unread ? `画面读取失败：${unread}` : this.page.refresh(viewer);
 	}
 
 	autoWritePage(): void {
@@ -583,16 +589,22 @@ export class BridgeSession {
 			chatId: click.chat.chatId,
 			chatType: click.chat.chatType,
 			userid: click.userid,
-			subject: subjectOf(option.prompt),
+			subject: firstLine(option.prompt, SUBJECT_LENGTH),
 			label: `${click.chat.chatType === 2 ? "group" : "single"}/card`,
 			fromCard: true,
 			prepared: { content: [{ type: "text", text: option.prompt }], label: "card/prompt", release() {} },
 		};
-		const ahead = this.queue.length + (this.currentTask || this.host.settling() || !ctx.isIdle() ? 1 : 0);
+		const ahead = this.queue.length + (this.occupied ? 1 : 0);
 		this.queue.push(task);
 		this.host.log(`queued card prompt (queue=${this.queue.length})`);
 		this.scheduleDrain();
 		return ahead ? `已排队「${option.text}」，前面 ${ahead} 条` : `已发送「${option.text}」`;
+	}
+
+	/** The gateway applied every pi's allowlist already; this pi checks its own configuration again. */
+	private allows(userid: string): boolean {
+		const allowed = this.connection.allowedUserIds;
+		return !allowed?.length || allowed.includes(userid);
 	}
 
 	private requestAbort(ctx: ExtensionContext, click: CardClick): ClickAnswer {
@@ -601,20 +613,15 @@ export class BridgeSession {
 			return { note: "当前没有运行中的任务" };
 		}
 		this.pendingAbort = { userid: click.userid, chat: chatKey(click.chat), until: Date.now() + ABORT_CONFIRM_MS };
-		const waiting = this.waiting;
 		return {
-			note: waiting
-				? `60 秒内选：「确认中止」只停这一轮，「全部中止」连排队的 ${waiting} 条一起清掉，「清空排队」只清排队`
-				: "60 秒内点「确认中止」才会中止",
+			note: this.waiting ? "60 秒内选；「确认中止」只停这一轮" : "60 秒内点「确认中止」才会中止",
 			only: true,
 		};
 	}
 
 	/** Tasks behind the current run; with nothing running, the queue's head is about to start, so it is not waiting. */
 	private get waiting(): number {
-		const ctx = this.host.context();
-		const running = !!this.currentTask || this.host.settling() || (ctx !== undefined && !ctx.isIdle());
-		return Math.max(0, this.queue.length - (running ? 0 : 1));
+		return Math.max(0, this.queue.length - (this.occupied ? 0 : 1));
 	}
 
 	/** run: this run only; all: this run and the queue; queue: the queue only. Asked for by 中止任务 first. */
@@ -667,7 +674,7 @@ export class BridgeSession {
 						return ctx;
 					};
 					const before = live();
-					this.readScreen(before, "control card without a fresh screen");
+					this.readScreen(before);
 					await this.page.ensure(before, chat);
 					// Making the page may take seconds: the registration is checked again.
 					const ctx = live();
@@ -712,14 +719,18 @@ export class BridgeSession {
 
 	// ---------------------------------------------------------------- the pi run of the active task
 	messageStart(event: MessageStartEvent, ctx: ExtensionContext): void {
-		if (this.currentTask && this.currentTask.source.sessionId !== ctx.sessionManager.getSessionId()) {
-			this.host.stop("target session changed");
-			return;
-		}
+		if (this.taskMoved(ctx)) return;
 		if (this.currentTask && this.currentTask.result === undefined && event.message.role === "assistant") {
 			this.currentTask.source = { ...this.currentTask.source, ...captureModelIdentity(ctx, event.message) };
 			this.streamText = this.finalText = "";
 		}
+	}
+
+	/** The active task belongs to a session pi has left: forwarding stops. */
+	private taskMoved(ctx: ExtensionContext): boolean {
+		if (!this.currentTask || this.currentTask.source.sessionId === ctx.sessionManager.getSessionId()) return false;
+		this.host.stop("target session changed");
+		return true;
 	}
 
 	messageUpdate(event: MessageUpdateEvent): void {
@@ -729,10 +740,7 @@ export class BridgeSession {
 	}
 
 	messageEnd(event: MessageEndEvent, ctx: ExtensionContext): void {
-		if (this.currentTask && this.currentTask.source.sessionId !== ctx.sessionManager.getSessionId()) {
-			this.host.stop("target session changed");
-			return;
-		}
+		if (this.taskMoved(ctx)) return;
 		if (!this.currentTask || this.currentTask.result !== undefined) return;
 		if (event.message?.role !== "assistant") return;
 		this.currentTask.source = { ...this.currentTask.source, ...captureModelIdentity(ctx, event.message) };
@@ -819,14 +827,11 @@ export class BridgeSession {
 		const ctx = options.ctx ?? this.host.context();
 		if (!ctx || ctx.sessionManager.getSessionId() !== this.sessionId)
 			throw new Error("pi session_id 已改变，已取消通知");
-		// A notice or the deployment test is this session's control card too, drawn as the terminal is now.
-		if (!notification.control && notification.kind !== "result") {
-			const control = this.publishedCard(ctx, undefined, noteOf(notification), notification.source, options.steps);
-			if (control) notification = { ...notification, control };
-		}
 		if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId)
 			throw new Error("pi 会话已停止或切换，已取消通知");
-		await this.client.notify(chat, notification);
+		// A notice or the deployment test is this session's control card, drawn as the terminal is now.
+		const control = this.publishedCard(ctx, undefined, noteOf(notification), notification.source, options.steps);
+		await this.client.notify(chat, control ? { ...notification, control } : notification);
 	}
 
 	// ---------------------------------------------------------------- whoami
@@ -840,7 +845,7 @@ export class BridgeSession {
 				if (error) reject(error);
 				else resolve();
 			};
-			const onAbort = () => finish(signal.reason instanceof Error ? signal.reason : abortError());
+			const onAbort = () => finish(signal.reason instanceof Error ? signal.reason : whoamiCancelled());
 			const timer = setTimeout(
 				() =>
 					finish(
@@ -883,15 +888,7 @@ export class BridgeSession {
 					for (const chat of this.host.receipts().retryable(this.connection.botId)) this.ensureControl(chat);
 				}
 				if (this.currentTask?.result !== undefined) this.finishTask();
-				const ctx = this.host.context();
-				if (ctx)
-					void this.outbox
-						.prepare(ctx, false, "ready")
-						.catch((err: unknown) => this.host.log(`notification preparation failed: ${errorMessage(err)}`));
-				else
-					void this.outbox
-						.flush()
-						.catch((err: unknown) => this.host.log(`notification flush failed: ${errorMessage(err)}`));
+				this.deliverOutbox();
 				this.scheduleDrain();
 			}
 		}
@@ -911,8 +908,7 @@ export class BridgeSession {
 
 	private async accept(ctx: ExtensionContext, task: GatewayTask): Promise<void> {
 		const message = task.message;
-		// The gateway already applied every pi's allowlist; this pi checks its own configuration again.
-		if (this.connection.allowedUserIds?.length && !this.connection.allowedUserIds.includes(message.userid)) {
+		if (!this.allows(message.userid)) {
 			this.host.log("ignored message from non-allowlisted user");
 			return;
 		}
@@ -923,7 +919,7 @@ export class BridgeSession {
 			chatId: message.chat.chatId,
 			chatType: message.chat.chatType,
 			userid: message.userid,
-			subject: subjectOf(message.text),
+			subject: firstLine(message.text, SUBJECT_LENGTH),
 			label: `${message.chat.chatType === 2 ? "group" : "single"}/${message.msgtype}`,
 		};
 		if (this.queue.length >= MAX_QUEUE_SIZE) {
@@ -972,7 +968,7 @@ export class BridgeSession {
 		}, delay);
 	}
 
-	/** The gateway owns the message's reply; a card's prompt has none, its result is a card. */
+	/** A message's task is reported to the gateway, which answers the message when it did not run; a card's prompt has no gateway task. */
 	private report(task: BridgeTask, taskState: TaskState): boolean {
 		if (task.fromCard) return true;
 		return this.client.taskStatus(task.taskId, taskState);
@@ -1040,15 +1036,14 @@ export class BridgeSession {
 		task.aborted = false;
 		task.failed = true;
 		this.finishTask();
+		this.deliverOutbox();
+	}
+
+	/** Results ready to go are sent now: with pi's context they are drawn first, else only what is drawn goes. */
+	private deliverOutbox(): void {
 		const ctx = this.host.context();
-		if (ctx)
-			void this.outbox
-				.prepare(ctx, false, "ready")
-				.catch((err: unknown) => this.host.log(`notification preparation failed: ${errorMessage(err)}`));
-		else
-			void this.outbox
-				.flush()
-				.catch((err: unknown) => this.host.log(`notification flush failed: ${errorMessage(err)}`));
+		const step = ctx ? this.outbox.prepare(ctx, false, "ready") : this.outbox.flush();
+		void step.catch((err: unknown) => this.host.log(`notification delivery failed: ${errorMessage(err)}`));
 	}
 
 	private finishTask(): void {
@@ -1074,18 +1069,6 @@ export class BridgeSession {
 		this.streamText = this.finalText = "";
 		this.scheduleDrain();
 	}
-}
-
-export function abortError(): Error {
-	return Object.assign(new Error("whoami 已取消"), { name: "AbortError" });
-}
-
-/** The task's first line, as plain text short enough for a card title. */
-function subjectOf(text: string): string | undefined {
-	const line = plainText(text)
-		.split("\n")
-		.find((item) => item.trim());
-	return line ? clamp(line, 24) : undefined;
 }
 
 function resultTitle(task: BridgeTask): string {

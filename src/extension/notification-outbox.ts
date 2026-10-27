@@ -44,9 +44,9 @@ export interface OutboxHost {
 	 * The notification as a new copy of the session's control card, `note` in its 窗口记录, its page showing
 	 * the body; undefined (or a throw) leaves the gateway to send the body as Markdown.
 	 */
-	controlCard?(
+	controlCard(
 		ctx: ExtensionContext,
-		outcome: RunOutcome | "live",
+		outcome: RunOutcome,
 		note: string,
 		source?: SessionSource,
 		steps?: readonly string[],
@@ -99,8 +99,10 @@ export class NotificationOutbox {
 				const request = entry.request;
 				// A readiness change is not the end of a run: scheduled completions still wait for agent_settled.
 				if (boundary === "ready" && request.result === undefined) continue;
-				if (request.source.sessionId !== ctx.sessionManager.getSessionId())
-					throw new Error("pi session_id 已改变，已取消通知");
+				if (request.source.sessionId !== ctx.sessionManager.getSessionId()) {
+					this.cancel(key, entry, new Error("pi session_id 已改变，已取消通知"));
+					continue;
+				}
 				const answer =
 					request.content === undefined && request.result === undefined
 						? latestAssistantReply(ctx.sessionManager.getBranch(), request.afterEntryId)
@@ -109,6 +111,7 @@ export class NotificationOutbox {
 				const ended = request.aborted ?? aborted;
 				// An extracted completion is titled by how its run ended, known only now.
 				const title = request.title ?? (request.content === undefined ? completionTitle(ended) : undefined);
+				// A result never carries content, so it always has a title here.
 				const kind = request.result !== undefined ? "result" : "notice";
 				// The card offers the body's next steps; nothing sent carries their comment.
 				const body = splitNextSteps(request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT);
@@ -116,7 +119,7 @@ export class NotificationOutbox {
 				const control = this.controlCard(
 					ctx,
 					request.failed ? "failed" : ended ? "aborted" : "done",
-					kind === "result" ? (title ?? completionTitle(ended)) : noteOf({ kind, title }),
+					kind === "result" ? (title as string) : noteOf({ kind, title }),
 					request.source,
 					body.steps,
 				);
@@ -135,7 +138,7 @@ export class NotificationOutbox {
 
 	async flush(): Promise<void> {
 		if (this.disposed) return;
-		// Transfer only when ready: queueResult must still find a completion prepared offline, or the run gets two replies.
+		// Transfer only when ready: queueResult must still find a completion prepared offline, or the run gets two cards.
 		if (this.host.isReady())
 			for (const [key, entry] of this.waiting) {
 				if (entry.phase.kind !== "ready") continue;
@@ -205,7 +208,7 @@ export class NotificationOutbox {
 		steps: readonly string[],
 	): GatewayNotification["control"] {
 		try {
-			return this.host.controlCard?.(ctx, outcome, note, source, steps);
+			return this.host.controlCard(ctx, outcome, note, source, steps);
 		} catch (error) {
 			this.host.log(`sent as Markdown: the control card could not be drawn: ${errorMessage(error)}`);
 			return undefined;

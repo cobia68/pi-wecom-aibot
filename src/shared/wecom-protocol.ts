@@ -71,7 +71,7 @@ export function parseInbound(value: unknown): InboundMessage | undefined {
 }
 
 /** Plain text of a message or quote; images and files become placeholders. undefined when malformed. */
-export function messageText(value: unknown): string | undefined {
+function messageText(value: unknown): string | undefined {
 	const node = asRecord(value);
 	switch (node?.msgtype) {
 		case "text":

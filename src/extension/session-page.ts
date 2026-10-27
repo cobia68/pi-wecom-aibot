@@ -24,7 +24,8 @@ export interface SessionPageHost {
 	live(): boolean;
 	context(): ExtensionContext | undefined;
 	doc(): SessionDoc | undefined;
-	running(ctx: ExtensionContext): boolean;
+	/** pi is busy with a run or this bridge's tasks. */
+	running(): boolean;
 	maskText(text: string): string;
 	log(line: string): void;
 }
@@ -52,7 +53,7 @@ export class SessionPage {
 	async ensure(ctx: ExtensionContext, chat: ChatRef): Promise<void> {
 		const doc = this.host.doc();
 		if (!doc) return;
-		const made = doc.ensure(captureSessionSource(ctx), chat.chatType === 1 ? chat.chatId : undefined).then(
+		const settled = doc.ensure(captureSessionSource(ctx), chat.chatType === 1 ? chat.chatId : undefined).then(
 			() => true,
 			(error: unknown) => {
 				this.problem = true;
@@ -60,7 +61,7 @@ export class SessionPage {
 				return true;
 			},
 		);
-		if (!(await within(made, PAGE_WAIT_MS, false)))
+		if (!(await within(settled, PAGE_WAIT_MS, false)))
 			this.host.log(`文档页 ${PAGE_WAIT_MS / 1000} 秒内没建好，控制卡先不带链接；页面建好后，之后的卡片带上`);
 	}
 
@@ -110,7 +111,7 @@ export class SessionPage {
 		try {
 			const source = captureSessionSource(ctx);
 			const { rounds, notices } = pageActivity(ctx.sessionManager.getBranch());
-			const running = this.host.running(ctx);
+			const running = this.host.running();
 			const content = pageMarkdown(source, {
 				state: running ? "执行中" : "空闲",
 				at: new Date(),

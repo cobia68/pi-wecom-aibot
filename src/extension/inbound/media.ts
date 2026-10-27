@@ -1,8 +1,8 @@
 /** WeCom media callbacks carry { url, aeskey }: a 5-minute download link to a payload encrypted with that key. */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { decryptAes256Cbc, parseAesKey } from "../../shared/media-crypto.ts";
+import { decryptAes256Cbc, parseAesKey } from "./media-crypto.ts";
 
 export interface DownloadedMedia {
 	buffer: Buffer;
@@ -33,7 +33,7 @@ export async function downloadAndDecrypt(
 		throw new Error(`download failed: HTTP ${res.status}`);
 	}
 	if (Number(res.headers.get("content-length")) > maxBytes) {
-		await res.body?.cancel();
+		await res.body?.cancel().catch(() => {});
 		throw new Error("media download exceeds size limit");
 	}
 	const chunks: Uint8Array[] = [];
@@ -95,7 +95,7 @@ const EXT_BY_MIME: Record<string, string> = {
 	"text/markdown": "md",
 };
 
-export function extensionFor(mimeType: string): string {
+function extensionFor(mimeType: string): string {
 	return EXT_BY_MIME[mimeType] ?? mimeType.split("/")[1]?.replace(/[^a-z0-9]/gi, "") ?? "bin";
 }
 
@@ -106,7 +106,6 @@ export async function saveMedia(
 	signal?: AbortSignal,
 ): Promise<string> {
 	signal?.throwIfAborted();
-	await mkdir(dir, { recursive: true });
 	const safe = baseName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80) || "media";
 	const file = join(dir, `${safe}.${extensionFor(media.mimeType)}`);
 	await writeFile(file, media.buffer, { signal });

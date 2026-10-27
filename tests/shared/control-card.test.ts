@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { sessionControlCard } from "../../src/extension/control-view.ts";
-import { validCardModel } from "../../src/shared/card.ts";
+import { renderCard, validCardModel, withNote } from "../../src/shared/card.ts";
 import { controlCardFor, controlCardId, isControlCardId } from "../../src/shared/control-card.ts";
 import { parseClientFrame, parseServerFrame } from "../../src/shared/gateway-protocol.ts";
 
@@ -12,6 +12,27 @@ const card = sessionControlCard(
 	{ sessionId, directoryName: "project", provider: "provider", modelName: "model" },
 	{ status: "idle", pageUrl: "https://doc.weixin.qq.com/smartpage/a1_doc?p=page" },
 );
+
+test("a button shows four characters at most, and a note row keeps the short notes whole", () => {
+	const drawn: any = renderCard(
+		{
+			...card,
+			actions: [
+				{ key: "a", text: "打开控制卡" },
+				{ key: "b", text: "打开会话" },
+			],
+		},
+		cardId,
+	);
+	assert.deepEqual(
+		drawn.button_list.map((button: { text: string }) => button.text),
+		["打开控…", "打开会话"],
+	);
+	for (const note of ["60 秒内选；「确认中止」只停这一轮", "没有在线会话了；在 pi 里 connect 后再列"]) {
+		const row: any = renderCard(withNote(card, note), cardId);
+		assert.equal(row.horizontal_content_list.at(-1).value.endsWith(note), true, note);
+	}
+});
 
 test("control IDs have a bounded safe wire representation and name their session even for custom IDs", () => {
 	for (const id of ["session-A", "会话/特殊@标识", "x".repeat(256)]) {
@@ -93,6 +114,9 @@ test("malformed or oversized card models are rejected before the gateway renders
 		{ ...card, quoteUrl: "http://doc.weixin.qq.com/insecure" },
 		{ ...card, icon: "http://pi.dev/logo-auto.svg" },
 		{ ...card, quoteLimit: 0 },
+		// The renderer cuts the subtitle as text: anything else would throw there, on a click's redraw.
+		{ ...card, subtitle: 5 },
+		{ ...card, subtitle: {} },
 		{ ...card, noteKey: "" },
 		{ ...card, noteKey: "x".repeat(17) },
 		{ ...card, quoteLimit: 1.5 },

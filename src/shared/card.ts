@@ -58,7 +58,8 @@ const LIMITS = {
 	quote: 200,
 	factKey: 5,
 	factValue: 40,
-	button: 10,
+	/** Two buttons a row: a phone showed four characters whole, not five (WeCom advises up to 10). */
+	button: 4,
 	facts: 6,
 	buttons: 6,
 	selectionTitle: 13,
@@ -88,7 +89,7 @@ export function validCardModel(value: unknown): value is CardModel {
 		!["neutral", "success", "danger"].includes(card.tone)
 	)
 		return false;
-	if (![card.desc, card.quote, card.text].every((value) => value === undefined || text(value))) return false;
+	if (![card.desc, card.quote, card.subtitle].every((value) => value === undefined || text(value))) return false;
 	if (card.quoteUrl !== undefined && !link(card.quoteUrl)) return false;
 	if (card.noteKey !== undefined && !(typeof card.noteKey === "string" && card.noteKey && card.noteKey.length <= 16))
 		return false;
@@ -104,7 +105,7 @@ export function validCardModel(value: unknown): value is CardModel {
 	if (card.icon !== undefined && !link(card.icon)) return false;
 	if (
 		!Array.isArray(card.facts) ||
-		card.facts.length > 6 ||
+		card.facts.length > LIMITS.facts ||
 		!card.facts.every((value) => {
 			const fact = asRecord(value);
 			return !!fact && text(fact.key) && text(fact.value);
@@ -112,7 +113,7 @@ export function validCardModel(value: unknown): value is CardModel {
 	)
 		return false;
 	if (card.selection !== undefined && !validSelection(card.selection)) return false;
-	if (!Array.isArray(card.actions) || card.actions.length > 6) return false;
+	if (!Array.isArray(card.actions) || card.actions.length > LIMITS.buttons) return false;
 	const keys = new Set<string>();
 	return card.actions.every((value) => {
 		const action = asRecord(value);
@@ -219,6 +220,14 @@ export function withNote(model: CardModel, note: string, at = new Date()): CardM
 	const facts = model.facts.filter((fact) => fact.key !== key);
 	facts.push({ key, value: `${clock(at)} ${note}` });
 	return { ...model, facts: facts.slice(-LIMITS.facts) };
+}
+
+/** A headline from Markdown: its first line with words, as plain text cut to `limit`. */
+export function firstLine(markdown: string, limit: number): string | undefined {
+	const line = plainText(markdown)
+		.split("\n")
+		.find((item) => item.trim());
+	return line ? clamp(line, limit) : undefined;
 }
 
 /** Card text is plain: Markdown markers are removed, code blocks become a placeholder. */

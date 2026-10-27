@@ -83,7 +83,7 @@ export function latestAssistantReply(
 }
 
 /** How many rounds, and how many wecom_send notices, a session's page shows. */
-export const PAGE_ROUNDS = 3;
+const PAGE_ROUNDS = 3;
 
 export interface PageRound {
 	/** When the round's prompt was given. */

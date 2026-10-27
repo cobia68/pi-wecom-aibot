@@ -22,7 +22,7 @@ function childrenOf(component: Component | undefined): Component[] | undefined {
 }
 
 /** The latest visible lines above the editor, with their ANSI styling, without changing focus or scroll. */
-export function readTerminal(root: TerminalRoot, marker: Component): string[] {
+function readTerminal(root: TerminalRoot, marker: Component): string[] {
 	const children = root.children;
 	if (
 		!Array.isArray(children) ||

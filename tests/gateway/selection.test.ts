@@ -200,7 +200,7 @@ test("a message without a session waits for one click, and the chosen pi answers
 	assert.equal(settled.quote_area.quote_text, "修一下构建");
 	const row = settled.horizontal_content_list.at(-1);
 	assert.equal(row.keyname, "发送记录");
-	assert.match(row.value, /已发出，跑完后回复你这条消息$/);
+	assert.match(row.value, /已发出，跑完后结果卡发到这个聊天$/);
 	// Nothing was remembered: the next message is asked about again, and the old card sends nothing more.
 	message("下一条");
 	await ready();
@@ -354,7 +354,7 @@ function pick(taskId: string, key: string, session?: string) {
 	});
 }
 
-test("the session list's buttons act on the session its dropdown names, as that control card's would", async () => {
+test("打开会话 asks the session the dropdown names for a new control card; the list stays, on that session", async () => {
 	const a = add("A");
 	const b = add("B");
 	await ready();
@@ -373,30 +373,46 @@ test("the session list's buttons act on the session its dropdown names, as that 
 	assert.deepEqual(
 		list.button_list.map((button: { key: string; text: string }) => [button.key, button.text]),
 		[
-			[`pick@show@${first}`, "查看会话"],
-			[`pick@send@${first}`, "发提示词"],
-			[`pick@model@${first}`, "切换模型"],
-			[`pick@abort@${first}`, "中止任务"],
+			[`pick@show@${first}`, "打开会话"],
+			[`pick@refresh@${first}`, "刷新列表"],
 		],
 	);
 	const forwarded = (peer: Peer) => {
 		const frame = peer.frames.filter((item) => item.type === "request").at(-1);
 		assert.ok(frame?.type === "request" && frame.request.action === "click");
-		return frame.request.click;
+		return { id: frame.id, click: frame.request.click };
 	};
-	// The dropdown names B: B gets its 发提示词, for the list's own copy, which becomes B's control card.
-	pick(list.task_id, `pick@send@${first}`, "session-B");
-	assert.equal(forwarded(b).key, `send@${sessionFingerprint("session-B")}`);
-	assert.equal(forwarded(b).cardId, list.task_id);
-	// Left as drawn: the first row, A; 查看会话 only opens its card. A list from before names no session: the same.
-	pick(list.task_id, `pick@show@${first}`);
-	assert.equal(forwarded(a).key, `show@${first}`);
-	pick(list.task_id, "pick@show");
-	assert.equal(forwarded(a).key, `show@${first}`);
+	// The dropdown names B: B is asked to publish its card, as the card command does; no card ID goes with it.
+	pick(list.task_id, `pick@show@${first}`, "session-B");
+	const asked = forwarded(b);
+	assert.deepEqual(asked.click, { key: "control", userid: "alice", chat: { chatId: "alice", chatType: 1 } });
+	gateway.response("B", asked.id, { ok: true, note: "已请求补发控制卡；旧卡仍可操作同一会话" });
+	await ready();
+	const kept = updated().body.template_card;
+	assert.equal(kept.task_id, list.task_id, "the list itself is redrawn");
+	assert.equal(kept.button_selection.question_key, "pick", "still the list");
+	assert.equal(kept.button_selection.selected_id, sessionFingerprint("session-B"), "on the session opened");
+	assert.match(kept.horizontal_content_list.at(-1).value, /已打开「project-B · on-B」的控制卡$/);
+	// Buttons of the lists before open the control card too: of the session the list was drawn for.
+	pick(list.task_id, `pick@abort@${first}`);
+	assert.equal(forwarded(a).click.key, "control");
+	pick(list.task_id, "pick@send");
+	assert.equal(forwarded(a).click.key, "control");
+	// 刷新列表 asks every pi again and keeps the dropdown where it was.
+	pick(list.task_id, `pick@refresh@${first}`, "session-B");
+	await ready();
+	const refreshed = updated().body.template_card;
+	assert.equal(refreshed.button_selection.selected_id, sessionFingerprint("session-B"));
+	assert.match(refreshed.horizontal_content_list.at(-1).value, /已刷新$/);
+	// A session that refuses says why on the list.
+	pick(list.task_id, `pick@show@${first}`, "session-B");
+	gateway.response("B", forwarded(b).id, { ok: false, error: "pi 尚未正式接入" });
+	await ready();
+	assert.match(updated().body.template_card.horizontal_content_list.at(-1).value, /处理失败：pi 尚未正式接入$/);
 	// A choice gone offline redraws the list as it is now, with a note, and reaches no one.
 	const requests = a.frames.length;
 	gateway.unregister("A", a);
-	pick(list.task_id, `pick@abort@${first}`, "session-A");
+	pick(list.task_id, `pick@show@${first}`, "session-A");
 	await ready();
 	assert.equal(a.frames.length, requests);
 	const note = updated().body.template_card;
@@ -436,7 +452,7 @@ test("a list of more than five sessions turns its pages in place; in a group onl
 	]);
 	assert.deepEqual(
 		list.button_list.map((button: { text: string }) => button.text),
-		["查看会话", "发提示词", "上一页", "下一页"],
+		["打开会话", "刷新列表", "上一页", "下一页"],
 	);
 	click(list.task_id, "pick@next@1", group);
 	await ready();
@@ -444,11 +460,11 @@ test("a list of more than five sessions turns its pages in place; in a group onl
 	assert.deepEqual(turned.body.userids, ["alice"], "only Alice's copy turns");
 	assert.equal(turned.body.template_card.button_selection.title, "会话 2/2");
 	assert.deepEqual(options(turned.body.template_card), ["project-F · on-F · 空闲", "project-G · on-G · 空闲"]);
-	// 查看会话 on page 2 without a choice: its first row, F.
+	// 打开会话 on page 2 without a choice: its first row, F, publishes its card in the group.
 	pick(list.task_id, turned.body.template_card.button_list[0].key);
 	const forwarded = peers[5].frames.filter((frame) => frame.type === "request").at(-1);
 	assert.ok(forwarded?.type === "request" && forwarded.request.action === "click");
-	assert.equal(forwarded.request.click.key, `show@${sessionFingerprint("session-F")}`);
+	assert.equal(forwarded.request.click.key, "control");
 });
 
 test("whoami codes keep priority and never become a question", async () => {
@@ -474,9 +490,9 @@ test("a question card WeCom refuses leaves the message unsent, with how to name 
 	await ready();
 	assert.equal(a.tasks().length, 0);
 	const answer = repliesTo(sent).at(-1);
-	assert.match(answer.body.stream.content, /这条消息没有发出，请指定会话/);
-	assert.match(answer.body.stream.content, /引用机器人发来的/);
+	assert.match(answer.body.stream.content, /这条消息没有发出，请用命令指定会话/);
 	assert.match(answer.body.stream.content, /--session-id <id> send --prompt/);
+	assert.match(answer.body.stream.content, /session ID 写在会话的控制卡上$/, "a result is a card: nothing to quote");
 });
 
 test("welcome uses the dedicated event reply within five seconds and never pushes or starts a task", async (t) => {

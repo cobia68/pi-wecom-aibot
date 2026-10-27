@@ -203,7 +203,7 @@ export function promptsProblem(value: unknown): string | undefined {
 }
 
 /** `config set controlPrompts=a,b`: split at ASCII commas only, so a Chinese comma stays inside a prompt. */
-export function parsePrompts(text: string): { prompts: string[] } | { problem: string } {
+function parsePrompts(text: string): { prompts: string[] } | { problem: string } {
 	const prompts = text.split(",").map((item) => item.trim());
 	const problem = promptsProblem(prompts);
 	return problem ? { problem: `controlPrompts ${problem}` } : { prompts };
@@ -248,19 +248,7 @@ function parseLayer(raw: Record<string, unknown>, scope: Scope): Layer {
 			layer[spec.name] = [...(value as string[])];
 			continue;
 		}
-		const problem = spec.choices
-			? spec.choices.some((choice) => choice.value === value)
-				? undefined
-				: `必须是 ${spec.choices.map((choice) => JSON.stringify(choice.value)).join(" 或 ")}`
-			: typeof value !== "string" || !value.trim()
-				? "必须是非空字符串"
-				: spec.name === "defaultChatId"
-					? chatIdProblem(value)
-					: spec.name === "docMcpUrl"
-						? scope === "global"
-							? docUrlProblem(value)
-							: `只能写在全局配置 ${CONFIG_FILE} 中`
-						: undefined;
+		const problem = fileValueProblem(spec, value, scope);
 		if (problem) throw invalid(spec.name, problem);
 		layer[spec.name] = value;
 	}
@@ -278,6 +266,19 @@ function parseLayer(raw: Record<string, unknown>, scope: Scope): Layer {
 	return layer as Layer;
 }
 
+/** What is wrong with a field's value as written in a layer's file. */
+function fileValueProblem(spec: (typeof FIELDS)[number], value: unknown, scope: Scope): string | undefined {
+	if (spec.choices)
+		return spec.choices.some((choice) => choice.value === value)
+			? undefined
+			: `必须是 ${spec.choices.map((choice) => JSON.stringify(choice.value)).join(" 或 ")}`;
+	if (typeof value !== "string" || !value.trim()) return "必须是非空字符串";
+	if (spec.name === "defaultChatId") return chatIdProblem(value);
+	if (spec.name === "docMcpUrl")
+		return scope === "global" ? docUrlProblem(value) : `只能写在全局配置 ${CONFIG_FILE} 中`;
+	return undefined;
+}
+
 export function readLayer(scope: Scope): Layer | undefined {
 	const raw = readObject(layerFile(scope));
 	return raw && parseLayer(raw, scope);
@@ -290,12 +291,27 @@ export function writeLayer(scope: Scope, layer: Layer): void {
 
 /** Patches the layer as it is on disk now, so other windows' and hand edits survive; `guard` may refuse first. */
 export function patchLayer(scope: Scope, change: LayerChange, guard?: (current: Layer | undefined) => void): Layer {
+	return rewriteLayer(scope, (raw) => {
+		guard?.(raw && parseLayer(raw, scope));
+		const next: Record<string, unknown> = { ...raw };
+		for (const name of change.remove ?? []) delete next[name];
+		return Object.assign(next, change.set);
+	});
+}
+
+/**
+ * The layer's file as it is on disk now, changed by `edit`, checked and written back without the obsolete
+ * fields; `edit` returning undefined leaves the file as it is.
+ */
+function rewriteLayer(
+	scope: Scope,
+	edit: (raw: Record<string, unknown> | undefined) => Record<string, unknown> | undefined,
+): Layer {
 	const file = layerFile(scope);
 	const raw = readObject(file);
-	guard?.(raw && parseLayer(raw, scope));
-	const next: Record<string, unknown> = { ...raw };
-	for (const name of [...OBSOLETE, ...(change.remove ?? [])]) delete next[name];
-	Object.assign(next, change.set);
+	const next = edit(raw);
+	if (!next) return parseLayer(raw ?? {}, scope);
+	for (const name of OBSOLETE) delete next[name];
 	const layer = parseLayer(next, scope);
 	writeJson(file, next, scope !== "global");
 	return layer;
@@ -309,14 +325,10 @@ export function clearConfig(): void {
 
 /** whoami's 加入白名单: the global file's allowedUserIds gains one userid; everything else in it is kept. */
 export function addAllowedUser(userid: string): void {
-	const file = layerFile("global");
-	const raw = readObject(file) ?? {};
-	const current: unknown[] = Array.isArray(raw.allowedUserIds) ? raw.allowedUserIds : [];
-	if (current.includes(userid)) return;
-	const next: Record<string, unknown> = { ...raw, allowedUserIds: [...current, userid] };
-	for (const name of OBSOLETE) delete next[name];
-	parseLayer(next, "global");
-	writeJson(file, next, false);
+	rewriteLayer("global", (raw) => {
+		const current: unknown[] = Array.isArray(raw?.allowedUserIds) ? raw.allowedUserIds : [];
+		return current.includes(userid) ? undefined : { ...raw, allowedUserIds: [...current, userid] };
+	});
 }
 
 function readObject(file: string): Record<string, unknown> | undefined {
@@ -344,7 +356,8 @@ function readIfExists<T>(file: string, read: (file: string) => T): T | undefined
 	}
 }
 
-function writeJson(file: string, value: object, privateDirectory: boolean): void {
+/** Written whole or not at all: a temporary file renamed over the old one. */
+export function writeJson(file: string, value: object, privateDirectory: boolean): void {
 	// The agent directory belongs to pi; only our files, and the folder named after session IDs, are private.
 	mkdirSync(dirname(file), { recursive: true, mode: privateDirectory ? 0o700 : undefined });
 	// A symlinked configuration stays a symlink: replace the file it points to.
@@ -373,8 +386,7 @@ export function mergeLayers(global: Layer | undefined, session: Layer | undefine
 	const values: Record<string, unknown> = {};
 	const sources: Partial<Record<FieldName, Source>> = {};
 	for (const spec of SETTING_FIELDS) {
-		if (spec.default !== undefined)
-			values[spec.name] = Array.isArray(spec.default) ? [...spec.default] : spec.default;
+		values[spec.name] = Array.isArray(spec.default) ? [...spec.default] : spec.default;
 		sources[spec.name] = "default";
 	}
 	const owner = (name: FieldName): [Source, Layer] | undefined =>
@@ -418,6 +430,11 @@ export function connectionOf(resolved: Resolved): Connection | undefined {
 }
 
 /** Equal keys can share a registration; settings are deliberately not part of it. No connection is "". */
+/** The files now name another connection than the one this session adopted: connect would switch. */
+export function pendingReconnect(resolved: Resolved | undefined, adopted: string | undefined): boolean {
+	return !!resolved && adopted !== undefined && adopted !== connectionKey(connectionOf(resolved));
+}
+
 export function connectionKey(connection: Connection | undefined): string {
 	if (!connection) return "";
 	// An empty allowlist admits everyone, like none at all.

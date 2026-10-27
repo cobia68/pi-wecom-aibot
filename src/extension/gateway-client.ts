@@ -188,7 +188,7 @@ export class GatewayClient implements BridgeClient {
 	/** Rejects with name "TimeoutError" when the code is not sent in time, "AbortError" when cancelled. */
 	watchIdentity(timeoutMs: number, signal?: AbortSignal, onCode?: (code: string) => void): Promise<ChatIdentity> {
 		if (!this.isReady()) return Promise.reject(new Error("共享网关或企微连接未就绪"));
-		if (signal?.aborted) return Promise.reject(named("AbortError", "whoami 已取消"));
+		if (signal?.aborted) return Promise.reject(whoamiCancelled());
 		const id = randomUUID();
 		return new Promise((resolve, reject) => {
 			const finish = (error?: Error, identity?: ChatIdentity) => {
@@ -202,7 +202,7 @@ export class GatewayClient implements BridgeClient {
 				} else if (identity) resolve(identity);
 				else reject(new Error("网关没有返回会话标识"));
 			};
-			const onAbort = () => finish(named("AbortError", "whoami 已取消"));
+			const onAbort = () => finish(whoamiCancelled());
 			const timer = setTimeout(
 				() => finish(named("TimeoutError", `${Math.round(timeoutMs / 1000)} 秒内没有收到验证码`)),
 				timeoutMs,
@@ -418,6 +418,11 @@ function named(name: "AbortError" | "TimeoutError", message: string): Error {
 	return Object.assign(new Error(message), { name });
 }
 
+/** A cancelled whoami, wherever it is waited on. */
+export function whoamiCancelled(): Error {
+	return named("AbortError", "whoami 已取消");
+}
+
 interface Unrefable {
 	unref(): void;
 }
@@ -426,11 +431,7 @@ function isUnrefable(value: object): value is object & Unrefable {
 	return "unref" in value && typeof value.unref === "function";
 }
 
-export function launchGateway(
-	endpoint: string,
-	credentials: GatewayCredentials,
-	log?: (message: string) => void,
-): void {
+function launchGateway(endpoint: string, credentials: GatewayCredentials, log?: (message: string) => void): void {
 	const entry = fileURLToPath(new URL("../gateway/main.mjs", import.meta.url));
 	const executable = /^node(?:\.exe)?$/i.test(basename(process.execPath)) ? process.execPath : "node";
 	const child = spawn(executable, [entry], {

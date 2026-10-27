@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rename, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -24,7 +24,6 @@ function fakeService(options: { slow?: boolean; overwriteFails?: number[]; iconF
 	let documents = 0;
 	const failures = [...(options.overwriteFails ?? [])];
 	const mcp = {
-		secretValues: [],
 		async call(name: string, args: any) {
 			calls.push({ name, args });
 			if (options.slow) await new Promise((resolve) => setTimeout(resolve, 20));
@@ -130,6 +129,24 @@ test("a record an earlier version kept as screen-pages.json is adopted under the
 	);
 	await access(join(directory, "session-doc.json"));
 	await assert.rejects(access(join(directory, "screen-pages.json")), { code: "ENOENT" });
+});
+
+test("a broken record fails the write: no new document, and the file is left for the user to fix", async () => {
+	const directory = await sandbox();
+	const service = fakeService();
+	const file = join(directory, "session-doc.json");
+	await pages(service, directory).write(source("s0"), "# zero");
+	const [bot] = Object.keys(JSON.parse(await readFile(file, "utf8")));
+	for (const broken of ["{not json", JSON.stringify({ [bot]: { version: 1 }, other: { kept: true } })]) {
+		await writeFile(file, broken);
+		await assert.rejects(pages(service, directory).write(source("s9"), "# nine"), /会话文档记录/);
+		assert.equal(await readFile(file, "utf8"), broken, "nothing is written over");
+	}
+	assert.equal(
+		service.names().filter((name) => name === "smartpage_create").length,
+		1,
+		"only the first write made one",
+	);
 });
 
 test("two pi refreshing for the first time at once still create one document and one page per session", async () => {

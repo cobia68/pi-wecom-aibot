@@ -6,8 +6,8 @@ export const NO_REPLY_TEXT = "（本轮没有新的文本输出）";
 const MAX_NOTIFICATION_BODY_BYTES = 256 * 1024;
 
 /**
- * What a task's one reply says when it is not its result: the message was not run, or forwarding stopped. A
- * task that runs gets no status message; its result is the reply.
+ * The one reply a task's message gets, only when it did not run: busy, failed, cleared from the queue, or
+ * forwarding stopped. A task that runs gets none; its result is a card.
  */
 const STATUS_TEXT = {
 	stopped: "转发已停止",
@@ -18,15 +18,15 @@ const STATUS_TEXT = {
 export type ProcessingState = keyof typeof STATUS_TEXT;
 
 /** Line icons of the Markdown the bot writes outside a card. */
-export const NOTIFICATION_ICONS = { model: "🏷️", session: "🆔", directory: "📁" } as const;
+const NOTIFICATION_ICONS = { model: "🏷️", session: "🆔", directory: "📁" } as const;
 
 /**
- * Text the bot writes into a chat outside a card (a task's result, a refused card's text): its first line names
- * the session, so quoting the message reaches that pi. Cut from the end to fit WeCom's byte limit.
+ * Text the bot writes into a chat instead of a refused card: its first line names the session, so quoting the
+ * message reaches that pi. Cut from the end to fit WeCom's byte limit.
  */
 export function sessionMarkdown(source: SessionSource, body: string, suffix = ""): string {
 	validateSessionId(source.sessionId);
-	const header = `${NOTIFICATION_ICONS.session} session: ${metadataValue(source.sessionId)}  \n${NOTIFICATION_ICONS.model} ${metadataValue(source.directoryName)} · ${metadataValue(source.provider)} · ${metadataValue(source.modelName)}\n\n`;
+	const header = `${NOTIFICATION_ICONS.session} session: ${markdownValue(source.sessionId)}  \n${NOTIFICATION_ICONS.model} ${markdownValue(source.directoryName)} · ${markdownValue(source.provider)} · ${markdownValue(source.modelName)}\n\n`;
 	const budget = MAX_NOTIFICATION_BYTES - Buffer.byteLength(header + suffix, "utf8");
 	if (budget < 64) throw new Error("通知来源信息过长，无法容纳正文");
 	return header + truncateContent(body.trim() || NO_REPLY_TEXT, budget) + suffix;
@@ -34,26 +34,25 @@ export function sessionMarkdown(source: SessionSource, body: string, suffix = ""
 
 /** A short line naming the session, for notes the gateway or pi send outside a card. */
 export function sessionNote(sessionId: string, text: string): string {
-	return `${NOTIFICATION_ICONS.session} session: ${metadataValue(sessionId)}\n${text}`;
+	return `${NOTIFICATION_ICONS.session} session: ${markdownValue(sessionId)}\n${text}`;
 }
 
 export const ABORTED_SUFFIX = "\n\n（本轮任务已中止）";
 
+const TRUNCATED = "\n\n…（内容过长已截断）";
+
 function truncateContent(text: string, maxBytes: number): string {
-	const bytes = Buffer.from(text, "utf8");
-	if (bytes.length <= maxBytes) return text;
-	const marker = "\n\n…（内容过长已截断）";
-	let end = maxBytes - Buffer.byteLength(marker, "utf8");
-	while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
-	return bytes.subarray(0, end).toString("utf8") + marker;
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+	return sliceUtf8(text, maxBytes - Buffer.byteLength(TRUNCATED, "utf8")) + TRUNCATED;
 }
 
-function metadataValue(value: string): string {
+/** A value on one Markdown line: no line breaks or control characters, Markdown escaped; `max` cuts it in characters. */
+export function markdownValue(value: string, max?: number): string {
 	const line = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").trim();
-	return line.replace(/[\\`*_#[\]<>]/g, "\\$&");
+	return (max === undefined ? line : [...line].slice(0, max).join("")).replace(/[\\`*_#[\]<>]/g, "\\$&");
 }
 
-export function sessionIdProblem(sessionId: string): string | undefined {
+function sessionIdProblem(sessionId: string): string | undefined {
 	return !sessionId || sessionId.length > 256 || /[\u0000-\u0020\u007f`]/.test(sessionId)
 		? "无效的 pi session_id"
 		: undefined;
@@ -65,13 +64,13 @@ function validateSessionId(sessionId: string): void {
 }
 
 /**
- * Update this small status in place; its first line names the session like every text the bot writes, the
+ * A task's reply when it did not run: its first line names the session like every text the bot writes, the
  * next its directory, so a message that reached the wrong pi shows at once.
  */
 export function formatProcessingStatus(sessionId: string, state: ProcessingState, directory?: string): string {
 	validateSessionId(sessionId);
-	const where = directory?.trim() ? `${NOTIFICATION_ICONS.directory} ${metadataValue(directory)}  \n` : "";
-	return `${NOTIFICATION_ICONS.session} session: ${metadataValue(sessionId)}  \n${where}${STATUS_TEXT[state]}`;
+	const where = directory?.trim() ? `${NOTIFICATION_ICONS.directory} ${markdownValue(directory)}  \n` : "";
+	return `${NOTIFICATION_ICONS.session} session: ${markdownValue(sessionId)}  \n${where}${STATUS_TEXT[state]}`;
 }
 
 /** pi's half: bound the body for IPC; the gateway renders it. */

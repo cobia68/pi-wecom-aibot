@@ -4,7 +4,6 @@
  * used, and a change to the credentials, the default target or the allowlist waits for `/wecom-aibot connect`.
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
 import { MAX_PROMPTS } from "../shared/control-card.ts";
 import type { ChatIdentity } from "../shared/gateway-protocol.ts";
 import { errorMessage, sentences } from "../shared/text.ts";
@@ -15,6 +14,7 @@ import {
 	configSubcommandLines,
 	configSubcommands,
 	subcommandUsage,
+	table,
 	WHOAMI_WAIT_SECONDS,
 } from "./commands.ts";
 import {
@@ -34,13 +34,14 @@ import {
 	mergeLayers,
 	type PromptsField,
 	patchLayer,
+	pendingReconnect,
 	promptsProblem,
 	type Resolved,
 	readLayer,
 	SETTING_FIELDS,
 	type SessionConfig,
-	type Source,
 } from "./config.ts";
+import { describe, display, maskBotId } from "./config-display.ts";
 import { docUrlProblem } from "./doc-mcp.ts";
 
 export interface ConfigHost {
@@ -70,26 +71,6 @@ export async function runConfig(ctx: ExtensionContext, invocation: ConfigInvocat
 	} catch (error) {
 		ctx.ui.notify(`企业微信配置无法使用：${errorMessage(error)}`, "error");
 	}
-}
-
-/** A value as shown anywhere: a Secret only says whether it is set, a BotID is masked. */
-export function display(name: FieldName, value: unknown): string {
-	if (name === "docMcpUrl") return value === undefined ? "未配置" : "已配置";
-	if (Array.isArray(value)) return value.length ? value.map((item) => `「${item}」`).join("、") : "无";
-	if (value === undefined) return "未设置";
-	if (name === "secret") return "已配置";
-	if (name === "botId") return maskBotId(String(value));
-	if (name === "defaultChatType") return `${value}（${value === 2 ? "群聊" : "单聊"}）`;
-	return String(value);
-}
-
-export function pendingReconnect(resolved: Resolved | undefined, adopted: string | undefined): boolean {
-	return !!resolved && adopted !== undefined && adopted !== connectionKey(connectionOf(resolved));
-}
-
-export function maskBotId(value: string): string {
-	if (value.length <= 8) return `${value.slice(0, 2)}****`;
-	return `${value.slice(0, 4)}****${value.slice(-2)}`;
 }
 
 class ConfigCommand {
@@ -254,7 +235,7 @@ class ConfigCommand {
 			return;
 		}
 		const resolved = this.config.read();
-		const current = scope === "global" ? mergeLayers(readLayer("global"), undefined).values : resolved.values;
+		const current = scope === "global" ? globalOnly().values : resolved.values;
 		const replaced = current.defaultChatId
 			? `将替换${scope === "global" ? "全局默认" : "当前 session 使用的目标"}：${current.defaultChatId}（${current.defaultChatType === 2 ? "群聊" : "单聊"}）`
 			: scope === "global"
@@ -290,7 +271,7 @@ class ConfigCommand {
 	}
 
 	private bot(scope: ConfigScope | undefined): Connection | undefined {
-		return connectionOf(scope === "global" ? mergeLayers(readLayer("global"), undefined) : this.config.read());
+		return connectionOf(scope === "global" ? globalOnly() : this.config.read());
 	}
 
 	/**
@@ -299,12 +280,13 @@ class ConfigCommand {
 	 */
 	private async offerAllowlist(identity: ChatIdentity): Promise<string | undefined> {
 		const allowed = this.previous()?.allowedUserIds;
-		if (!allowed?.length || allowed.includes(identity.userid) || !this.ctx.hasUI) return this.allowlistNote(identity);
+		if (!allowed?.length || allowed.includes(identity.userid) || !this.ctx.hasUI)
+			return this.allowlistNote(identity, allowed);
 		const ok = await this.ctx.ui.confirm(
 			`把 ${identity.userid} 加入 allowedUserIds？`,
 			`写进全局配置 ${this.file("global")}；运行 /wecom-aibot connect 后，这个人才能给 pi 发任务`,
 		);
-		if (!ok) return this.allowlistNote(identity);
+		if (!ok) return this.allowlistNote(identity, allowed);
 		try {
 			addAllowedUser(identity.userid);
 		} catch (error) {
@@ -315,8 +297,7 @@ class ConfigCommand {
 		return `已把 ${identity.userid} 加入 allowedUserIds；运行 /wecom-aibot connect 后生效`;
 	}
 
-	private allowlistNote(identity: ChatIdentity): string | undefined {
-		const allowed = this.previous()?.allowedUserIds;
+	private allowlistNote(identity: ChatIdentity, allowed = this.previous()?.allowedUserIds): string | undefined {
 		if (allowed?.includes(identity.userid)) return undefined;
 		return allowed?.length
 			? `userid ${identity.userid} 不在 allowedUserIds 中：加入全局配置文件并运行 /wecom-aibot connect 后，才能给 pi 发任务`
@@ -631,19 +612,7 @@ function sameBotGuard(bot: Pick<Connection, "botId" | "secret">): Guard {
 	};
 }
 
-const SOURCE: Record<Source, string> = { session: "session", global: "global", default: "内置默认值" };
-
-/** All groups share one value column, measured in terminal cells so Chinese labels align. */
-export function table(...groups: [string, string][][]): string[] {
-	const shown = groups.filter((rows) => rows.length);
-	const width = Math.max(0, ...shown.flat().map(([name]) => visibleWidth(name)));
-	return shown.flatMap((rows, index) => [
-		...(index ? [""] : []),
-		...rows.map(([name, value]) => `  ${name}${" ".repeat(width - visibleWidth(name))}  ${value}`),
-	]);
-}
-
-export function describe(resolved: Resolved, name: FieldName): string {
-	const source = resolved.sources[name];
-	return `${display(name, resolved.values[name])}${source ? `（${SOURCE[source]}）` : ""}`;
+/** The global layer alone, as a session without overrides would resolve it. */
+function globalOnly(): Resolved {
+	return mergeLayers(readLayer("global"), undefined);
 }

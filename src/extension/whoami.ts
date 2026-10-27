@@ -8,6 +8,7 @@ import type { ChatIdentity } from "../shared/gateway-protocol.ts";
 import { sentences } from "../shared/text.ts";
 import type { BridgeSession } from "./bridge-session.ts";
 import type { Connection } from "./config.ts";
+import { whoamiCancelled } from "./gateway-client.ts";
 
 export interface WhoamiHost {
 	bridge(): BridgeSession | undefined;
@@ -37,8 +38,10 @@ export class Whoami {
 			const identifying = watcher;
 			if (!identifying.ready)
 				await cancellableWait(ctx, "正在临时连接以识别聊天…", (signal) => identifying.waitUntilReady(signal));
-			if (identifying !== this.host.bridge() || identifying.sessionId !== ctx.sessionManager.getSessionId())
-				throw new Error("当前 pi 的识别连接已停止或切换");
+			if (identifying !== this.host.bridge() || identifying.sessionId !== ctx.sessionManager.getSessionId()) {
+				ctx.ui.notify("whoami 未完成：当前 pi 的识别连接已停止或切换", "warning");
+				return undefined;
+			}
 			const identity = await waitForCode(ctx, seconds, (signal, onCode) =>
 				identifying.watchIdentity(seconds * 1000, signal, onCode),
 			);
@@ -77,7 +80,7 @@ async function waitForCode(
 		}
 		// Choosing the option or Esc cancels; after the wait has settled, closing the dialog changes nothing.
 		void ctx.ui.select(title, ["取消等待"], { signal: dialog.signal }).then(
-			() => cancel.abort(aborted()),
+			() => cancel.abort(whoamiCancelled()),
 			() => {},
 		);
 	};
@@ -97,7 +100,7 @@ async function cancellableWait<T>(
 	if (!ctx.hasUI) return task(cancel.signal);
 	const dialog = new AbortController();
 	void ctx.ui.select(title, ["取消等待"], { signal: dialog.signal }).then(
-		() => cancel.abort(aborted()),
+		() => cancel.abort(whoamiCancelled()),
 		() => {},
 	);
 	try {
@@ -105,8 +108,4 @@ async function cancellableWait<T>(
 	} finally {
 		dialog.abort();
 	}
-}
-
-function aborted(): Error {
-	return Object.assign(new Error("whoami 已取消"), { name: "AbortError" });
 }
