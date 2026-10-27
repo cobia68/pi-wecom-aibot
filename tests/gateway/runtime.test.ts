@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { inspectPng, stampPng } from "../../src/gateway/png-marker.ts";
+import { sessionControlCard } from "../../src/extension/control-view.ts";
 import { type GatewayPeer, WeComGateway } from "../../src/gateway/runtime.ts";
+import { controlCardFor, controlCardId, controlKey, sessionFingerprint } from "../../src/shared/control-card.ts";
 import { type GatewayRegistration, type ServerFrame, sessionTarget } from "../../src/shared/gateway-protocol.ts";
 import { formatProcessingStatus, notificationPayload } from "../../src/shared/notification.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
-import { encryptMedia, MEDIA_KEY, TINY_PNG } from "../support/media.ts";
+
+/** pi publishes every notification as its session's control card. */
+function controlled(source: GatewayRegistration["source"]) {
+	return {
+		control: { cardId: controlCardId(source.sessionId), card: sessionControlCard(source, { status: "idle" }) },
+	};
+}
 
 const SESSION_A = "01234567-89ab-4cde-8012-3456789abcde";
 const SESSION_B = "01234567-89ab-4cde-8012-3456789abcdf";
@@ -67,11 +74,7 @@ function add(instanceId: string, sessionId = instanceId, modify?: (value: Gatewa
 	gateway.register(value, peer);
 	const ws = FakeWebSocket.instances.at(-1)!;
 	ws.onSend = (frame) => {
-		if (frame.cmd === "aibot_upload_media_init")
-			ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { upload_id: "upload-1" } });
-		else if (frame.cmd === "aibot_upload_media_chunk") ws.acknowledge(frame);
-		else if (frame.cmd === "aibot_upload_media_finish")
-			ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { media_id: "media-1" } });
+		if (frame.body?.template_card?.button_selection?.question_key === "pick") ws.acknowledge(frame);
 	};
 	if (ws.readyState === 0) {
 		ws.open();
@@ -119,6 +122,25 @@ function quote(sessionId: string) {
 function prompt(): string {
 	return FakeWebSocket.instances.at(-1)!.sent.at(-1).body.stream.content;
 }
+/** The card a message without a session gets: the question, which nothing answers by itself. */
+function asked() {
+	const frame = FakeWebSocket.instances
+		.at(-1)!
+		.sent.filter((item) => item.body?.template_card)
+		.at(-1);
+	assert.match(frame.body.template_card.task_id, /^q@[0-9a-f]{12}$/, "a question card");
+	return frame.body.template_card;
+}
+function picker() {
+	return FakeWebSocket.instances
+		.at(-1)!
+		.sent.filter((frame) => frame.body?.template_card)
+		.at(-1).body.template_card;
+}
+/** The session list's dropdown, as its options read: 「目录 · 忙闲」. */
+function listed(): string[] {
+	return picker().button_selection.option_list.map((option: { text: string }) => option.text);
+}
 
 beforeEach(() => {
 	sandbox = mkdtempSync(join(tmpdir(), "pi-wecom-aibot-runtime-"));
@@ -134,9 +156,6 @@ afterEach(() => {
 	gateway.stop();
 	rmSync(sandbox, { recursive: true, force: true });
 });
-function dir(): string {
-	return sandbox;
-}
 
 test("only registered pi instances create and share the single WeCom connection", () => {
 	assert.equal(FakeWebSocket.instances.length, 0);
@@ -153,12 +172,17 @@ test("only registered pi instances create and share the single WeCom connection"
 	assert.equal(a.ws.readyState, 1);
 });
 
-test("a message without a target never reaches a pi: it teaches the command instead", () => {
+test("a message without a target never reaches a pi by itself: it is asked about, with one session online too", () => {
 	const a = add("A", SESSION_A);
 	message("just a task");
 	assert.equal(a.peer.messages().length, 0);
-	assert.match(prompt(), /先指定目标会话/);
-	assert.match(prompt(), /\/wecom-aibot sessions/);
+	const card = asked();
+	assert.equal(card.main_title.title, "这条消息发给哪个会话？");
+	assert.equal(card.quote_area.quote_text, "just a task");
+	assert.deepEqual(
+		card.button_selection.option_list.map((option: { id: string }) => option.id),
+		[sessionFingerprint(SESSION_A)],
+	);
 });
 
 test("a message that arrives after the last pi unregistered names the way back", () => {
@@ -176,7 +200,7 @@ test("send names its target, and the target receives exactly the prompt", () => 
 	assert.equal(a.peer.messages()[0].task.message.text, "检查构建");
 });
 
-test("a task's text result replaces its status message instead of a second push", async () => {
+test("a task's message gets one reply, its result: nothing while it runs, no second push", async () => {
 	const a = add("A", SESSION_A);
 	const frames: any[] = [];
 	a.ws.onSend = (frame: any) => {
@@ -186,19 +210,28 @@ test("a task's text result replaces its status message instead of a second push"
 	const task = send(SESSION_A, "task");
 	const id = task.headers.req_id;
 	assert.equal(gateway.taskStatus("A", id, "running"), true);
+	assert.equal(
+		frames.filter((frame) => frame.cmd === "aibot_respond_msg").length,
+		0,
+		"no 执行中: the question card already said where it went",
+	);
 	assert.equal(gateway.taskStatus("A", id, "settled"), true);
 	await gateway.notify(
 		"A",
 		{ chatId: "user", chatType: 1 },
-		{ kind: "reply", source: a.value.source, text: "RESULT-BODY", taskId: id },
+		{ kind: "result", source: a.value.source, text: "RESULT-BODY", taskId: id, title: "✅ 完成" },
 	);
-	const finish = frames.filter((frame) => frame.cmd === "aibot_respond_msg" && frame.body.stream.finish).at(-1);
+	const replies = frames.filter((frame) => frame.cmd === "aibot_respond_msg");
+	assert.equal(replies.length, 1, "one reply");
+	const [finish] = replies;
+	assert.equal(finish.body.stream.finish, true);
+	// The reply is the full Markdown result and opens with the session line a quote routes by.
+	assert.match(finish.body.stream.content, new RegExp(`^🆔 session: ${SESSION_A}`));
 	assert.match(finish.body.stream.content, /RESULT-BODY$/);
-	assert.match(finish.body.stream.content, new RegExp(`session: ${SESSION_A}`));
 	assert.equal(frames.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "one bubble per task");
 });
 
-test("a result the status message refuses closes the status once, then is pushed", async () => {
+test("a result the reply refuses is pushed as a card, and the message gets no other reply", async () => {
 	const a = add("A", SESSION_A);
 	const frames: any[] = [];
 	a.ws.onSend = (frame: any) => {
@@ -213,45 +246,54 @@ test("a result the status message refuses closes the status once, then is pushed
 	await gateway.notify(
 		"A",
 		{ chatId: "user", chatType: 1 },
-		{ kind: "reply", source: a.value.source, text: "RESULT-BODY", taskId: id },
+		{ kind: "result", source: a.value.source, text: "RESULT-BODY", taskId: id, ...controlled(a.value.source) },
 	);
-	const finishes = frames.filter((frame) => frame.cmd === "aibot_respond_msg" && frame.body.stream.finish);
-	assert.equal(finishes.length, 2, "the refused result, then one closing status");
-	assert.doesNotMatch(finishes[1].body.stream.content, /RESULT-BODY/);
+	const replies = frames.filter((frame) => frame.cmd === "aibot_respond_msg");
+	assert.equal(replies.length, 1, "the refused result alone");
+	assert.equal(gateway.taskStatus("A", id, "failed"), false, "the task is closed, not left to expire");
 	const pushes = frames.filter((frame) => frame.cmd === "aibot_send_msg");
 	assert.equal(pushes.length, 1);
-	assert.match(JSON.stringify(pushes[0].body), /RESULT-BODY/);
-	assert.ok(frames.indexOf(finishes[1]) < frames.indexOf(pushes[0]), "the status closes before the push");
+	assert.equal(pushes[0].body.msgtype, "template_card");
+	assert.ok(controlCardFor(pushes[0].body.template_card.task_id, SESSION_A), "its session's control card");
 });
 
-test("a late result cannot finish another task's status message even in the same chat", async () => {
+test("a late result cannot become another task's reply even in the same chat", async () => {
 	const a = add("A", SESSION_A);
 	a.ws.onSend = (frame) => {
 		if (frame.cmd === "aibot_send_msg" || frame.cmd === "aibot_respond_msg") a.ws.acknowledge(frame);
 	};
 	const old = send(SESSION_A, "old task").headers.req_id;
 	gateway.taskStatus("A", old, "running");
-	gateway.taskStatus("A", old, "notifying");
+	gateway.taskStatus("A", old, "settled");
 	const current = send(SESSION_A, "current task").headers.req_id;
 	gateway.taskStatus("A", current, "running");
 	gateway.taskStatus("A", current, "settled");
 	await gateway.notify(
 		"A",
 		{ chatId: "user", chatType: 1 },
-		{ kind: "reply", source: a.value.source, text: "CURRENT-RESULT", taskId: current },
+		{ kind: "result", source: a.value.source, text: "CURRENT-RESULT", taskId: current },
 	);
 	await gateway.notify(
 		"A",
 		{ chatId: "user", chatType: 1 },
-		{ kind: "completion", source: a.value.source, text: "OLDER-NOTIFICATION", taskId: old },
+		{
+			kind: "notice",
+			source: a.value.source,
+			text: "OLDER-NOTIFICATION",
+			taskId: old,
+			...controlled(a.value.source),
+		},
 	);
 	const currentReplies = a.ws.sent.filter(
 		(frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === current,
 	);
 	assert.match(currentReplies.at(-1).body.stream.content, /CURRENT-RESULT$/);
 	assert.doesNotMatch(currentReplies.at(-1).body.stream.content, /OLDER/);
+	// A scheduled notification owns its task's end: the card carries it, the message keeps no reply.
 	const oldReplies = a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === old);
-	assert.match(oldReplies.at(-1).body.stream.content, /结果将另行通知/);
+	assert.equal(oldReplies.length, 0);
+	const card = a.ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.template_card;
+	assert.equal(card.main_title.title, "📁 project-A");
 });
 
 test("temporary identity registrations are hidden and cannot be targeted or publish notifications", async () => {
@@ -260,13 +302,13 @@ test("temporary identity registrations are hidden and cannot be targeted or publ
 		value.identifyOnly = true;
 	});
 	message("/wecom-aibot sessions");
-	assert.match(prompt(), /当前有 1 个在线会话/);
-	assert.doesNotMatch(prompt(), /identity-session|project-I/);
+	assert.equal(picker().main_title.title, "1 个在线会话");
+	assert.doesNotMatch(JSON.stringify(picker()), /identity-session|project-I/);
 	const status = identifying.peer.frames.filter((frame) => frame.type === "status").at(-1)!;
 	assert.equal(status.status.sessions, 1);
 	send("identity-session", "must not run");
 	message("must not run either", { quote: quote("identity-session") });
-	message("/wecom-aibot --sessionid identity-session screen");
+	message("/wecom-aibot --sessionid identity-session cancel");
 	message("/wecom-aibot --sessionid identity-session");
 	assert.match(prompt(), /找不到这个 session ID/);
 	assert.doesNotMatch(prompt(), /project-I/);
@@ -276,7 +318,7 @@ test("temporary identity registrations are hidden and cannot be targeted or publ
 		gateway.notify(
 			"I",
 			{ chatId: "user", chatType: 1 },
-			notificationPayload("connect", identifying.value.source, "entry"),
+			notificationPayload("notice", identifying.value.source, "notice"),
 		),
 		/临时识别连接/,
 	);
@@ -290,7 +332,7 @@ test("temporary identity registrations are hidden and cannot be targeted or publ
 	assert.equal(a.peer.messages().length, 1);
 });
 
-test("without a result notification the settled status closes after the grace window", (t) => {
+test("without a result after the grace window the task is closed, and a result after it never replies", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const a = add("A", SESSION_A);
 	const task = send(SESSION_A, "task");
@@ -298,9 +340,8 @@ test("without a result notification the settled status closes after the grace wi
 	gateway.taskStatus("A", id, "running");
 	gateway.taskStatus("A", id, "settled");
 	t.mock.timers.tick(1_000);
-	const finish = a.ws.sent.filter((frame: any) => frame.cmd === "aibot_respond_msg").at(-1);
-	assert.equal(finish.body.stream.finish, true);
-	assert.equal(finish.body.stream.content, formatProcessingStatus(SESSION_A, "settled"));
+	assert.equal(a.ws.sent.filter((frame: any) => frame.cmd === "aibot_respond_msg").length, 0, "nothing to say");
+	assert.equal(gateway.taskStatus("A", id, "settled"), false, "the task is gone");
 });
 
 test("an unknown session ID gets an error plus the current list, never a guess", () => {
@@ -313,15 +354,29 @@ test("an unknown session ID gets an error plus the current list, never a guess",
 	assert.match(prompt(), new RegExp(SESSION_B));
 });
 
-test("sessions lists directory, model, state and the full session ID on its own line", () => {
+test("sessions lists each session's directory, state and model; its buttons are a control card's", () => {
 	add("A", SESSION_A);
 	add("B", SESSION_B);
 	message("/wecom-aibot sessions");
-	const text = prompt();
-	assert.match(text, /当前有 2 个在线会话/);
-	assert.match(text, /project-A · provider-A · model-A · 空闲/);
-	assert.match(text, new RegExp(`session: ${SESSION_A}`));
-	assert.match(text, new RegExp(`session: ${SESSION_B}`));
+	const card = picker();
+	assert.equal(card.main_title.title, "2 个在线会话");
+	// The body is the list: a row per session, and no session's head.
+	assert.deepEqual(
+		card.horizontal_content_list.map((row: { keyname: string; value: string }) => [row.keyname, row.value]),
+		[
+			["空闲", `project-A · ${SESSION_A.slice(-4)} · model-A`],
+			["空闲", `project-B · ${SESSION_B.slice(-4)} · model-B`],
+		],
+	);
+	assert.doesNotMatch(JSON.stringify(card), new RegExp(`${SESSION_A}|${SESSION_B}`));
+	assert.deepEqual(listed(), [
+		`project-A · ${SESSION_A.slice(-4)} · 空闲`,
+		`project-B · ${SESSION_B.slice(-4)} · 空闲`,
+	]);
+	assert.deepEqual(
+		card.button_list.map((button: { key: string }) => button.key.replace(/@[0-9a-f]{64}$/, "")),
+		["pick@show", "pick@send", "pick@model", "pick@abort"],
+	);
 });
 
 test("sessions shows what each pi says right now, not what the gateway saw of its tasks", (t) => {
@@ -330,16 +385,16 @@ test("sessions shows what each pi says right now, not what the gateway saw of it
 	// A run typed in pi itself: no WeCom task exists.
 	a.peer.busy = true;
 	message("/wecom-aibot sessions");
-	assert.match(prompt(), /project-A · provider-A · model-A · 执行中/);
-	// A WeCom task past its status deadline: the gateway closed the status message, pi still runs.
+	assert.deepEqual(listed(), [`project-A · ${SESSION_A.slice(-4)} · 执行中`]);
+	// A long WeCom task: the gateway sent nothing for it yet, pi still runs.
 	send(SESSION_A, "long task");
 	gateway.taskStatus("A", a.peer.messages()[0].task.id, "running");
 	t.mock.timers.tick(600_000);
 	message("/wecom-aibot sessions");
-	assert.match(prompt(), /project-A · provider-A · model-A · 执行中/);
+	assert.deepEqual(listed(), [`project-A · ${SESSION_A.slice(-4)} · 执行中`]);
 	a.peer.busy = false;
 	message("/wecom-aibot sessions");
-	assert.match(prompt(), /project-A · provider-A · model-A · 空闲/);
+	assert.deepEqual(listed(), [`project-A · ${SESSION_A.slice(-4)} · 空闲`]);
 });
 
 test("sessions waits a moment for a silent pi, then lists it as unknown", (t) => {
@@ -347,22 +402,24 @@ test("sessions waits a moment for a silent pi, then lists it as unknown", (t) =>
 	const a = add("A", SESSION_A);
 	add("B", SESSION_B);
 	a.peer.busy = undefined;
-	const replies = () => a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").length;
+	const replies = () => a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length;
 	const before = replies();
 	message("/wecom-aibot sessions");
 	assert.equal(replies(), before, "the list waits for A");
 	t.mock.timers.tick(2_000);
 	assert.equal(replies(), before + 1);
-	assert.match(prompt(), /project-A · provider-A · model-A · 状态未知/);
-	assert.match(prompt(), /project-B · provider-B · model-B · 空闲/);
+	assert.deepEqual(listed(), [
+		`project-A · ${SESSION_A.slice(-4)} · 状态未知`,
+		`project-B · ${SESSION_B.slice(-4)} · 空闲`,
+	]);
 	// A pi that leaves while it is asked is answered for at once and not listed.
 	message("/wecom-aibot sessions");
 	gateway.unregister("A", a.peer);
 	assert.equal(replies(), before + 2);
-	assert.match(prompt(), /当前有 1 个在线会话/);
+	assert.equal(picker().main_title.title, "1 个在线会话");
 });
 
-test("a target-only command queries just that pi and returns three filled-in commands without selecting it", () => {
+test("a target-only command queries just that pi and returns filled-in commands without selecting it", () => {
 	const a = add("A", SESSION_A);
 	const b = add("B", SESSION_B);
 	a.peer.busy = true;
@@ -373,9 +430,9 @@ test("a target-only command queries just that pi and returns three filled-in com
 		[
 			"· project-A · provider-A · model-A · 执行中",
 			"",
-			`/wecom-aibot --sessionid ${SESSION_A} send --prompt <正文>`,
-			`/wecom-aibot --sessionid ${SESSION_A} screen`,
-			`/wecom-aibot --sessionid ${SESSION_A} cancel`,
+			`/wecom-aibot --session-id ${SESSION_A} send --prompt <正文>`,
+			`/wecom-aibot --session-id ${SESSION_A} card`,
+			`/wecom-aibot --session-id ${SESSION_A} cancel`,
 		].join("\n"),
 	);
 	assert.equal(
@@ -388,9 +445,10 @@ test("a target-only command queries just that pi and returns three filled-in com
 	a.peer.busy = false;
 	message(`/wecom-aibot --sessionid ${SESSION_A}`);
 	assert.match(prompt(), /^· project-A · provider-A · model-A · 空闲\n/);
+	b.peer.busy = false;
 	message("the next message has no target");
-	assert.match(prompt(), /先指定目标会话/);
-	for (const action of ["screen", "cancel"]) {
+	assert.equal(asked().quote_area.quote_text, "the next message has no target", "a query selects nothing");
+	for (const action of ["card", "cancel"]) {
 		message(`/wecom-aibot ${action}`);
 		assert.match(prompt(), new RegExp(`^${action} 需要目标：`));
 	}
@@ -486,15 +544,30 @@ test("a quoted notification routes that one message, without remembering anythin
 	// The next message has no target of its own, so it must be asked for again.
 	message("second");
 	assert.equal(b.peer.messages().length, 1);
-	assert.match(prompt(), /先指定目标会话/);
+	assert.equal(asked().quote_area.quote_text, "second");
 });
 
 test("a quote that names no online session is reported, never redirected to another pi", () => {
 	const a = add("A", SESSION_A);
 	message("orphan", { quote: quote(SESSION_B) });
 	assert.equal(a.peer.messages().length, 0);
-	assert.match(prompt(), /无法定位到一个在线会话/);
-	assert.match(prompt(), new RegExp(SESSION_A));
+	const card = asked();
+	assert.match(card.sub_title_text, /^引用的消息或图片看不出是哪个在线会话；/);
+	assert.deepEqual(
+		card.button_selection.option_list[0].id,
+		sessionFingerprint(SESSION_A),
+		"asked, never redirected by itself",
+	);
+});
+
+test("a quoted card names nothing, so the sender is asked, and told why", () => {
+	const a = add("A", SESSION_A);
+	// Exactly what WeCom delivered when a card was quoted (probe, 2026-10).
+	message("引用卡片后的一句话", { quote: { msgtype: "text", text: { content: "[该消息类型暂不能展示]" } } });
+	assert.equal(a.peer.messages().length, 0);
+	const card = asked();
+	assert.equal(card.quote_area.quote_text, "引用卡片后的一句话");
+	assert.match(card.sub_title_text, /^引用的是卡片：企业微信不给卡片内容，看不出是哪个会话；/);
 });
 
 test("a quote with several session IDs is ambiguous and delivers nothing", () => {
@@ -503,7 +576,7 @@ test("a quote with several session IDs is ambiguous and delivers nothing", () =>
 	const both = { msgtype: "text", text: { content: `session: ${SESSION_A}\nsession: ${SESSION_B}` } };
 	message("which one", { quote: both });
 	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
-	assert.match(prompt(), /无法定位/);
+	assert.match(asked().sub_title_text, /看不出是哪个在线会话/);
 });
 
 test("a command wins over a quote: the named session takes it", () => {
@@ -514,29 +587,25 @@ test("a command wins over a quote: the named session takes it", () => {
 	assert.equal(b.peer.messages().length, 0);
 });
 
-test("an explicit target wins over a conflicting quote for screen and cancel too", () => {
+test("an explicit target wins over a conflicting quote for cancel too", () => {
 	const a = add("A", SESSION_A);
 	const b = add("B", SESSION_B);
-	for (const action of ["screen", "cancel"]) {
-		message(`/wecom-aibot --sessionid ${SESSION_A} ${action}`, { quote: quote(SESSION_B) });
-		assert.equal(requests(a.peer).at(-1)!.request.action, action);
-		assert.equal(requests(b.peer).length, 0);
-	}
+	message(`/wecom-aibot --sessionid ${SESSION_A} cancel`, { quote: quote(SESSION_B) });
+	assert.equal(requests(a.peer).at(-1)!.request.action, "cancel");
+	assert.equal(requests(b.peer).length, 0);
 });
 
-test("commands never infer a missing target from a quoted notification or image", (t) => {
+test("commands never infer a missing target from a quoted notification or image", () => {
 	const a = add("A", SESSION_A);
 	const b = add("B", SESSION_B);
-	const fetchMock = t.mock.method(globalThis, "fetch");
 	for (const quoteBody of [quote(SESSION_B), { msgtype: "image", image: { url: "https://example.invalid/q" } }]) {
-		for (const action of ["send", "screen", "cancel"]) {
+		for (const action of ["send", "card", "cancel"]) {
 			message(`/wecom-aibot ${action}${action === "send" ? " --prompt task" : ""}`, { quote: quoteBody });
 			assert.match(prompt(), new RegExp(`^${action} 需要目标：`));
 		}
 	}
 	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
 	assert.equal(requests(a.peer).length + requests(b.peer).length, 0);
-	assert.equal(fetchMock.mock.callCount(), 0);
 });
 
 test("--prompt keeps spaces, dashes, newlines and command-looking text verbatim, with no UUID exception", () => {
@@ -556,10 +625,10 @@ test("a target written only after --prompt remains prose and cannot supply the m
 
 test("the action-first target syntax reports its replacement without executing any action", () => {
 	const a = add("A", SESSION_A);
-	for (const action of ["send", "screen", "cancel"]) {
+	for (const action of ["send", "card", "cancel"]) {
 		message(`/wecom-aibot ${action} --sessionid ${SESSION_A}${action === "send" ? " --prompt task" : ""}`);
-		assert.match(prompt(), /^--sessionid 要写在动作前：/);
-		assert.ok(prompt().includes(`/wecom-aibot --sessionid ${SESSION_A} ${action}`));
+		assert.match(prompt(), /^--session-id 要写在动作前：/);
+		assert.ok(prompt().includes(`/wecom-aibot --session-id ${SESSION_A} ${action}`));
 	}
 	assert.equal(a.peer.messages().length, 0);
 	assert.equal(requests(a.peer).length, 0);
@@ -571,28 +640,28 @@ test("help never queries or operates on a supplied target, even when it is offli
 		`/wecom-aibot --sessionid ${SESSION_A} --help`,
 		"/wecom-aibot --sessionid offline-session --help",
 		"/wecom-aibot --sessionid offline-session send --help",
-		`/wecom-aibot --sessionid ${SESSION_A} screen --help`,
+		`/wecom-aibot --sessionid ${SESSION_A} card --help`,
 		`/wecom-aibot --sessionid ${SESSION_A} cancel --help`,
 	]) {
 		message(content);
-		assert.match(prompt(), /sessions|send|screen|cancel/);
+		assert.match(prompt(), /sessions|send|card|cancel/);
 		assert.doesNotMatch(prompt(), /找不到这个 session ID/);
 	}
 	assert.equal(a.peer.messages().length, 0);
 	assert.equal(a.peer.frames.filter((frame) => frame.type === "request").length, 0);
 });
 
-test("all guidance, session-list examples and action help use the target-first grammar", () => {
+test("all text guidance and action help use the target-first grammar", () => {
 	add("A", SESSION_A);
-	for (const content of ["plain text", "/wecom-aibot sessions", "/wecom-aibot --help"]) {
+	for (const content of ["/wecom-aibot --help"]) {
 		message(content);
-		assert.match(prompt(), /\/wecom-aibot --sessionid <[^>]+> send --prompt/);
-		assert.doesNotMatch(prompt(), /\/wecom-aibot (?:send|screen|cancel)\s+--sessionid/);
+		assert.match(prompt(), /\/wecom-aibot --session-id <[^>]+> send --prompt/);
+		assert.doesNotMatch(prompt(), /\/wecom-aibot (?:send|card|cancel)\s+--sessionid/);
 	}
-	for (const action of ["send", "screen", "cancel"]) {
+	for (const action of ["send", "card", "cancel"]) {
 		message(`/wecom-aibot ${action} --help`);
-		assert.ok(prompt().includes(`/wecom-aibot --sessionid <完整 session ID> ${action}`));
-		assert.doesNotMatch(prompt(), /\/wecom-aibot (?:send|screen|cancel)\s+--sessionid/);
+		assert.ok(prompt().includes(`/wecom-aibot --session-id <完整 session ID> ${action}`));
+		assert.doesNotMatch(prompt(), /\/wecom-aibot (?:send|card|cancel)\s+--sessionid/);
 		for (const line of prompt().split("\n")) assert.equal(line.endsWith("。"), false);
 	}
 });
@@ -602,7 +671,7 @@ test("an equals form is an unknown option, and the error lists what is supported
 	message(`/wecom-aibot --sessionid=${SESSION_A} send --prompt x`);
 	assert.equal(a.peer.messages().length, 0);
 	assert.match(prompt(), /未知选项 --sessionid=/);
-	assert.match(prompt(), /可用选项：--sessionid、--help/);
+	assert.match(prompt(), /可用选项：--session-id、--help/);
 	assert.match(prompt(), /不支持 =/);
 });
 
@@ -613,40 +682,18 @@ test("a positional argument is rejected; the prompt belongs after --prompt", () 
 	assert.match(prompt(), /不接受位置参数/);
 });
 
-test("screen asks the named pi and sends the image it returns", async () => {
+test("a failed cancel request reports the pi's reason", () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot --sessionid ${SESSION_A} screen`);
-	const request = requests(a.peer)[0];
-	assert.equal(request.type, "request");
-	assert.deepEqual(request.request, { action: "screen", target: sessionTarget(a.value) });
-	const png = Buffer.from(
-		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-		"base64",
-	);
-	const file = join(dir(), "screen.png");
-	writeFileSync(file, png);
-	gateway.response("A", request.id, { ok: true, image: { mime: "image/png", filename: "screen.png", path: file } });
-	await new Promise<void>((resolve) => setImmediate(resolve));
-	const sent = a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
-	assert.equal(sent.body.msgtype, "image");
-	assert.equal(
-		a.ws.sent.some((frame) => frame.cmd === "aibot_upload_media_init"),
-		true,
-	);
+	message(`/wecom-aibot --sessionid ${SESSION_A} cancel`);
+	gateway.response("A", requests(a.peer)[0].id, { ok: false, error: "这一轮已结束" });
+	assert.match(prompt(), /中止请求未送达：这一轮已结束/);
 });
 
-test("a failed screen request reports the pi's reason", () => {
-	const a = add("A", SESSION_A);
-	message(`/wecom-aibot --sessionid ${SESSION_A} screen`);
-	gateway.response("A", requests(a.peer)[0].id, { ok: false, error: "该会话没有终端界面" });
-	assert.match(prompt(), /截图失败：该会话没有终端界面/);
-});
-
-test("screen is only answered by the pi it was sent to", (t) => {
+test("a request is only answered by the pi it was sent to", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const a = add("A", SESSION_A);
 	add("B", SESSION_B);
-	message(`/wecom-aibot --sessionid ${SESSION_A} screen`);
+	message(`/wecom-aibot --sessionid ${SESSION_A} cancel`);
 	const count = a.ws.sent.length;
 	gateway.response("B", requests(a.peer)[0].id, { ok: true });
 	assert.equal(a.ws.sent.length, count, "another pi's answer is ignored");
@@ -666,7 +713,7 @@ test("cancel asks the named pi and says only that abort was requested", () => {
 test("a request nobody answers times out with the timeout named", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	add("A", SESSION_A);
-	message(`/wecom-aibot --sessionid ${SESSION_A} screen`);
+	message(`/wecom-aibot --sessionid ${SESSION_A} cancel`);
 	t.mock.timers.tick(20_000);
 	assert.match(prompt(), /20 秒内响应/);
 });
@@ -682,7 +729,7 @@ test("group participants each name their own target; nothing is shared between s
 	assert.equal(b.peer.messages()[0].task.message.text, "from bob");
 });
 
-test("entering a chat sends nothing at all", () => {
+test("entering a chat sends a chooser through the dedicated welcome reply without starting a task", () => {
 	const a = add("A", SESSION_A);
 	add("B", SESSION_B);
 	const count = a.ws.sent.length;
@@ -691,7 +738,11 @@ test("entering a chat sends nothing at all", () => {
 		headers: { req_id: "enter" },
 		body: { from: { userid: "user" }, event: { eventtype: "enter_chat" } },
 	});
-	assert.equal(a.ws.sent.length, count);
+	assert.equal(a.ws.sent.length, count + 1);
+	assert.equal(a.ws.sent.at(-1).cmd, "aibot_respond_welcome_msg");
+	assert.equal(a.ws.sent.at(-1).headers.req_id, "enter");
+	assert.equal(picker().main_title.title, "2 个在线会话");
+	assert.equal(a.peer.messages().length, 0);
 });
 
 test("duplicate callbacks produce one task and one command reply", () => {
@@ -723,7 +774,7 @@ test("switching sessions invalidates old callbacks and late disconnects cannot r
 	assert.equal(gateway.taskStatus("A", inbound.headers.req_id, "running"), false);
 	message("old target", { quote: quote(SESSION_A) });
 	assert.equal(peer.messages().length, 0);
-	assert.match(prompt(), /无法定位/);
+	assert.match(asked().sub_title_text, /看不出是哪个在线会话/);
 });
 
 test("task states and notifications are checked against their owning pi and session", async () => {
@@ -737,18 +788,20 @@ test("task states and notifications are checked against their owning pi and sess
 		gateway.notify(
 			"A",
 			{ chatId: "user", chatType: 1 },
-			notificationPayload("notification", b.value.source, "wrong source"),
+			notificationPayload("notice", b.value.source, "wrong source"),
 		),
 		/session/,
 	);
 	assert.equal(a.ws.sent.length, count);
 	assert.equal(gateway.taskStatus("A", inbound.headers.req_id, "running"), true);
+	assert.equal(a.ws.sent.length, count, "running sends nothing");
+	assert.equal(gateway.taskStatus("A", inbound.headers.req_id, "failed"), true);
 	const status = a.ws.sent.at(-1);
 	assert.equal(status.headers.req_id, inbound.headers.req_id);
 	assert.deepEqual(status.body.stream, {
 		id: status.body.stream.id,
-		finish: false,
-		content: formatProcessingStatus(SESSION_A, "running"),
+		finish: true,
+		content: formatProcessingStatus(SESSION_A, "failed", "project-A"),
 	});
 });
 
@@ -757,7 +810,14 @@ test("concurrent notifications preserve separate source metadata and acknowledge
 	const b = add("B", SESSION_B);
 	let resolvedA = false;
 	const first = gateway
-		.notify("A", { chatId: "user-A", chatType: 1 }, notificationPayload("notification", a.value.source, "result A"))
+		.notify(
+			"A",
+			{ chatId: "user-A", chatType: 1 },
+			{
+				...notificationPayload("notice", a.value.source, "result A"),
+				...controlled(a.value.source),
+			},
+		)
 		.then(() => {
 			resolvedA = true;
 		});
@@ -765,21 +825,21 @@ test("concurrent notifications preserve separate source metadata and acknowledge
 	const second = gateway.notify(
 		"B",
 		{ chatId: "group-B", chatType: 2 },
-		notificationPayload("notification", b.value.source, "result B"),
+		{ ...notificationPayload("notice", b.value.source, "result B"), ...controlled(b.value.source) },
 	);
 	const frameB = a.ws.sent.at(-1);
 	a.ws.acknowledge(frameB);
 	await second;
 	assert.equal(resolvedA, false);
-	assert.ok(frameA.body.markdown.content.includes(`🏷️ provider-A · model-A  \n🆔 session: ${SESSION_A}`));
-	assert.ok(frameB.body.markdown.content.includes(`🏷️ provider-B · model-B  \n🆔 session: ${SESSION_B}`));
+	assert.equal(frameA.body.template_card.main_title.desc, "🤖 model-A · provider-A");
+	assert.equal(frameB.body.template_card.main_title.desc, "🤖 model-B · provider-B");
 	assert.equal(frameA.body.chatid, "user-A");
 	assert.equal(frameB.body.chat_type, 2);
 	a.ws.acknowledge(frameA);
 	await first;
 });
 
-test("allowlists hide and gate sessions, including quoted targets, and enter_chat stays silent", () => {
+test("allowlists hide and gate sessions, including quoted targets, and blocked enter_chat stays silent", () => {
 	const a = add("A", SESSION_A, (value) => {
 		value.config.allowedUserIds = ["alice"];
 	});
@@ -791,7 +851,7 @@ test("allowlists hide and gate sessions, including quoted targets, and enter_cha
 	message("cannot reach B", { from: { userid: "alice" }, quote: quote(SESSION_B) });
 	assert.equal(a.peer.messages().length, 1);
 	assert.equal(b.peer.messages().length, 0);
-	assert.equal(prompt().includes(SESSION_B), false);
+	assert.equal(JSON.stringify(asked()).includes(SESSION_B), false, "a hidden session is never offered");
 	const count = a.ws.sent.length;
 	a.ws.receive({
 		cmd: "aibot_event_callback",
@@ -916,39 +976,34 @@ test("replacement by an external client stops reconnecting but retains registrat
 	assert.equal(b.peer.messages().length, 1);
 });
 
-test("the gateway ends a task's status message before WeCom's 10-minute limit, and a closed message stays closed", (t) => {
+test("a task that runs past ten minutes still answers its own message: the reply starts with the result", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
 	const a = add("A", SESSION_A);
 	a.ws.onSend = (frame) => {
-		if (frame.cmd === "ping") a.ws.acknowledge(frame);
+		if (frame.cmd === "ping" || frame.cmd === "aibot_respond_msg") a.ws.acknowledge(frame);
 	};
 	const task = send(SESSION_A, "long task");
-	const statuses = () =>
+	const replies = () =>
 		a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === task.headers.req_id);
 	assert.equal(gateway.taskStatus("A", task.headers.req_id, "running"), true);
-	t.mock.timers.tick(589_000);
-	assert.equal(statuses().length, 1);
-	t.mock.timers.tick(1_000);
-	const [opened, closed] = statuses();
-	assert.equal(closed.body.stream.id, opened.body.stream.id);
-	assert.equal(closed.body.stream.finish, true);
-	assert.equal(closed.body.stream.content, formatProcessingStatus(SESSION_A, "waiting"));
-	assert.equal(
-		gateway.taskStatus("A", task.headers.req_id, "settled"),
-		false,
-		"the result follows as a notification instead",
+	t.mock.timers.tick(30 * 60_000);
+	assert.equal(replies().length, 0, "nothing while it runs");
+	assert.equal(gateway.taskStatus("A", task.headers.req_id, "settled"), true);
+	await gateway.notify(
+		"A",
+		{ chatId: "user", chatType: 1 },
+		{ kind: "result", source: a.value.source, text: "LATE-RESULT", taskId: task.headers.req_id },
 	);
-	assert.equal(statuses().length, 2);
+	assert.equal(replies().length, 1);
+	assert.match(replies()[0].body.stream.content, /LATE-RESULT$/);
 });
 
-test("a final state WeCom could not take while disconnected is sent after the reconnect", (t) => {
+test("a reply WeCom could not take while disconnected is sent after the reconnect", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
 	const a = add("A", SESSION_A);
 	const task = send(SESSION_A, "task");
-	gateway.taskStatus("A", task.headers.req_id, "running");
 	a.ws.close();
-	// Settled is deferred until its result arrives; the status itself is closed by the grace timer.
-	assert.equal(gateway.taskStatus("A", task.headers.req_id, "settled"), true);
+	assert.equal(gateway.taskStatus("A", task.headers.req_id, "failed"), false, "not written");
 	t.mock.timers.tick(1_000);
 	const next = FakeWebSocket.instances.at(-1)!;
 	assert.notEqual(next, a.ws);
@@ -958,7 +1013,7 @@ test("a final state WeCom could not take while disconnected is sent after the re
 	assert.equal(flushed.length, 1);
 	assert.equal(flushed[0].headers.req_id, task.headers.req_id);
 	assert.equal(flushed[0].body.stream.finish, true);
-	assert.equal(flushed[0].body.stream.content, formatProcessingStatus(SESSION_A, "settled"));
+	assert.equal(flushed[0].body.stream.content, formatProcessingStatus(SESSION_A, "failed", "project-A"));
 });
 
 test("an unreadable message from a permitted sender is answered instead of routed or guessed", () => {
@@ -972,278 +1027,88 @@ test("an unreadable message from a permitted sender is answered instead of route
 	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
 });
 
-function imageFile(data = Buffer.alloc(64, 1)): { dir: string; path: string } {
-	const dir = mkdtempSync(join(tmpdir(), "gateway-image-"));
-	const path = join(dir, "screen.png");
-	writeFileSync(path, data);
-	return { dir, path };
-}
-
-test("an image notification uploads media and sends a native image message instead of Markdown", async () => {
+test("an unconfirmed card is never followed by a duplicate", async () => {
 	const a = add("A", SESSION_A);
-	const file = imageFile();
-	const sent: any[] = [];
-	a.ws.onSend = (frame: any) => {
-		sent.push(frame);
-		if (frame.cmd === "aibot_upload_media_init")
-			a.ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { upload_id: "upload-1" } });
-		else if (frame.cmd === "aibot_upload_media_chunk") a.ws.acknowledge(frame);
-		else if (frame.cmd === "aibot_upload_media_finish")
-			a.ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { media_id: "media-1" } });
-		else if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
-	};
-	await gateway.notify(
-		"A",
-		{ chatId: "user", chatType: 1 },
-		{
-			kind: "completion",
-			source: a.value.source,
-			text: "fallback",
-			image: { mime: "image/png", filename: "pi-notification.png", path: file.path },
-		},
-	);
-	assert.equal(
-		sent.some((frame) => frame.cmd === "aibot_upload_media_init"),
-		true,
-	);
-	const push = sent.find((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(push.body.msgtype, "image");
-	assert.equal(push.body.image.media_id, "media-1");
-	assert.equal(push.body.markdown, undefined);
-	rmSync(file.dir, { recursive: true, force: true });
-});
-
-test("an unconfirmed image send never falls back to a duplicate Markdown notification", async () => {
-	const a = add("A", SESSION_A);
-	const file = imageFile(TINY_PNG);
 	const previous = a.ws.onSend;
 	a.ws.onSend = (frame) => {
 		previous?.(frame);
 		if (frame.cmd === "aibot_send_msg") a.ws.close();
 	};
-	try {
-		await assert.rejects(
-			gateway.notify(
-				"A",
-				{ chatId: "user", chatType: 1 },
-				{
-					kind: "reply",
-					source: a.value.source,
-					text: "FALLBACK",
-					image: { mime: "image/png", filename: "image.png", path: file.path },
-				},
-			),
-			{ outcome: "unknown" },
-		);
-		assert.equal(a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
-		assert.equal(a.ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.msgtype, "image");
-	} finally {
-		rmSync(file.dir, { recursive: true, force: true });
-	}
-});
-
-test("a rejected image send falls back to one Markdown body with its rejection reason", async () => {
-	const a = add("A", SESSION_A);
-	const file = imageFile(TINY_PNG);
-	const previous = a.ws.onSend;
-	a.ws.onSend = (frame) => {
-		previous?.(frame);
-		if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame, frame.body.msgtype === "image" ? 40006 : 0);
-	};
-	try {
-		await gateway.notify(
+	await assert.rejects(
+		gateway.notify(
 			"A",
 			{ chatId: "user", chatType: 1 },
-			{
-				kind: "reply",
-				source: a.value.source,
-				text: "FALLBACK",
-				image: { mime: "image/png", filename: "image.png", path: file.path },
-			},
-		);
-		const pushes = a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-		assert.deepEqual(
-			pushes.map((frame) => frame.body.msgtype),
-			["image", "markdown"],
-		);
-		assert.match(pushes[1].body.markdown.content, /FALLBACK[\s\S]*发送被拒绝.*40006/);
-	} finally {
-		rmSync(file.dir, { recursive: true, force: true });
-	}
-});
-
-test("a missing image file falls back to the Markdown body with a visible reason", async () => {
-	const a = add("A", SESSION_A);
-	const sent: any[] = [];
-	a.ws.onSend = (frame: any) => {
-		sent.push(frame);
-		if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
-	};
-	await gateway.notify(
-		"A",
-		{ chatId: "user", chatType: 1 },
-		{
-			kind: "completion",
-			source: a.value.source,
-			text: "fallback body",
-			image: { mime: "image/png", filename: "pi-notification.png", path: "/definitely/missing/pi-notification.png" },
-		},
+			{ kind: "notice", source: a.value.source, text: "BODY", ...controlled(a.value.source) },
+		),
+		{ outcome: "unknown" },
 	);
-	const push = sent.find((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(push.body.msgtype, "markdown");
-	assert.match(push.body.markdown.content, /fallback body/);
-	assert.match(push.body.markdown.content, /图片发送失败：.*ENOENT.*已改发文字/);
+	assert.deepEqual(
+		a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").map((frame) => frame.body.msgtype),
+		["template_card"],
+	);
 });
 
-test("a notification fallback always retains its reason inside the UTF-8 byte limit", async () => {
+test("a notification without a control card is sent as Markdown with its session; a foreign card ID is never sent", async () => {
 	const a = add("A", SESSION_A);
 	a.ws.onSend = (frame) => {
 		if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
 	};
+	const chat = { chatId: "user", chatType: 1 as const };
+	await gateway.notify("A", chat, notificationPayload("notice", a.value.source, "PLAIN", { title: "标题" }));
+	const foreign = { ...controlled(a.value.source).control, cardId: controlCardId(SESSION_B) };
+	await gateway.notify("A", chat, { ...notificationPayload("notice", a.value.source, "FOREIGN"), control: foreign });
+	const pushes = a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.deepEqual(
+		pushes.map((frame) => frame.body.msgtype),
+		["markdown", "markdown"],
+	);
+	assert.equal(
+		pushes[0].body.markdown.content,
+		`🆔 session: ${SESSION_A}  \n🏷️ project-A · provider-A · model-A\n\n**标题**\n\nPLAIN`,
+	);
+	assert.match(pushes[1].body.markdown.content, /FOREIGN$/);
+});
+
+test("a card WeCom refuses is sent as Markdown within the UTF-8 byte limit, with its title", async () => {
+	const a = add("A", SESSION_A);
+	a.ws.onSend = (frame) => {
+		if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame, frame.body.msgtype === "template_card" ? 40058 : 0);
+	};
 	await gateway.notify(
 		"A",
 		{ chatId: "user", chatType: 1 },
 		{
-			kind: "reply",
+			kind: "result",
 			source: a.value.source,
+			title: "⛔ 已中止",
 			text: "汉🙂".repeat(10000),
-			image: { mime: "image/png", filename: "missing.png", path: "/definitely/missing.png" },
+			aborted: true,
+			...controlled(a.value.source),
 		},
 	);
-	const content = a.ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.markdown.content;
+	const pushes = a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.deepEqual(
+		pushes.map((frame) => frame.body.msgtype),
+		["template_card", "markdown"],
+	);
+	const content = pushes[1].body.markdown.content;
 	assert.ok(Buffer.byteLength(content, "utf8") <= 20_480);
-	assert.match(content, /图片发送失败：.*ENOENT.*已改发文字/);
+	assert.match(content, /\*\*⛔ 已中止\*\*/);
+	assert.ok(content.endsWith("（本轮任务已中止）"));
 	assert.equal(content.includes("\ufffd"), false);
 });
 
-test("a rejected media upload falls back to Markdown while a rejected image send also falls back", async () => {
-	const a = add("A", SESSION_A);
-	const file = imageFile();
-	const sent: any[] = [];
-	a.ws.onSend = (frame: any) => {
-		sent.push(frame);
-		if (frame.cmd === "aibot_upload_media_init")
-			a.ws.receive({ headers: frame.headers, errcode: 40006, errmsg: "bad size" });
-		else if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
-	};
-	await gateway.notify(
-		"A",
-		{ chatId: "user", chatType: 1 },
-		{
-			kind: "completion",
-			source: a.value.source,
-			text: "fallback body",
-			image: { mime: "image/png", filename: "pi-notification.png", path: file.path },
-		},
-	);
-	const push = sent.find((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(push.body.msgtype, "markdown");
-	assert.match(push.body.markdown.content, /图片发送失败：.*已改发文字/);
-	rmSync(file.dir, { recursive: true, force: true });
-});
-
-async function until<T>(read: () => T | undefined): Promise<T> {
-	for (let attempt = 0; attempt < 200; attempt++) {
-		const value = read();
-		if (value !== undefined) return value;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	throw new Error("condition not reached");
-}
-
-function logs(peer: Peer): string[] {
-	return peer.frames.flatMap((frame) => (frame.type === "log" ? [frame.message] : []));
-}
-
-/** The file as WeCom received it: the upload chunks in order. */
-function uploaded(ws: FakeWebSocket): Buffer {
-	const chunks = ws.sent.filter((frame) => frame.cmd === "aibot_upload_media_chunk");
-	chunks.sort((left, right) => left.body.chunk_index - right.body.chunk_index);
-	return Buffer.concat(chunks.map((frame) => Buffer.from(frame.body.base64_data, "base64")));
-}
-
-test("every image the gateway sends carries its session marker; a file it cannot mark is sent as it is", async () => {
-	const a = add("A", SESSION_A);
-	const file = imageFile(TINY_PNG);
-	const image = { mime: "image/png" as const, filename: "pi-notification.png", path: file.path };
-	const previous = a.ws.onSend;
-	a.ws.onSend = (frame: any) => {
-		previous?.(frame);
-		if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
-	};
-	await gateway.notify(
-		"A",
-		{ chatId: "user", chatType: 1 },
-		{ kind: "reply", source: a.value.source, text: "x", image },
-	);
-	assert.equal(inspectPng(uploaded(a.ws))?.session, SESSION_A);
-	assert.ok(logs(a.peer).some((line) => line.includes(`图片已打标记：PNG 1×1；块 IHDR,tEXt,IDAT`)));
-	a.ws.sent.length = 0;
-	writeFileSync(file.path, Buffer.alloc(64, 1));
-	await gateway.notify(
-		"A",
-		{ chatId: "user", chatType: 1 },
-		{ kind: "reply", source: a.value.source, text: "x", image },
-	);
-	assert.deepEqual(uploaded(a.ws), Buffer.alloc(64, 1));
-	assert.ok(logs(a.peer).some((line) => line.startsWith("图片未打标记")));
-	rmSync(file.dir, { recursive: true, force: true });
-});
-
-test("a screenshot carries the marker of the session that took it", async () => {
-	const a = add("A", SESSION_A);
-	message(`/wecom-aibot --sessionid ${SESSION_A} screen`);
-	const file = imageFile(TINY_PNG);
-	gateway.response("A", requests(a.peer)[0].id, {
-		ok: true,
-		image: { mime: "image/png", filename: "screen.png", path: file.path },
-	});
-	await until(() => (a.ws.sent.some((frame) => frame.cmd === "aibot_upload_media_chunk") ? true : undefined));
-	assert.equal(inspectPng(uploaded(a.ws))?.session, SESSION_A);
-	rmSync(file.dir, { recursive: true, force: true });
-});
-
-test("a quoted image routes to the session whose marker it carries", async (t) => {
+test("a quoted image names no session, so the sender is asked", () => {
 	const a = add("A", SESSION_A);
 	const b = add("B", SESSION_B);
-	const encrypted = encryptMedia(stampPng(TINY_PNG, SESSION_B));
-	const fetchMock = t.mock.method(globalThis, "fetch", async () => new Response(new Uint8Array(encrypted)));
-	const url = "https://wecom.example.invalid/q?sign=SECRET";
-	message("这张图里的结果", { quote: { msgtype: "image", image: { url, aeskey: MEDIA_KEY.toString("base64") } } });
-	const task = await until(() => b.peer.messages()[0]);
-	assert.equal(task.task.message.text, "这张图里的结果");
-	assert.equal(a.peer.messages().length, 0);
-	const line = await until(() => logs(a.peer).find((entry) => entry.startsWith("引用图片：")));
-	assert.match(line, new RegExp(`读到标记 session ${SESSION_B}$`));
-	assert.doesNotMatch(line, /SECRET/);
-	assert.equal(String(fetchMock.mock.calls[0].arguments[0]), url);
-});
-
-test("a quoted image without a marker is reported, never redirected to another pi", async (t) => {
-	const a = add("A", SESSION_A);
-	const b = add("B", SESSION_B);
-	t.mock.method(globalThis, "fetch", async () => new Response(new Uint8Array(encryptMedia(TINY_PNG))));
 	message("这张图", { quote: { msgtype: "image", image: { url: "https://example.invalid/q" } } });
-	await until(() => logs(a.peer).find((entry) => entry.startsWith("引用图片：")));
 	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
-	assert.match(prompt(), /引用的通知或图片无法定位到一个在线会话/);
-	assert.doesNotMatch(logs(a.peer).join("\n"), /读到标记/);
+	assert.match(asked().sub_title_text, /^引用的消息或图片看不出是哪个在线会话/);
 });
 
-test("a quoted image naming a session that is gone is reported, with the sessions that are left", async (t) => {
-	const a = add("A", SESSION_A);
-	const encrypted = encryptMedia(stampPng(TINY_PNG, SESSION_B));
-	t.mock.method(globalThis, "fetch", async () => new Response(new Uint8Array(encrypted)));
-	message("这张图", { quote: { msgtype: "image", image: { url: "https://example.invalid/q" } } });
-	await until(() => logs(a.peer).find((entry) => entry.startsWith("引用图片：")));
-	assert.equal(a.peer.messages().length, 0);
-	assert.match(prompt(), new RegExp(`无法定位到一个在线会话[\\s\\S]*session: ${SESSION_A}`));
-});
-
-test("a quote carrying both text and an image is answered by the text, without downloading", async (t) => {
+test("a quote carrying both text and an image is answered by the text", () => {
 	const a = add("A", SESSION_A);
 	const b = add("B", SESSION_B);
-	const fetchMock = t.mock.method(globalThis, "fetch");
 	message("混合", {
 		quote: {
 			msgtype: "mixed",
@@ -1253,18 +1118,121 @@ test("a quote carrying both text and an image is answered by the text, without d
 	});
 	assert.equal(b.peer.messages()[0].task.message.text, "混合");
 	assert.equal(a.peer.messages().length, 0);
-	assert.equal(fetchMock.mock.callCount(), 0);
 });
 
-test("an image quoted by someone outside the allowlist is never downloaded", async (t) => {
-	add("A", SESSION_A, (value) => {
+// ---------------------------------------------------------------- cards and clicks
+
+/** A button press on one of the bot's cards, as WeCom delivers it. */
+function click(taskId: string, key: string, body: Record<string, unknown> = {}) {
+	const id = `click-${++sequence}`;
+	FakeWebSocket.instances.at(-1)!.receive({
+		cmd: "aibot_event_callback",
+		headers: { req_id: id },
+		body: {
+			msgid: id,
+			from: { userid: "user" },
+			chattype: "single",
+			msgtype: "event",
+			event: {
+				eventtype: "template_card_event",
+				template_card_event: { card_type: "button_interaction", event_key: key, task_id: taskId },
+			},
+			...body,
+		},
+	});
+	return id;
+}
+
+/** Publish this pi's control card and return what WeCom received. */
+async function publish(instanceId: string, ws: FakeWebSocket, source: GatewayRegistration["source"]) {
+	ws.onSend = (frame) => {
+		if (frame.cmd === "aibot_send_msg" || frame.cmd === "aibot_respond_update_msg") ws.acknowledge(frame);
+	};
+	await gateway.notify(
+		instanceId,
+		{ chatId: "user", chatType: 1 },
+		{
+			...notificationPayload("result", source, "RESULT", { title: "✅ 完成" }),
+			...controlled(source),
+		},
+	);
+	return ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1).body.template_card;
+}
+
+function clicks(peer: Peer) {
+	return peer.frames.filter(
+		(frame): frame is Extract<ServerFrame, { type: "request" }> =>
+			frame.type === "request" && frame.request.action === "click",
+	);
+}
+
+function updates(ws: FakeWebSocket) {
+	return ws.sent.filter((frame) => frame.cmd === "aibot_respond_update_msg");
+}
+
+test("a click WeCom delivers twice is handled once; a group event without its chat goes nowhere", async () => {
+	const a = add("A", SESSION_A);
+	const card = await publish("A", a.ws, a.value.source);
+	const refresh = controlKey("refresh", SESSION_A);
+	click(card.task_id, refresh, { msgid: "same-click" });
+	click(card.task_id, refresh, { msgid: "same-click" });
+	assert.equal(clicks(a.peer).length, 1);
+	click(card.task_id, refresh, { chattype: "group" });
+	assert.equal(clicks(a.peer).length, 1);
+});
+
+test("a card this gateway no longer draws says so in place: an old notification card, an old list, an unknown key", async () => {
+	const a = add("A", SESSION_A);
+	a.ws.onSend = (frame) => {
+		if (frame.cmd === "aibot_respond_update_msg") a.ws.acknowledge(frame);
+	};
+	const pressed = [
+		click(`c@${SESSION_A}@0123456789ab`, "screen"),
+		click(`c@${SESSION_A}@0123456789ab`, "full-e-abc"),
+		click("p@0123456789ab", "select@session-A"),
+		click("p@0123456789ab", "clear"),
+		click("probe-button-1", "anything"),
+	];
+	assert.equal(clicks(a.peer).length, 0, "nothing reaches a pi");
+	assert.deepEqual(
+		updates(a.ws).map((frame) => frame.headers.req_id),
+		pressed,
+	);
+	for (const update of updates(a.ws)) {
+		const card = update.body.template_card;
+		assert.equal(card.main_title.title, "这张卡已停用");
+		assert.deepEqual(
+			card.button_list.map((button: { text: string }) => button.text),
+			["已停用"],
+		);
+	}
+	assert.equal(a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "no message is pushed");
+	// Someone the bot does not serve gets silence.
+	gateway.unregister("A", a.peer);
+	add("B", SESSION_B, (value) => {
 		value.config.allowedUserIds = ["alice"];
 	});
-	const fetchMock = t.mock.method(globalThis, "fetch");
-	message("x", {
-		from: { userid: "mallory" },
-		quote: { msgtype: "image", image: { url: "https://example.invalid/q" } },
+	click("probe-button-2", "anything");
+	assert.equal(updates(a.ws).length, pressed.length);
+});
+
+test("a click's follow-up is pushed to the card's chat as Markdown, within WeCom's byte limit", async () => {
+	const a = add("A", SESSION_A);
+	const previous = a.ws.onSend;
+	a.ws.onSend = (frame: any) => {
+		previous?.(frame);
+		if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
+	};
+	const group = { chatId: "group-1", chatType: 2 as const };
+	await gateway.push("A", group, { kind: "markdown", text: "全文正文" });
+	const markdown = a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
+	assert.deepEqual(markdown.body, {
+		chatid: "group-1",
+		chat_type: 2,
+		msgtype: "markdown",
+		markdown: { content: "全文正文" },
 	});
-	await new Promise<void>((resolve) => setImmediate(resolve));
-	assert.equal(fetchMock.mock.callCount(), 0);
+	await assert.rejects(gateway.push("A", group, { kind: "markdown", text: "x".repeat(20_481) }), {
+		outcome: "rejected",
+	});
 });

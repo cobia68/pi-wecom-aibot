@@ -34,10 +34,10 @@
     "prepublishOnly": "npm run check",
     "lint": "node scripts/biome-check.mjs --lint",
     "format": "node scripts/biome-check.mjs --write",
-    "check:biome": "node scripts/biome-check.mjs"
+    "check:biome": "node scripts/biome-check.mjs",
+    "probe:cards": "node --import tsx scripts/card-probe.ts"
   },
   "dependencies": {
-    "@resvg/resvg-wasm": "2.6.2",
     "ws": "^8.22.0"
   },
   "peerDependencies": {

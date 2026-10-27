@@ -7,11 +7,8 @@ import { type Component, Container, Spacer, type TUI } from "@earendil-works/pi-
 const sdk = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 const themes = await import(pathToFileURL(join(sdk, "modes/interactive/theme/theme.js")).href);
 export const fixtureTheme = (name: string): Theme => themes.getThemeByName(name);
-/** pi's theme list (system, dark, light, then any custom ones), as ctx.ui.getAllThemes() returns it. */
-export const fixtureThemes = (): { name: string; path: string | undefined }[] => themes.getAvailableThemesWithPaths();
 /** pi's live theme, as pi sets it at startup; components read it while they render. */
-export const setLiveTheme = (name: string): void => themes.initTheme(name);
-setLiveTheme("dark");
+themes.initTheme("dark");
 
 /** The real Container layout pi 1.3 mounts; only terminal I/O and the editor/footer text are fake. */
 export function installTuiFixture(ctx: ExtensionContext) {
@@ -54,8 +51,6 @@ export function installTuiFixture(ctx: ExtensionContext) {
 	Object.assign(ctx, { mode: "tui", hasUI: true });
 	Object.assign(ctx.ui, {
 		theme: fixtureTheme("dark"),
-		getTheme: (name: string) => fixtureTheme(name),
-		getAllThemes: fixtureThemes,
 		setStatus(key: string, text: string | undefined) {
 			if (text === undefined) statuses.delete(key);
 			else statuses.set(key, text);

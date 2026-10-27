@@ -8,6 +8,7 @@ import { after, afterEach, beforeEach, test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { GatewayClient } from "../../src/extension/gateway-client.ts";
 import { type GatewayServer, startGatewayServer } from "../../src/gateway/server.ts";
+import { controlCardFor, isControlCardId, sessionFingerprint } from "../../src/shared/control-card.ts";
 import { gatewayEndpoint } from "../../src/shared/gateway-protocol.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
 
@@ -48,6 +49,7 @@ function piHarness(id: string) {
 			getSessionId: () => state.sessionId,
 			getHeader: () => null,
 			getBranch: () => state.entries,
+			getEntries: () => state.entries,
 			getLeafId: () => state.entries.at(-1)?.id ?? null,
 		},
 		ui: { notify() {}, confirm: async () => true },
@@ -62,6 +64,9 @@ function piHarness(id: string) {
 		},
 		registerCommand(_name: string, options: { handler: typeof command }) {
 			command = options.handler;
+		},
+		appendEntry(customType: string, data: unknown) {
+			state.entries.push({ type: "custom", id: randomUUID(), customType, data });
 		},
 		sendUserMessage(content: any) {
 			state.sent.push(content);
@@ -165,7 +170,16 @@ beforeEach(async () => {
 		createWebSocket(url) {
 			const ws = new FakeWebSocket(url);
 			ws.onSend = (frame) => {
-				if (["aibot_subscribe", "aibot_send_msg", "aibot_respond_msg", "ping"].includes(frame.cmd))
+				if (
+					[
+						"aibot_subscribe",
+						"aibot_send_msg",
+						"aibot_respond_msg",
+						"aibot_respond_update_msg",
+						"aibot_respond_welcome_msg",
+						"ping",
+					].includes(frame.cmd)
+				)
 					ws.acknowledge(frame);
 			};
 			queueMicrotask(() => ws.open());
@@ -184,6 +198,21 @@ after(async () => {
 	assert.equal(dirname(sandbox), tmpdir());
 	await rm(sandbox, { recursive: true, force: true });
 });
+
+/** A published card is its own pi's control card: directory, model · provider, session, and why it came. */
+function assertCard(frame: any, id: "A" | "B", note: string): void {
+	const card = frame.body.template_card;
+	assert.equal(frame.body.msgtype, "template_card");
+	assert.ok(controlCardFor(card.task_id, `session-${id}`), card.task_id);
+	assert.equal(card.main_title.title, `📁 project-${id}`);
+	assert.equal(card.main_title.desc, `🤖 Model ${id} · provider-${id}`);
+	assert.equal(card.sub_title_text, `🆔 session-id: session-${id}`);
+	assert.equal(noteOf(frame), note);
+}
+
+function noteOf(frame: any): string {
+	return frame.body.template_card.horizontal_content_list.at(-1).value.replace(/^\d\d:\d\d /, "");
+}
 
 test("/wecom-aibot connect registers only that session; repeating connect or disconnecting never changes shared config or other pi", async () => {
 	const saved = await readFile(CONFIG_FILE, "utf8");
@@ -220,22 +249,210 @@ test("two real extension instances process separate tasks and publish their own 
 	await result(b, "RESULT-B");
 	await result(a, "RESULT-A");
 	const pushes = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(pushes.length, 2);
-	assert.match(
-		pushes[0].body.markdown.content,
-		/project-B.*\n🏷️ provider-B · Model B.*\n🆔 session: session-B\n\nRESULT-B$/,
+	assert.ok(
+		pushes.every((frame) => isControlCardId(frame.body?.template_card?.task_id)),
+		"pi publishes only control cards",
 	);
-	assert.match(
-		pushes[1].body.markdown.content,
-		/project-A.*\n🏷️ provider-A · Model A.*\n🆔 session: session-A\n\nRESULT-A$/,
+	const intros = pushes.filter((frame) => noteOf(frame) === "已接入");
+	assert.equal(intros.length, 2, "each pi introduces its control once in the new task chat");
+	for (const id of ["A", "B"])
+		assert.ok(intros.some((frame) => controlCardFor(frame.body.template_card.task_id, `session-${id}`)));
+	const results = pushes.filter((frame) => !intros.includes(frame));
+	assert.equal(results.length, 2);
+	assertCard(results[0], "B", "✅ 本轮完成");
+	assertCard(results[1], "A", "✅ 本轮完成");
+	// Either card lists both sessions online, the one that sent it selected.
+	for (const [frame, id] of [
+		[results[0], "B"],
+		[results[1], "A"],
+	] as const) {
+		const dropdown = frame.body.template_card.button_selection;
+		assert.deepEqual(
+			dropdown.option_list.map((option: { text: string }) => option.text),
+			["project-A · on-A", "project-B · on-B"],
+		);
+		assert.equal(dropdown.selected_id, sessionFingerprint(`session-${id}`));
+	}
+	// Each result went out as its pi's card (a scheduled notification owns it): neither message has a reply.
+	assert.equal(FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg").length, 0);
+});
+
+test("group participants each choose their own message's session, reach separate real pi instances, and nothing is remembered", async () => {
+	const { a, b } = await pair();
+	const ws = FakeWebSocket.instances[0];
+	/** The question card a message without a session gets, found by the message it quotes. */
+	const question = async (text: string) => {
+		await until(
+			() => ws.sent.some((frame) => frame.body?.template_card?.quote_area?.quote_text === text),
+			`question card for ${text}`,
+		);
+		return ws.sent.find((frame) => frame.body?.template_card?.quote_area?.quote_text === text).body.template_card;
+	};
+	const choose = (taskId: string, userid: string, sessionId: string) => {
+		const id = randomUUID();
+		ws.receive({
+			cmd: "aibot_event_callback",
+			headers: { req_id: id },
+			body: {
+				msgid: id,
+				chattype: "group",
+				chatid: "group-1",
+				from: { userid },
+				msgtype: "event",
+				event: {
+					eventtype: "template_card_event",
+					template_card_event: {
+						task_id: taskId,
+						event_key: "send",
+						selected_items: {
+							selected_item: [
+								{ question_key: "target", option_ids: { option_id: [sessionFingerprint(sessionId)] } },
+							],
+						},
+					},
+				},
+			},
+		});
+	};
+	chatMessage({ chattype: "group", chatid: "group-1", from: { userid: "alice" }, text: { content: "@bot task A" } });
+	chatMessage({ chattype: "group", chatid: "group-1", from: { userid: "bob" }, text: { content: "@bot task B" } });
+	const askA = await question("task A");
+	const askB = await question("task B");
+	assert.equal(a.state.sent.length + b.state.sent.length, 0, "nothing reaches a pi before its sender chooses");
+	// Bob cannot send Alice's message anywhere.
+	choose(askA.task_id, "bob", "session-B");
+	assert.equal(a.state.sent.length + b.state.sent.length, 0);
+	choose(askA.task_id, "alice", "session-A");
+	choose(askB.task_id, "bob", "session-B");
+	await until(() => a.state.sent.length === 1 && b.state.sent.length === 1, "chosen tasks delivered over IPC");
+	assert.equal(a.state.sent[0][0].text, "task A");
+	assert.equal(b.state.sent[0][0].text, "task B");
+	await result(a, "ORIGINAL-A-RESULT");
+	await result(b, "ORIGINAL-B-RESULT");
+	await until(() => ws.sent.filter((frame) => frame.body?.stream?.finish === true).length === 2, "both results");
+	const results = ws.sent.filter((frame) => frame.body?.stream?.finish === true);
+	assert.ok(
+		results.some(
+			(frame) => /session-A/.test(frame.body.stream.content) && /ORIGINAL-A-RESULT/.test(frame.body.stream.content),
+		),
+		"each result replies to its own message",
 	);
-	await until(
-		() =>
-			FakeWebSocket.instances[0].sent.filter(
-				(frame) => frame.cmd === "aibot_respond_msg" && frame.body.stream.finish === true,
-			).length === 2,
-		"both status messages close",
+	assert.ok(
+		results.some(
+			(frame) => /session-B/.test(frame.body.stream.content) && /ORIGINAL-B-RESULT/.test(frame.body.stream.content),
+		),
 	);
+	// Alice's next message is asked about again: her earlier choice is not remembered.
+	chatMessage({ chattype: "group", chatid: "group-1", from: { userid: "alice" }, text: { content: "@bot now B" } });
+	const again = await question("now B");
+	assert.equal(a.state.sent.length + b.state.sent.length, 2, "not sent before she chooses");
+	choose(again.task_id, "alice", "session-B");
+	await until(() => b.state.sent.length === 2, "Alice's later task reaches B");
+	assert.equal(a.state.sent.length, 1);
+	assert.equal(b.state.sent[1][0].text, "now B");
+});
+
+test("each connect publishes a new card listing every session online then: one, then two, then three", async () => {
+	const ws = () => FakeWebSocket.instances[0];
+	const pis = ["A", "B", "C"].map((id) => piHarness(id));
+	harnesses.push(...pis);
+	const cards: any[] = [];
+	for (const [index, pi] of pis.entries()) {
+		await pi.emit("session_start");
+		await pi.command("connect");
+		await until(
+			() => pi.ready() && ws().sent.filter((frame) => frame.cmd === "aibot_send_msg").length === index + 1,
+			`card ${index + 1}`,
+		);
+		cards.push(
+			ws()
+				.sent.filter((frame) => frame.cmd === "aibot_send_msg")
+				.at(-1).body.template_card,
+		);
+	}
+	const listed = (card: any) => card.button_selection.option_list.map((option: { text: string }) => option.text);
+	assert.deepEqual(listed(cards[0]), ["project-A · on-A"]);
+	assert.deepEqual(listed(cards[1]), ["project-A · on-A", "project-B · on-B"]);
+	assert.deepEqual(listed(cards[2]), ["project-A · on-A", "project-B · on-B", "project-C · on-C"]);
+	// Each card shows, and has selected, the session that connected.
+	for (const [index, id] of ["A", "B", "C"].entries()) {
+		assert.ok(controlCardFor(cards[index].task_id, `session-${id}`));
+		assert.equal(cards[index].main_title.title, `📁 project-${id}`);
+		assert.equal(cards[index].button_selection.selected_id, sessionFingerprint(`session-${id}`));
+	}
+});
+
+test("one control card shows any session online: choosing B on A's card has B redraw it, and A is never touched", async () => {
+	const { a, b } = await pair();
+	const ws = FakeWebSocket.instances[0];
+	await a.command("connect");
+	await until(() => ws.sent.some((frame) => frame.cmd === "aibot_send_msg"), "A publishes a new card");
+	const card = ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.template_card;
+	assert.ok(controlCardFor(card.task_id, "session-A"));
+	assert.deepEqual(
+		card.button_selection.option_list.map((option: { text: string }) => option.text),
+		["project-A · on-A", "project-B · on-B"],
+	);
+	const aborts: string[] = [];
+	Object.assign(a.ctx, { abort: () => aborts.push("A") });
+	Object.assign(b.ctx, { abort: () => aborts.push("B") });
+	a.state.idle = false;
+	b.state.idle = false;
+	const press = (key: string, session: string) => {
+		const id = randomUUID();
+		ws.receive({
+			cmd: "aibot_event_callback",
+			headers: { req_id: id },
+			body: {
+				msgid: id,
+				chattype: "single",
+				from: { userid: "user" },
+				msgtype: "event",
+				event: {
+					eventtype: "template_card_event",
+					template_card_event: {
+						task_id: card.task_id,
+						event_key: key,
+						selected_items: {
+							selected_item: [
+								{ question_key: "session", option_ids: { option_id: [sessionFingerprint(session)] } },
+							],
+						},
+					},
+				},
+			},
+		});
+		return id;
+	};
+	const updated = (id: string) =>
+		until(
+			() => ws.sent.some((frame) => frame.cmd === "aibot_respond_update_msg" && frame.headers.req_id === id),
+			"the card is redrawn",
+		).then(
+			() =>
+				ws.sent.find((frame) => frame.cmd === "aibot_respond_update_msg" && frame.headers.req_id === id).body
+					.template_card,
+		);
+	// 中止任务 pressed on A's card with B chosen: B shows itself; neither run is asked to stop.
+	const switched = await updated(press(`abort@${sessionFingerprint("session-A")}`, "session-B"));
+	assert.equal(switched.task_id, card.task_id, "the same card");
+	assert.equal(switched.main_title.title, "📁 project-B");
+	assert.equal(switched.sub_title_text, "🆔 session-id: session-B");
+	assert.equal(switched.source.desc, "执行中");
+	assert.match(switched.horizontal_content_list.at(-1).value, /已切换到本会话/);
+	assert.equal(switched.button_selection.selected_id, sessionFingerprint("session-B"));
+	assert.ok(
+		switched.button_list.every((button: { key: string }) =>
+			button.key.endsWith(`@${sessionFingerprint("session-B")}`),
+		),
+	);
+	assert.deepEqual(aborts, []);
+	// Now the card shows B: its 中止任务 asks B, and B alone, to confirm.
+	const confirming = await updated(press(`abort@${sessionFingerprint("session-B")}`, "session-B"));
+	assert.equal(confirming.source.desc, "等待确认中止");
+	assert.equal(confirming.main_title.title, "📁 project-B");
+	await updated(press(`abort-confirm@${sessionFingerprint("session-B")}`, "session-B"));
+	assert.deepEqual(aborts, ["B"]);
 });
 
 test("one pi exiting cannot clear another pi's pending notification or relabel its reconnect snapshot", async () => {
@@ -258,11 +475,8 @@ test("one pi exiting cannot clear another pi's pending notification or relabel i
 	);
 	const pushes = FakeWebSocket.instances[1].sent.filter((frame) => frame.cmd === "aibot_send_msg");
 	assert.equal(pushes.length, 1);
-	assert.match(
-		pushes[0].body.markdown.content,
-		/project-B.*\n🏷️ provider-B · Model B.*\n🆔 session: session-B\n\nFROZEN-B-RESULT$/,
-	);
-	assert.doesNotMatch(pushes[0].body.markdown.content, /UNRELATED|unrelated/);
+	assertCard(pushes[0], "B", "✅ 本轮完成");
+	assert.doesNotMatch(JSON.stringify(pushes[0].body), /UNRELATED|unrelated/);
 	assert.equal(server.gateway.size, 1);
 });
 
@@ -287,7 +501,7 @@ test("switching one pi's session invalidates its old route while the other pi co
 	assert.equal(b.state.sent.length, 0);
 	await b.notification({ chatid: "user", content: "B unaffected" });
 	const push = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
-	assert.match(push.body.markdown.content, /session: session-B\n\nB unaffected$/);
+	assertCard(push, "B", "📣 B unaffected");
 });
 
 test("a refused registration stops that pi's bridge, so status and connect see it as disconnected", async () => {
@@ -306,6 +520,7 @@ test("a refused registration stops that pi's bridge, so status and connect see i
 	assert.match(notices.at(-1)!, /^🛑 企业微信智能机器人：已停止（该完整 session ID 已由另一个 pi 注册/);
 	assert.equal(server.gateway.size, 2);
 	c.state.sessionId = "session-C";
+	await c.emit("session_start");
 	await c.command("connect");
 	await until(c.ready, "C registered after switching its session");
 	assert.equal(c.state.clients.length, 2);

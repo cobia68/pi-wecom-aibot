@@ -6,8 +6,10 @@ import { createConnection, createServer, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { sessionControlCard } from "../../src/extension/control-view.ts";
 import { GatewayClient, type GatewayClientOptions } from "../../src/extension/gateway-client.ts";
 import { type GatewayServer, startGatewayServer } from "../../src/gateway/server.ts";
+import { controlCardFor, controlCardId } from "../../src/shared/control-card.ts";
 import {
 	type ClientFrame,
 	GATEWAY_PROTOCOL_VERSION,
@@ -23,7 +25,7 @@ import {
 	writeFrame,
 } from "../../src/shared/gateway-protocol.ts";
 import { notificationPayload } from "../../src/shared/notification.ts";
-import type { NotificationSource } from "../../src/shared/notification-types.ts";
+import type { SessionSource } from "../../src/shared/notification-types.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
 import { sandboxHome, socketDirectory } from "../support/home-sandbox.ts";
 
@@ -58,7 +60,7 @@ export async function until(predicate: () => boolean, description: string, timeo
 	}
 }
 
-function source(id: string): NotificationSource {
+function source(id: string): SessionSource {
 	return {
 		sessionId: `session-${id}`,
 		provider: `provider-${id}`,
@@ -152,8 +154,12 @@ function messageFor(_id: string, content: string) {
 	});
 }
 
+/** pi publishes every notification as its session's control card. */
 function notification(id: string, content = id) {
-	return notificationPayload("notification", source(id), content);
+	return {
+		...notificationPayload("notice", source(id), content),
+		control: { cardId: controlCardId(`session-${id}`), card: sessionControlCard(source(id), { status: "idle" }) },
+	};
 }
 
 /** A fake gateway on the real endpoint; closed after the test. */
@@ -223,13 +229,16 @@ test("a temporary IPC registration is hidden and only watches identities while o
 	assert.equal(running.gateway.size, 2, "the temporary client keeps the shared transport alive");
 	messageFor("A", "/wecom-aibot sessions");
 	await until(
-		() => FakeWebSocket.instances[0].sent.some((frame) => frame.cmd === "aibot_respond_msg"),
-		"session listing",
+		() =>
+			FakeWebSocket.instances[0].sent.some(
+				(frame) => frame.body?.template_card?.button_selection?.question_key === "pick",
+			),
+		"session chooser",
 	);
-	const list = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg").at(-1).body
-		.stream.content;
-	assert.match(list, /当前有 1 个在线会话/);
-	assert.doesNotMatch(list, /session-I/);
+	const list = FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)
+		.body.template_card;
+	assert.equal(list.main_title.title, "1 个在线会话");
+	assert.doesNotMatch(JSON.stringify(list), /session-I/);
 	inbound("cannot run", {}, "session-I");
 	await assert.rejects(identifying.connection.notify(user, notification("I")), /临时识别连接/);
 	assert.equal(identifying.tasks.length, 0);
@@ -277,25 +286,29 @@ test("a pi cannot send a notification labelled with another pi's session", async
 	await b.connection.notify({ chatId: "group", chatType: 2 }, notification("B"));
 	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
 	assert.equal(pushes.length, 2);
-	assert.match(pushes[0].body.markdown.content, /directory-A.*\n🏷️ provider-A · model-A.*\n🆔 session: session-A/);
-	assert.match(pushes[1].body.markdown.content, /directory-B.*\n🏷️ provider-B · model-B.*\n🆔 session: session-B/);
+	for (const [index, id] of ["A", "B"].entries()) {
+		const card = pushes[index].body.template_card;
+		assert.equal(card.main_title.title, `📁 directory-${id}`);
+		assert.equal(card.main_title.desc, `🤖 model-${id} · provider-${id}`);
+		assert.ok(controlCardFor(card.task_id, `session-${id}`));
+	}
 	assert.equal(pushes[1].body.chat_type, 2);
 });
 
-test("IPC carries a screen request to the pi and returns its answer", async () => {
+test("IPC carries a cancel request to the pi and returns its answer", async () => {
 	await startServer();
 	const requests: { id: string; request: any }[] = [];
 	const a = client("A", {}, { onRequest: (id, request) => requests.push({ id, request }) });
 	a.connection.start();
 	await until(() => a.connection.isReady(), "A ready");
-	messageFor("A", "/wecom-aibot --sessionid session-A screen");
+	messageFor("A", "/wecom-aibot --sessionid session-A cancel");
 	await until(() => requests.length === 1, "request delivered");
-	assert.equal(requests[0].request.action, "screen");
-	a.connection.respond(requests[0].id, { ok: false, error: "该会话没有终端界面" });
+	assert.equal(requests[0].request.action, "cancel");
+	a.connection.respond(requests[0].id, { ok: false, error: "这一轮已结束" });
 	await until(
 		() =>
 			FakeWebSocket.instances[0].sent.some((frame) =>
-				String(frame.body?.stream?.content ?? "").includes("截图失败"),
+				String(frame.body?.stream?.content ?? "").includes("中止请求未送达：这一轮已结束"),
 			),
 		"failure reported",
 	);
@@ -338,9 +351,9 @@ test("IPC carries a target-only live-state query to just that pi and keeps no se
 		[
 			"· directory-A · provider-A · model-A · 执行中",
 			"",
-			"/wecom-aibot --sessionid session-A send --prompt <正文>",
-			"/wecom-aibot --sessionid session-A screen",
-			"/wecom-aibot --sessionid session-A cancel",
+			"/wecom-aibot --session-id session-A send --prompt <正文>",
+			"/wecom-aibot --session-id session-A card",
+			"/wecom-aibot --session-id session-A cancel",
 		].join("\n"),
 	);
 	busy = false;
@@ -374,8 +387,15 @@ test("IPC reports an explicit WeCom rejection without treating it as retryable",
 	autoAcknowledge = false;
 	const rejected = assert.rejects(a.connection.notify(user, notification("A")), { outcome: "rejected" });
 	const ws = FakeWebSocket.instances[0];
-	await until(() => ws.sent.some((frame) => frame.cmd === "aibot_send_msg"), "push attempted");
-	ws.acknowledge(ws.sent.at(-1), 40014);
+	const pushes = () => ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	await until(() => pushes().length === 1, "card attempted");
+	ws.acknowledge(pushes()[0], 40014);
+	// A refused card is sent once more as Markdown; only when that is refused too is the notification rejected.
+	await until(() => pushes().length === 2, "Markdown fallback attempted");
+	assert.equal(pushes()[0].body.msgtype, "template_card");
+	assert.equal(pushes()[1].body.msgtype, "markdown");
+	assert.match(pushes()[1].body.markdown.content, /^🆔 session: session-A/);
+	ws.acknowledge(pushes()[1], 40014);
 	await rejected;
 });
 
@@ -499,10 +519,19 @@ test("model metadata updates reach the session list", async () => {
 	// The acknowledged send follows the metadata update in the same ordered IPC channel.
 	await a.connection.notify(user, notification("A"));
 	messageFor("A", "/wecom-aibot sessions");
-	const replies = () => FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg");
-	await until(() => replies().some((frame) => /在线会话/.test(frame.body.stream.content)), "session listing");
-	const text = replies().at(-1).body.stream.content;
-	assert.match(text, /new-directory · new-provider · new-model · 空闲/);
+	const replies = () =>
+		FakeWebSocket.instances[0].sent.filter(
+			(frame) => frame.body?.template_card?.button_selection?.question_key === "pick",
+		);
+	await until(() => replies().length > 0, "session chooser");
+	const list = replies().at(-1).body.template_card;
+	assert.equal(list.button_selection.option_list[0].text, "new-direc… · on-A · 空闲");
+	assert.deepEqual(list.horizontal_content_list[0], { keyname: "空闲", value: "new-directory · on-A · new-model" });
+	// The list leaves the provider out; querying this ID still exposes its full metadata.
+	messageFor("A", "/wecom-aibot --sessionid session-A");
+	const details = () => FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg");
+	await until(() => details().length > 0, "session details");
+	assert.match(details().at(-1).body.stream.content, /new-directory · new-provider · new-model · 空闲/);
 });
 
 test("clients re-register the same identity after a gateway crash", async () => {

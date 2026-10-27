@@ -18,6 +18,7 @@ import {
 	verifyProof,
 	writeFrame,
 } from "../shared/gateway-protocol.ts";
+import { errorMessage } from "../shared/text.ts";
 import { type GatewayPeer, WeComGateway } from "./runtime.ts";
 import type { WeComClientOptions } from "./wecom-client.ts";
 
@@ -204,14 +205,18 @@ export async function startGatewayServer(options: GatewayServerOptions): Promise
 					case "status":
 						gateway.taskStatus(registered.instanceId, frame.taskId, frame.state);
 						return;
-					case "notify": {
+					case "notify":
+					case "push": {
 						if (pending.has(frame.id) || pending.size >= 100) {
 							fail("请求重复或未确认通知过多");
 							return;
 						}
 						pending.add(frame.id);
-						void gateway
-							.notify(registered.instanceId, frame.chat, frame.notification)
+						const delivery =
+							frame.type === "notify"
+								? gateway.notify(registered.instanceId, frame.chat, frame.notification)
+								: gateway.push(registered.instanceId, frame.chat, frame.item);
+						void delivery
 							.then(() => send({ type: "result", id: frame.id }))
 							.catch((error: unknown) =>
 								send({
@@ -271,10 +276,6 @@ function copyRegistration(value: unknown): GatewayRegistration | undefined {
 		config: { botId: config.botId, ...(config.allowedUserIds ? { allowedUserIds: [...config.allowedUserIds] } : {}) },
 		...(value.identifyOnly ? { identifyOnly: true } : {}),
 	};
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function filesystemSocket(endpoint: string): boolean {

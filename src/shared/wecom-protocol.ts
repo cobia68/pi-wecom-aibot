@@ -7,11 +7,6 @@ export type WeComState = "disconnected" | "connecting" | "connected" | "subscrib
 
 /** A command such as aibot_send_msg is acknowledged within this time, or its outcome is unknown. */
 export const WECOM_ACK_TIMEOUT_MS = 10_000;
-/** Upload limits from the 上传临时素材 section: an image is 5 bytes to 10MB, one chunk at most 512KB. */
-export const WECOM_IMAGE_MIN_BYTES = 5;
-export const WECOM_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
-/** A stream message must reach finish=true within 10 minutes of its first send. */
-export const WECOM_STREAM_LIFETIME_MS = 600_000;
 export const WECOM_REPLY_WINDOW_MS = 24 * 60 * 60_000;
 
 /** A conversation: chatId is the userid in a single chat (chatType 1), the group chatid otherwise. */
@@ -40,7 +35,7 @@ export interface InboundMessage {
 	attachments: Attachment[];
 }
 
-export function record(value: unknown): Record<string, unknown> | undefined {
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value !== null && typeof value === "object" && !Array.isArray(value)
 		? (value as Record<string, unknown>)
 		: undefined;
@@ -48,12 +43,12 @@ export function record(value: unknown): Record<string, unknown> | undefined {
 
 /** The sender, checked against allowlists before anything else is parsed. */
 export function senderOf(value: unknown): string | undefined {
-	const userid = record(record(value)?.from)?.userid;
+	const userid = asRecord(asRecord(value)?.from)?.userid;
 	return typeof userid === "string" && userid ? userid : undefined;
 }
 
 export function parseInbound(value: unknown): InboundMessage | undefined {
-	const body = record(value);
+	const body = asRecord(value);
 	const userid = senderOf(body);
 	if (!body || !userid) return undefined;
 	const group = body.chattype === "group";
@@ -77,21 +72,21 @@ export function parseInbound(value: unknown): InboundMessage | undefined {
 
 /** Plain text of a message or quote; images and files become placeholders. undefined when malformed. */
 export function messageText(value: unknown): string | undefined {
-	const node = record(value);
+	const node = asRecord(value);
 	switch (node?.msgtype) {
 		case "text":
-			return stringOrUndefined(record(node.text)?.content);
+			return stringOrUndefined(asRecord(node.text)?.content);
 		case "markdown":
-			return stringOrUndefined(record(node.markdown)?.content);
+			return stringOrUndefined(asRecord(node.markdown)?.content);
 		case "voice":
-			return stringOrUndefined(record(node.voice)?.content);
+			return stringOrUndefined(asRecord(node.voice)?.content);
 		case "mixed": {
-			const items = record(node.mixed)?.msg_item;
+			const items = asRecord(node.mixed)?.msg_item;
 			if (!Array.isArray(items)) return "";
 			const parts: string[] = [];
 			for (const item of items) {
-				const entry = record(item);
-				const part = entry?.msgtype === "text" ? stringOrUndefined(record(entry.text)?.content) : "[图片]";
+				const entry = asRecord(item);
+				const part = entry?.msgtype === "text" ? stringOrUndefined(asRecord(entry.text)?.content) : "[图片]";
 				if (part === undefined) return undefined;
 				parts.push(part);
 			}
@@ -108,36 +103,35 @@ export function messageText(value: unknown): string | undefined {
 	}
 }
 
-/** A quote never names the message it quotes: the gateway reads an image's own marker to find its session. */
-export interface QuotedImage {
-	msgtype: string;
-	quoteFields: string[];
-	/** Fields of the quoted image, names only: whether WeCom sent an aeskey, or anything else. */
-	imageFields: string[];
-	url?: string;
-	aeskey?: string;
-}
-
-export function quotedImage(value: unknown): QuotedImage | undefined {
-	const quote = record(record(value)?.quote);
+/** The quote is not words (an image, a file, a mix), so it names no session; WeCom quotes a card as text. */
+export function quotesMedia(value: unknown): boolean {
+	const quote = asRecord(asRecord(value)?.quote);
 	const msgtype = typeof quote?.msgtype === "string" ? quote.msgtype : "";
-	if (!quote || ["text", "markdown", "voice"].includes(msgtype)) return undefined;
-	let image = msgtype === "image" ? record(quote.image) : undefined;
-	if (msgtype === "mixed") {
-		const items = record(quote.mixed)?.msg_item;
-		const entry = Array.isArray(items) ? items.map(record).find((item) => item?.msgtype === "image") : undefined;
-		image = record(entry?.image);
-	}
-	return {
-		msgtype,
-		quoteFields: Object.keys(quote),
-		imageFields: image ? Object.keys(image) : [],
-		...(typeof image?.url === "string" && image.url ? { url: image.url } : {}),
-		...(typeof image?.aeskey === "string" && image.aeskey ? { aeskey: image.aeskey } : {}),
-	};
+	return !!quote && !["text", "markdown", "voice"].includes(msgtype);
 }
 
 const PLACEHOLDER = /^\[[^[\]\s]{1,20}\]$/;
+
+/**
+ * A card's dropdowns at a click, question_key → the first chosen option ID. WeCom sends them only with a
+ * button click, as {"selected_item":[{"question_key":"…","option_ids":{"option_id":["…"]}}]} (probed 2026-10).
+ */
+export function cardSelections(event: unknown): Record<string, string> | undefined {
+	const items = asRecord(asRecord(asRecord(event)?.selected_items))?.selected_item;
+	if (!Array.isArray(items)) return undefined;
+	const chosen: [string, string][] = [];
+	for (const value of items.slice(0, 10)) {
+		const item = asRecord(value);
+		const key = item?.question_key;
+		const ids = asRecord(item?.option_ids)?.option_id;
+		const id = Array.isArray(ids) ? ids[0] : undefined;
+		if (typeof key !== "string" || !key || Buffer.byteLength(key) > 1024) continue;
+		if (typeof id !== "string" || !id || Buffer.byteLength(id) > 128) continue;
+		chosen.push([key, id]);
+	}
+	// fromEntries makes own properties only: a "__proto__" key cannot reach the prototype.
+	return chosen.length ? Object.fromEntries(chosen) : undefined;
+}
 
 /** A quote's words without placeholders: "[图片]" handed to pi would read as something the user wrote. */
 function quotedWords(value: unknown): string | undefined {
@@ -160,7 +154,7 @@ function stringOrUndefined(value: unknown): string | undefined {
 function attachments(body: Record<string, unknown>): Attachment[] {
 	const result: Attachment[] = [];
 	const add = (kind: Attachment["kind"], value: unknown) => {
-		const node = record(value);
+		const node = asRecord(value);
 		if (typeof node?.url !== "string" || !node.url) return;
 		result.push({
 			kind,
@@ -171,10 +165,10 @@ function attachments(body: Record<string, unknown>): Attachment[] {
 	if (body.msgtype === "image") add("image", body.image);
 	if (body.msgtype === "file") add("file", body.file);
 	if (body.msgtype === "video") add("video", body.video);
-	const mixed = record(body.mixed)?.msg_item;
+	const mixed = asRecord(body.mixed)?.msg_item;
 	if (body.msgtype === "mixed" && Array.isArray(mixed)) {
 		for (const item of mixed) {
-			const entry = record(item);
+			const entry = asRecord(item);
 			if (entry?.msgtype === "image") add("image", entry.image);
 		}
 	}

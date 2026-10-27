@@ -98,6 +98,15 @@ test("a successful command resolves with its matching acknowledgement", async ()
 	assert.equal((await pending).errcode, 0);
 });
 
+test("a welcome uses its event req_id and the dedicated command, acknowledged like other sends", async () => {
+	const ws = connect();
+	const body = { msgtype: "template_card", template_card: { task_id: "p@0123456789ab" } };
+	const pending = client.respondWelcome("enter-event", body);
+	assert.deepEqual(ws.sent.at(-1), { cmd: "aibot_respond_welcome_msg", headers: { req_id: "enter-event" }, body });
+	ws.acknowledge();
+	assert.equal((await pending).errcode, 0);
+});
+
 test("server errors reject commands instead of looking like success", async () => {
 	const ws = connect();
 	const result = assert.rejects(client.sendMsg("test-user", 1, {}), /rejected/);
@@ -135,6 +144,22 @@ test("an unacknowledged heartbeat closes a half-open connection", async (t) => {
 	assert.equal(client.isReady(), false);
 });
 
+test("acknowledged 30-second heartbeats keep an idle connection subscribed well beyond 120 seconds", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const ws = connect();
+	ws.onSend = (frame) => ws.acknowledge(frame);
+	for (let tick = 0; tick < 10; tick++) {
+		t.mock.timers.tick(30_000);
+		assert.equal(client.isReady(), true);
+		assert.equal(ws.readyState, 1);
+	}
+	assert.equal(FakeWebSocket.instances.length, 1);
+	const heartbeats = ws.sent.filter((frame) => frame.cmd === "ping");
+	assert.equal(heartbeats.length, 10);
+	assert.equal(new Set(heartbeats.map((frame) => frame.headers.req_id)).size, 10);
+	assert.ok(heartbeats.every((frame) => frame.body === undefined));
+});
+
 test("a rejected subscription is retried with backoff and given up after five refusals, until start", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
 	client.start();
@@ -151,57 +176,4 @@ test("a rejected subscription is retried with backoff and given up after five re
 	client.start();
 	assert.equal(FakeWebSocket.instances.length, 6);
 	assert.equal(client.stopped, false);
-});
-
-test("image upload uses init, 512KB chunks and finish, then returns media_id", async () => {
-	const ws = connect();
-	ws.onSend = (frame: any) => {
-		if (frame.cmd === "aibot_upload_media_init")
-			ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { upload_id: "upload-1" } });
-		else if (frame.cmd === "aibot_upload_media_chunk")
-			ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok" });
-		else if (frame.cmd === "aibot_upload_media_finish")
-			ws.receive({ headers: frame.headers, errcode: 0, errmsg: "ok", body: { media_id: "media-1" } });
-	};
-	const data = Buffer.alloc(600 * 1024, 7);
-	assert.equal(await client.uploadImage(data, "screen.png"), "media-1");
-	const init = ws.sent.find((frame) => frame.cmd === "aibot_upload_media_init");
-	assert.equal(init.body.type, "image");
-	assert.equal(init.body.filename, "screen.png");
-	assert.equal(init.body.total_size, data.length);
-	assert.equal(init.body.total_chunks, 2);
-	assert.match(init.body.md5, /^[a-f0-9]{32}$/);
-	const chunks = ws.sent.filter((frame) => frame.cmd === "aibot_upload_media_chunk");
-	assert.deepEqual(
-		chunks.map((frame) => frame.body.chunk_index),
-		[0, 1],
-	);
-	assert.equal(Buffer.from(chunks[0].body.base64_data, "base64").length, 512 * 1024);
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_upload_media_finish").length, 1);
-});
-
-test("a rejected upload init fails as rejected instead of pretending a media_id exists", async () => {
-	const ws = connect();
-	ws.onSend = (frame: any) => ws.acknowledge(frame, 40006);
-	await assert.rejects(client.uploadImage(Buffer.from("not-a-png")), { outcome: "rejected" });
-});
-
-test("chunk uploads retry once when the acknowledgement is lost, while the upload_id and index stay idempotent", async () => {
-	const ws = connect();
-	let chunks = 0;
-	ws.onSend = (frame: any) => {
-		if (frame.cmd === "aibot_upload_media_init")
-			ws.receive({ headers: frame.headers, errcode: 0, body: { upload_id: "upload-1" } });
-		else if (frame.cmd === "aibot_upload_media_chunk") {
-			chunks += 1;
-			if (chunks === 1) ws.receive({ headers: frame.headers, errcode: 5000, errmsg: "temporary" });
-			else ws.acknowledge(frame);
-		} else if (frame.cmd === "aibot_upload_media_finish")
-			ws.receive({ headers: frame.headers, errcode: 0, body: { media_id: "media-1" } });
-	};
-	assert.equal(await client.uploadImage(Buffer.alloc(32, 1)), "media-1");
-	const sent = ws.sent.filter((frame) => frame.cmd === "aibot_upload_media_chunk");
-	assert.equal(sent.length, 2);
-	assert.equal(sent[0].body.chunk_index, sent[1].body.chunk_index);
-	assert.equal(sent[0].body.upload_id, sent[1].body.upload_id);
 });

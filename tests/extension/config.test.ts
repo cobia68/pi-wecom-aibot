@@ -75,9 +75,8 @@ test("every stored field is validated with its name and file, groups as groups",
 		[{ defaultChatId: 42 }, /defaultChatId/],
 		[{ defaultChatId: "boss with space" }, /defaultChatId.*含引号或空格/],
 		[{ defaultChatType: 2 }, /defaultChatType.*defaultChatId/],
-		[{ notificationMode: "image" }, /notificationMode/],
 		[{ notificationScope: true }, /notificationScope/],
-		[{ screenshotTheme: "" }, /screenshotTheme.*非空字符串/],
+		[{ defaultChatId: "" }, /defaultChatId.*非空字符串/],
 		[{ botId: 42, secret: "secret" }, /botId/],
 		[{ botId: "bot" }, /secret.*成组/],
 	];
@@ -96,15 +95,26 @@ test("every stored field is validated with its name and file, groups as groups",
 });
 
 test("fields of earlier versions are ignored, never migrated, and dropped by the next save", () => {
-	const old = { sendMode: "image", notifyEveryRun: true, enabled: true, welcome: "hi" };
+	const old = {
+		sendMode: "image",
+		notifyEveryRun: true,
+		enabled: true,
+		welcome: "hi",
+		notificationMode: "screenshot",
+		screenshotTheme: "light",
+	};
 	writeFileSync(CONFIG_FILE, JSON.stringify({ ...bot, ...old, futureField: 1 }));
 	assert.deepEqual(readLayer("global"), bot);
 	const { values } = mergeLayers(readLayer("global"), undefined);
-	assert.equal(values.notificationMode, "text", "sendMode is not converted");
+	assert.equal(
+		Object.hasOwn(values, "notificationMode"),
+		false,
+		"notificationMode is gone: every notification is a card",
+	);
 	assert.equal(values.notificationScope, "wecom-tasks", "notifyEveryRun is not converted");
 	// Any save of the layer drops them; a field this version does not know is still kept.
-	patchLayer("global", { set: { screenshotTheme: "light" } });
-	assert.deepEqual(readJson(), { ...bot, futureField: 1, screenshotTheme: "light" });
+	patchLayer("global", { set: { notificationScope: "all-runs" } });
+	assert.deepEqual(readJson(), { ...bot, futureField: 1, notificationScope: "all-runs" });
 });
 
 test("a missing file is no layer, while an unreadable one is an error naming it", () => {
@@ -116,7 +126,7 @@ test("a missing file is no layer, while an unreadable one is an error naming it"
 		(error: Error) => error.message.includes(CONFIG_FILE) && /JSON/.test(error.message),
 	);
 	assert.throws(
-		() => patchLayer("global", { set: { screenshotTheme: "light" } }),
+		() => patchLayer("global", { set: { notificationScope: "all-runs" } }),
 		(error: Error) => error.message.includes(CONFIG_FILE),
 	);
 	assert.equal(readFileSync(CONFIG_FILE, "utf8"), '{ "botId": "bot", ', "a corrupt file is never overwritten");
@@ -145,8 +155,8 @@ test("patchLayer merges into the file as it is now, keeping hand edits and unkno
 });
 
 test("a global layer may hold only settings, and nothing is written without a valid result", () => {
-	patchLayer("global", { set: { notificationMode: "screenshot" } });
-	assert.deepEqual(readJson(), { notificationMode: "screenshot" });
+	patchLayer("global", { set: { notificationScope: "all-runs" } });
+	assert.deepEqual(readJson(), { notificationScope: "all-runs" });
 	const before = readFileSync(CONFIG_FILE, "utf8");
 	assert.throws(() => patchLayer("global", { set: { botId: "half" } }), /secret.*成组/);
 	assert.throws(() => patchLayer("global", { set: { defaultChatType: 2 } }), /defaultChatType/);
@@ -154,8 +164,8 @@ test("a global layer may hold only settings, and nothing is written without a va
 	// A guard sees the layer as it is on disk and may refuse.
 	assert.throws(
 		() =>
-			patchLayer("global", { set: { screenshotTheme: "light" } }, (current) => {
-				assert.equal(current?.notificationMode, "screenshot");
+			patchLayer("global", { set: { notificationScope: "all-runs" } }, (current) => {
+				assert.equal(current?.notificationScope, "all-runs");
 				throw new Error("refused");
 			}),
 		/refused/,
@@ -176,21 +186,24 @@ test("a symlinked configuration stays a private symlink after an atomic update",
 });
 
 test("built-in default < global < session, and a group comes whole from one layer", () => {
-	const global = { ...bot, defaultChatId: "group", defaultChatType: 2 as const, screenshotTheme: "dark" as const };
-	const merged = mergeLayers(global, { screenshotTheme: "light", defaultChatId: "boss" });
+	const global = {
+		...bot,
+		defaultChatId: "group",
+		defaultChatType: 2 as const,
+		notificationScope: "all-runs" as const,
+	};
+	const merged = mergeLayers(global, { notificationScope: "wecom-tasks", defaultChatId: "boss" });
 	assert.deepEqual(merged.values, {
-		notificationMode: "text",
 		notificationScope: "wecom-tasks",
-		screenshotTheme: "light",
+		controlPrompts: [],
 		...bot,
 		defaultChatId: "boss",
 		// The session's target is a whole group: its type is not the global group's 2.
 		defaultChatType: 1,
 	});
 	assert.deepEqual(merged.sources, {
-		notificationMode: "default",
-		notificationScope: "default",
-		screenshotTheme: "session",
+		notificationScope: "session",
+		controlPrompts: "default",
 		botId: "global",
 		secret: "global",
 		defaultChatId: "session",
@@ -199,11 +212,8 @@ test("built-in default < global < session, and a group comes whole from one laye
 	// The type is completed by the merge only: a layer holds exactly what was saved in it.
 	writeFileSync(CONFIG_FILE, JSON.stringify({ ...bot, defaultChatId: "boss" }));
 	assert.deepEqual(readLayer("global"), { ...bot, defaultChatId: "boss" });
-	// Any pi theme name is a value; without one there is none, and the screenshot follows pi.
-	assert.equal(mergeLayers({ screenshotTheme: "rainbow-prism" }, undefined).values.screenshotTheme, "rainbow-prism");
-	assert.equal(Object.hasOwn(mergeLayers(undefined, undefined).values, "screenshotTheme"), false);
 	// A value equal to the default is still the global layer's.
-	assert.equal(mergeLayers({ notificationMode: "text" }, undefined).sources.notificationMode, "global");
+	assert.equal(mergeLayers({ notificationScope: "wecom-tasks" }, undefined).sources.notificationScope, "global");
 	assert.equal(mergeLayers(undefined, undefined).values.botId, undefined);
 });
 
@@ -216,7 +226,7 @@ test("the connection key covers credentials, target and allowlist, never the set
 			connectionOf(
 				mergeLayers(
 					{ ...bot, ...target, allowedUserIds: ["boss"] },
-					{ notificationMode: "screenshot", screenshotTheme: "light" },
+					{ notificationScope: "all-runs", controlPrompts: ["继续"] },
 				),
 			),
 		),
@@ -243,7 +253,7 @@ test("pi's own session IDs name their file; any other ID is hashed into a safe n
 	const odd = basename(layerFile({ session: "../../CON Name" }));
 	assert.match(odd, /^id-[0-9a-f]{32}\.json$/);
 	assert.notEqual(basename(layerFile({ session: CHILD.toUpperCase() })), `${CHILD.toUpperCase()}.json`);
-	writeLayer({ session: CHILD }, { screenshotTheme: "light" });
+	writeLayer({ session: CHILD }, { notificationScope: "all-runs" });
 	if (process.platform !== "win32") {
 		assert.equal(statSync(SESSIONS_DIR).mode & 0o777, 0o700);
 		assert.equal(statSync(layerFile({ session: CHILD })).mode & 0o777, 0o600);
@@ -251,31 +261,31 @@ test("pi's own session IDs name their file; any other ID is hashed into a safe n
 });
 
 test("a session reads both layers fresh and keeps its own overrides out of the global file", () => {
-	writeLayer("global", { ...bot, defaultChatId: "boss", notificationMode: "text" });
+	writeLayer("global", { ...bot, defaultChatId: "boss", notificationScope: "wecom-tasks" });
 	const { config } = sessionConfig(CHILD);
-	assert.equal(config.read().values.notificationMode, "text");
-	config.patch({ set: { notificationMode: "screenshot" } });
-	assert.deepEqual(readJson(layerFile({ session: CHILD })), { notificationMode: "screenshot" });
-	assert.equal(readJson().notificationMode, "text");
+	assert.equal(config.read().values.notificationScope, "wecom-tasks");
+	config.patch({ set: { notificationScope: "all-runs" } });
+	assert.deepEqual(readJson(layerFile({ session: CHILD })), { notificationScope: "all-runs" });
+	assert.equal(readJson().notificationScope, "wecom-tasks");
 	// Another window edits the global file: the next read sees it, the session override still wins.
-	patchLayer("global", { set: { notificationMode: "text", screenshotTheme: "light" } });
+	patchLayer("global", { set: { notificationScope: "wecom-tasks", controlPrompts: ["继续"] } });
 	const resolved = config.read();
-	assert.equal(resolved.values.notificationMode, "screenshot");
-	assert.equal(resolved.values.screenshotTheme, "light");
+	assert.equal(resolved.values.notificationScope, "all-runs");
+	assert.deepEqual(resolved.values.controlPrompts, ["继续"]);
 	assert.equal(existsSync(layerFile({ session: PARENT })), false, "a plain session never writes for another");
 });
 
 test("a broken file keeps the last good result for the places a value is used, warning once", () => {
-	writeLayer("global", { ...bot, notificationMode: "screenshot" });
+	writeLayer("global", { ...bot, notificationScope: "all-runs" });
 	const { config, reports } = sessionConfig(CHILD);
-	assert.equal(config.current().values.notificationMode, "screenshot");
+	assert.equal(config.current().values.notificationScope, "all-runs");
 	writeFileSync(CONFIG_FILE, "{ broken");
-	for (let i = 0; i < 3; i++) assert.equal(config.current().values.notificationMode, "screenshot");
+	for (let i = 0; i < 3; i++) assert.equal(config.current().values.notificationScope, "all-runs");
 	assert.equal(reports.length, 1);
 	assert.match(reports[0].message, /无法使用.*继续使用上一次有效的配置/);
 	assert.throws(() => config.read(), /JSON/, "an explicit read still fails");
-	writeLayer("global", { ...bot, notificationMode: "text" });
-	assert.equal(config.current().values.notificationMode, "text");
+	writeLayer("global", { ...bot, notificationScope: "wecom-tasks" });
+	assert.equal(config.current().values.notificationScope, "wecom-tasks");
 	writeFileSync(CONFIG_FILE, "{ broken");
 	config.current();
 	assert.equal(reports.length, 2, "a later failure warns again");
@@ -287,7 +297,10 @@ test("a broken file keeps the last good result for the places a value is used, w
 
 test("a fork takes over its parent's overrides once, then the two sessions evolve independently", () => {
 	writeLayer("global", { ...bot, defaultChatId: "team-group", defaultChatType: 2 });
-	writeLayer({ session: PARENT }, { defaultChatId: "private-user", defaultChatType: 1, screenshotTheme: "light" });
+	writeLayer(
+		{ session: PARENT },
+		{ defaultChatId: "private-user", defaultChatType: 1, notificationScope: "all-runs" },
+	);
 	const parent = sessionFile(PARENT);
 	const { config, reports } = sessionConfig(CHILD, parent);
 	const resolved = config.read();
@@ -296,16 +309,16 @@ test("a fork takes over its parent's overrides once, then the two sessions evolv
 	assert.deepEqual(readJson(layerFile({ session: CHILD })), {
 		defaultChatId: "private-user",
 		defaultChatType: 1,
-		screenshotTheme: "light",
+		notificationScope: "all-runs",
 	});
 	assert.equal(reports.length, 1);
-	assert.match(reports[0].message, /defaultChatId、defaultChatType、screenshotTheme.*一次性快照/);
+	assert.match(reports[0].message, /defaultChatId、defaultChatType、notificationScope.*一次性快照/);
 	// A snapshot: later parent changes never reach the child, and a resume never copies again.
-	writeLayer({ session: PARENT }, { screenshotTheme: "dark" });
-	assert.equal(sessionConfig(CHILD, parent).config.read().values.screenshotTheme, "light");
+	writeLayer({ session: PARENT }, { notificationScope: "wecom-tasks" });
+	assert.equal(sessionConfig(CHILD, parent).config.read().values.notificationScope, "all-runs");
 	assert.equal(reports.length, 1);
 	// Removing every override keeps the (empty) file, so the parent is never copied again.
-	config.patch({ remove: ["defaultChatId", "defaultChatType", "screenshotTheme"] });
+	config.patch({ remove: ["defaultChatId", "defaultChatType", "notificationScope"] });
 	assert.deepEqual(readJson(layerFile({ session: CHILD })), {});
 	assert.equal(sessionConfig(CHILD, parent).config.read().values.defaultChatId, "team-group");
 });
@@ -332,7 +345,11 @@ test("a broken parent layer is an error, never a silent fall back to the global 
 		() => config.read(),
 		(error: Error) => error.message.includes(layerFile({ session: PARENT })),
 	);
-	assert.throws(() => config.patch({ set: { screenshotTheme: "light" } }), /JSON/, "nor can its own layer be written");
+	assert.throws(
+		() => config.patch({ set: { notificationScope: "all-runs" } }),
+		/JSON/,
+		"nor can its own layer be written",
+	);
 	assert.equal(existsSync(layerFile({ session: CHILD })), false, "the copy is retried once the parent is fixed");
 	writeLayer({ session: PARENT }, { defaultChatId: "private-user" });
 	assert.equal(config.read().values.defaultChatId, "private-user");
@@ -343,22 +360,22 @@ test("a broken parent layer is an error, never a silent fall back to the global 
 });
 
 test("set tokens are checked together: every problem is reported and nothing is half-applied", () => {
-	assert.deepEqual(parseAssignments(["NotificationMode=SCREENSHOT", "screenshottheme=light"]), {
-		set: { notificationMode: "screenshot", screenshotTheme: "light" },
+	assert.deepEqual(parseAssignments(["NotificationScope=ALL-RUNS", "controlprompts=继续"]), {
+		set: { notificationScope: "all-runs", controlPrompts: ["继续"] },
 	});
 	assert.deepEqual(parseAssignments(["defaultChatId=group_chat", "defaultChatType=2"]), {
 		set: { defaultChatId: "group_chat", defaultChatType: 2 },
 	});
 	assert.deepEqual(parseAssignments(["defaultChatId=a=b"]), { set: { defaultChatId: "a=b", defaultChatType: 1 } });
 	const result = parseAssignments([
-		"notificationMode",
+		"notificationScope",
 		"secret=s",
 		"botId=b",
 		"bogus=1",
 		"sendMode=image",
 		"allowedUserIds=x",
-		"screenshotTheme=light",
-		"screenshotTheme=dark",
+		"controlPrompts=继续",
+		"controlPrompts=运行测试",
 		"defaultChatType=",
 		"notificationScope=everything",
 		"defaultChatId='quoted'",
@@ -372,7 +389,7 @@ test("set tokens are checked together: every problem is reported and nothing is 
 	assert.match(problems.join("\n"), /未知字段 bogus/);
 	assert.match(problems.join("\n"), /未知字段 sendMode；可用字段/, "an old name is just unknown");
 	assert.match(problems.join("\n"), /allowedUserIds 不由 config 管理/);
-	assert.match(problems.join("\n"), /screenshotTheme 重复给出/);
+	assert.match(problems.join("\n"), /controlPrompts 重复给出/);
 	assert.match(problems.join("\n"), /defaultChatType 缺少值.*unset/);
 	assert.match(problems.join("\n"), /只能是 wecom-tasks、all-runs/);
 	assert.match(problems.join("\n"), /含引号或空格/);
@@ -380,11 +397,11 @@ test("set tokens are checked together: every problem is reported and nothing is 
 });
 
 test("unset takes field names and removes whole groups", () => {
-	assert.deepEqual(parseRemovals(["defaultChatType", "SCREENSHOTTHEME"]), {
-		remove: ["defaultChatId", "defaultChatType", "screenshotTheme"],
+	assert.deepEqual(parseRemovals(["defaultChatType", "NOTIFICATIONSCOPE"]), {
+		remove: ["defaultChatId", "defaultChatType", "notificationScope"],
 	});
 	assert.deepEqual(parseRemovals(["secret"]), { remove: ["botId", "secret"] });
-	const result = parseRemovals(["screenshotTheme=light", "bogus"]);
+	const result = parseRemovals(["notificationScope=all-runs", "bogus"]);
 	assert.ok("problems" in result);
 	assert.deepEqual(result.problems.length, 2);
 	assert.match(result.problems[0], /unset 只写字段名，不带 =/);
@@ -394,12 +411,12 @@ test("unset takes field names and removes whole groups", () => {
 test("clearConfig removes the global file only, and never hides a real deletion error", (t) => {
 	clearConfig();
 	writeLayer("global", bot);
-	writeLayer({ session: CHILD }, { screenshotTheme: "light" });
+	writeLayer({ session: CHILD }, { notificationScope: "all-runs" });
 	clearConfig();
 	assert.equal(readLayer("global"), undefined);
 	assert.deepEqual(
 		readLayer({ session: CHILD }),
-		{ screenshotTheme: "light" },
+		{ notificationScope: "all-runs" },
 		"session overrides belong to their sessions",
 	);
 	mkdirSync(CONFIG_FILE);
@@ -407,4 +424,55 @@ test("clearConfig removes the global file only, and never hides a real deletion 
 	t.after(() => rmSync(CONFIG_FILE, { recursive: true, force: true }));
 	assert.throws(() => clearConfig());
 	assert.equal(readFileSync(join(CONFIG_FILE, "kept"), "utf8"), "must not be removed recursively");
+});
+
+test("the document address is global only, never settable by command, and must be a bare qq.com https URL", () => {
+	const url = "https://qyapi.weixin.qq.com/mcp/v2/bot/doc?apikey=key-0123456789";
+	patchLayer("global", { set: { docMcpUrl: url } });
+	assert.equal(readLayer("global")?.docMcpUrl, url);
+	assert.equal(mergeLayers(readLayer("global"), undefined).values.docMcpUrl, url);
+	assert.throws(() => patchLayer({ session: CHILD }, { set: { docMcpUrl: url } }), /docMcpUrl.*只能写在全局配置/);
+	assert.throws(() => patchLayer("global", { set: { docMcpUrl: "http://qyapi.weixin.qq.com/mcp" } }), /https/);
+	assert.throws(() => patchLayer("global", { set: { docMcpUrl: "https://example.com/mcp" } }), /qq\.com/);
+	const result = parseAssignments([`docMcpUrl=${url}`]);
+	assert.ok("problems" in result);
+	assert.match(result.problems.join("\n"), /docMcpUrl 只能用 \/wecom-aibot config --scope global edit/);
+	assert.deepEqual(parseRemovals(["docmcpurl"]), { remove: ["docMcpUrl"] });
+	assert.equal(
+		connectionKey(connectionOf(mergeLayers({ ...bot, docMcpUrl: url }, undefined))),
+		connectionKey(connectionOf(mergeLayers(bot, undefined))),
+		"the address is not part of a registration",
+	);
+});
+
+test("controlPrompts is a list: comma-separated in set, checked the same way in a file, and inherited like any setting", () => {
+	assert.deepEqual(parseAssignments(["controlPrompts=继续,运行测试，再提交, 总结进度"]), {
+		set: { controlPrompts: ["继续", "运行测试，再提交", "总结进度"] },
+	});
+	for (const [token, problem] of [
+		["controlPrompts=继续,,总结", /第 2 条是空的/],
+		["controlPrompts=a,a", /第 2 条与前面重复：a/],
+		[`controlPrompts=${Array.from({ length: 11 }, (_, i) => `p${i}`).join(",")}`, /最多 10 条提示词，现在 11 条/],
+		[`controlPrompts=${"长".repeat(501)}`, /第 1 条超过 500 字/],
+	] as const) {
+		const result = parseAssignments([token]);
+		assert.ok("problems" in result, token);
+		assert.match(result.problems.join("\n"), problem);
+	}
+	patchLayer("global", { set: { controlPrompts: ["继续", "运行测试"] } });
+	assert.deepEqual(readJson().controlPrompts, ["继续", "运行测试"], "a JSON array in the file");
+	const merged = mergeLayers(readLayer("global"), { controlPrompts: ["只在这个 session"] });
+	assert.deepEqual(merged.values.controlPrompts, ["只在这个 session"]);
+	assert.equal(merged.sources.controlPrompts, "session");
+	// A hand edit is checked like a typed one, naming the field and the file.
+	writeFileSync(CONFIG_FILE, JSON.stringify({ controlPrompts: "继续" }));
+	assert.throws(() => readLayer("global"), /controlPrompts 无效：必须是提示词字符串组成的数组/);
+	writeFileSync(CONFIG_FILE, JSON.stringify({ controlPrompts: ["继续\n运行测试"] }));
+	assert.throws(() => readLayer("global"), /第 1 条含换行或控制字符/);
+	assert.deepEqual(parseRemovals(["controlprompts"]), { remove: ["controlPrompts"] });
+	// No built-in prompts; an empty list is a valid override, and the default is a fresh copy each time.
+	assert.deepEqual(mergeLayers({ controlPrompts: ["继续"] }, { controlPrompts: [] }).values.controlPrompts, []);
+	const first = mergeLayers(undefined, undefined).values.controlPrompts;
+	first.push("x");
+	assert.deepEqual(mergeLayers(undefined, undefined).values.controlPrompts, []);
 });

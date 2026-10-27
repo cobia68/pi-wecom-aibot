@@ -1,11 +1,5 @@
 import { createCipheriv } from "node:crypto";
 
-/** A valid 1×1 PNG: signature, IHDR, IDAT, IEND. */
-export const TINY_PNG = Buffer.from(
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-	"base64",
-);
-
 export const MEDIA_KEY = Buffer.from(Array.from({ length: 32 }, (_, index) => index + 1));
 
 /** Encrypt as WeCom does for a long-connection media URL: AES-256-CBC, PKCS#7 padded to 32 bytes. */

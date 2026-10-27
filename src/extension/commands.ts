@@ -21,7 +21,7 @@ export const WHOAMI_WAIT_SECONDS = 300;
 const SCOPES = ["global", "session"] as const;
 export type ConfigScope = (typeof SCOPES)[number];
 
-interface WeComOption {
+interface OptionSpec {
 	name: string;
 	value: string;
 	description: string;
@@ -30,21 +30,21 @@ interface WeComOption {
 	example: string;
 }
 
-export interface WeComCommand {
+export interface CommandSpec {
 	name: string;
 	usage: string;
 	description: string;
 	maxArgs: number;
 	argsHint?: string;
-	options: WeComOption[];
+	options: OptionSpec[];
 	details: string[];
 }
 
 /** `config` has a grammar of its own (--scope, action, 字段=值), parsed by parseConfigArgs. */
-const CONFIG_COMMAND: WeComCommand = {
+const CONFIG_COMMAND: CommandSpec = {
 	name: "config",
 	usage: "config [--scope <global|session>] <动作> [字段=值 …]",
-	description: "查看或修改配置：机器人凭据、默认推送目标、通知与截图设置",
+	description: "查看或修改配置：机器人凭据、默认推送目标、通知与控制卡设置",
 	maxArgs: 0,
 	options: [
 		{
@@ -70,12 +70,12 @@ const CONFIG_COMMAND: WeComCommand = {
 		"set 写成 字段=值，可一次给多个：先全部校验再一次保存，有错误时一项都不写",
 		"botId 与 secret、defaultChatId 与 defaultChatType 各为一组，成组保存、成组删除。botId、secret 只能用 edit 输入（命令会留在输入历史中）；输入时屏幕上会显示 Secret",
 		"whoami：在要识别的聊天里把 pi 显示的 6 位验证码发给机器人（群聊需 @机器人）。识别不受白名单限制；没有接入时临时连接，不出现在在线会话列表，也不接收任务",
-		"保存配置不会断开或重连：通知设置下次使用时生效，凭据、默认目标或白名单要运行 /wecom-aibot connect 才切换；每个 session 都需手动 /wecom-aibot connect",
+		"保存配置不会断开或重连：通知范围、控制卡提示词等设置下次使用时生效，凭据、默认目标或白名单要运行 /wecom-aibot connect 才切换；每个 session 都需手动 /wecom-aibot connect",
 		"allowedUserIds（允许发任务的企微 userid 列表）不由 config 管理，请直接编辑全局配置文件",
 	],
 };
 
-const WECOM_COMMANDS: WeComCommand[] = [
+const COMMANDS: CommandSpec[] = [
 	{
 		name: "status",
 		usage: "status",
@@ -94,7 +94,8 @@ const WECOM_COMMANDS: WeComCommand[] = [
 		details: [
 			"重新读取配置，仅连接当前 session，不修改配置；接入配置不变时保留当前任务和待发通知",
 			"BotID、Secret 和默认推送目标必须齐全；目标可用 /wecom-aibot config --scope <global|session> whoami 识别保存，也可用 /wecom-aibot config --scope <global|session> set defaultChatId=<ID> 填写",
-			"注册与企微订阅均成功后，按通知方式向默认目标发送一次可引用的会话入口通知；已在线重复 connect、网络自动重连不重复发送，通知失败不撤销连接",
+			"注册与企微订阅均成功后，为默认聊天创建或复用本 session 的控制卡；重复接入、恢复同一 session 或网络重连不重发，卡片失败不撤销连接",
+			"控制卡只在点击后刷新；找不到旧卡时，在企微发 /wecom-aibot sessions，选择会话后点「打开控制卡」补发",
 			"每个 session 都需手动 /wecom-aibot connect，包括新建、恢复、分叉和重载；退出或切换会话时自动断开",
 			"凭据、白名单或默认目标变化后，connect 经确认撤销旧注册及其待处理工作；没有交互界面且有待处理工作时拒绝切换",
 		],
@@ -131,7 +132,7 @@ const WECOM_COMMANDS: WeComCommand[] = [
 		],
 		details: [
 			"省略 chatid 时发到当前接入的默认推送目标",
-			"需要正式 connect；测试通知与其他通知一样跟随通知方式，screenshot 为当前终端截图",
+			"需要正式 connect；发一张部署测试用的控制卡，点「刷新卡片」验证按钮回调",
 		],
 	},
 	{ name: "log", usage: "log", description: "查看最近 20 条日志", maxArgs: 0, options: [], details: [] },
@@ -252,17 +253,17 @@ export function configSubcommandLines(scope?: ConfigScope): string[] {
 	return alignedRows(configSubcommands(scope).map((item) => [subcommandUsage(item), item.description]));
 }
 
-export type WeComInvocation =
-	| { kind: "help"; topic?: WeComCommand }
+export type Invocation =
+	| { kind: "help"; topic?: CommandSpec }
 	| { kind: "choose" }
-	| { kind: "run"; command: WeComCommand; args: string[]; options: Map<string, string> }
+	| { kind: "run"; command: CommandSpec; args: string[]; options: Map<string, string> }
 	| { kind: "config"; config: ConfigInvocation }
 	| { kind: "error"; message: string };
 
-const HELP_OPTION: WeComOption = { name: "help", value: "", description: "显示帮助", example: "<子命令> --help" };
+const HELP_OPTION: OptionSpec = { name: "help", value: "", description: "显示帮助", example: "<子命令> --help" };
 
 /** Option names are checked against every command; values are validated later. */
-function scanWecomArgs(input: string): {
+function scanArgs(input: string): {
 	positional: string[];
 	options: Map<string, string>;
 	/** How many positional words came before each option: config's target goes before its action. */
@@ -271,7 +272,7 @@ function scanWecomArgs(input: string): {
 	help: boolean;
 	error?: string;
 } {
-	const known = new Set(WECOM_COMMANDS.flatMap((command) => command.options.map((option) => option.name)));
+	const known = new Set(COMMANDS.flatMap((command) => command.options.map((option) => option.name)));
 	const tokens = input.trim().split(/\s+/).filter(Boolean);
 	const positional: string[] = [];
 	const options = new Map<string, string>();
@@ -322,14 +323,14 @@ function scanWecomArgs(input: string): {
 	return { positional, options, positionOf, unknown, help };
 }
 
-type Scan = ReturnType<typeof scanWecomArgs>;
+type Scan = ReturnType<typeof scanArgs>;
 
-function commandNamed(name: string | undefined): WeComCommand | undefined {
-	return name === undefined ? undefined : WECOM_COMMANDS.find((command) => command.name === name.toLowerCase());
+function commandNamed(name: string | undefined): CommandSpec | undefined {
+	return name === undefined ? undefined : COMMANDS.find((command) => command.name === name.toLowerCase());
 }
 
-export function parseWecomInvocation(input: string): WeComInvocation {
-	const scan = scanWecomArgs(input);
+export function parseInvocation(input: string): Invocation {
+	const scan = scanArgs(input);
 	if (scan.error) return { kind: "error", message: scan.error };
 	for (const token of scan.unknown) {
 		const action = commandNamed(token.replace(/^--?/, ""));
@@ -397,7 +398,7 @@ export function parseWecomInvocation(input: string): WeComInvocation {
 }
 
 /** A bare invocation never stands for status. */
-function bareInvocation(scan: Scan): WeComInvocation {
+function bareInvocation(scan: Scan): Invocation {
 	if (scan.unknown.length)
 		return {
 			kind: "error",
@@ -406,7 +407,7 @@ function bareInvocation(scan: Scan): WeComInvocation {
 	if (scan.help) return { kind: "help" };
 	const [name, value] = [...scan.options][0] ?? [];
 	if (name === undefined) return { kind: "choose" };
-	const option = WECOM_COMMANDS.flatMap((command) => command.options).find((item) => item.name === name);
+	const option = COMMANDS.flatMap((command) => command.options).find((item) => item.name === name);
 	return {
 		kind: "error",
 		message: sentences(
@@ -432,15 +433,11 @@ function isScope(word: string | undefined): word is ConfigScope {
 
 /**
  * `config [--scope <global|session>] <动作> …`: the scope is the command's target and goes before the action, like
- * the WeCom side's `--sessionid <id> <动作>`; whoami's --wait goes after it. `positionOf` counts the words after
+ * the WeCom side's `--session-id <id> <动作>`; whoami's --wait goes after it. `positionOf` counts the words after
  * `config` that came before each option.
  */
-function parseConfigArgs(
-	args: string[],
-	options: Map<string, string>,
-	positionOf: Map<string, number>,
-): WeComInvocation {
-	const error = (message: string): WeComInvocation => ({
+function parseConfigArgs(args: string[], options: Map<string, string>, positionOf: Map<string, number>): Invocation {
+	const error = (message: string): Invocation => ({
 		kind: "error",
 		message: sentences(message, "查看帮助：/wecom-aibot config --help"),
 	});
@@ -488,10 +485,10 @@ function parseConfigArgs(
 			if (values.length) return error("config edit 不接受参数");
 			return scope ? { kind: "config", config: { action, scope } } : needsScope("");
 		case "set": {
-			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " screenshotTheme=light");
+			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " notificationScope=all-runs");
 			if (!values.length)
 				return error(
-					`set 需要至少一个 字段=值，例如 /wecom-aibot config --scope ${scope} set screenshotTheme=light`,
+					`set 需要至少一个 字段=值，例如 /wecom-aibot config --scope ${scope} set notificationScope=all-runs`,
 				);
 			const parsed = parseAssignments(values);
 			return "problems" in parsed
@@ -499,9 +496,9 @@ function parseConfigArgs(
 				: { kind: "config", config: { action, scope, set: parsed.set } };
 		}
 		case "unset": {
-			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " screenshotTheme");
+			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " notificationScope");
 			if (!values.length)
-				return error(`unset 需要字段名，例如 /wecom-aibot config --scope ${scope} unset screenshotTheme`);
+				return error(`unset 需要字段名，例如 /wecom-aibot config --scope ${scope} unset notificationScope`);
 			const parsed = parseRemovals(values);
 			return "problems" in parsed
 				? rejected(parsed.problems)
@@ -519,7 +516,7 @@ function parseConfigArgs(
 	}
 }
 
-function supportedOptions(command: WeComCommand): string {
+function supportedOptions(command: CommandSpec): string {
 	const names = command.options.map((option) => `--${option.name}`);
 	const usage = `/wecom-aibot ${command.name}`;
 	return names.length
@@ -528,7 +525,7 @@ function supportedOptions(command: WeComCommand): string {
 }
 
 /** Value checks, so a command never starts with a value it would reject halfway. */
-function invalidOptionValues(command: WeComCommand, args: string[], options: Map<string, string>): string | undefined {
+function invalidOptionValues(command: CommandSpec, args: string[], options: Map<string, string>): string | undefined {
 	const chatType = options.get("chat-type");
 	if (chatType !== undefined && chatType !== "1" && chatType !== "2")
 		return "--chat-type 只能是 1（单聊）或 2（群聊）";
@@ -562,7 +559,7 @@ function section(title: string, body: string[]): string[] {
 	return ["", title, ...body];
 }
 
-function hasOptionsOrArgs(command: WeComCommand): boolean {
+function hasOptionsOrArgs(command: CommandSpec): boolean {
 	return command.options.length > 0 || command.maxArgs > 0 || command === CONFIG_COMMAND;
 }
 
@@ -573,7 +570,7 @@ function configPaths(): string[] {
 	]);
 }
 
-export function wecomHelpText(topic?: WeComCommand): string {
+export function helpText(topic?: CommandSpec): string {
 	if (topic === CONFIG_COMMAND) return configHelpText();
 	return topic ? topicHelpText(topic) : totalHelpText();
 }
@@ -583,11 +580,12 @@ function totalHelpText(): string {
 		"企业微信智能机器人 — /wecom-aibot 命令帮助",
 		"用法：/wecom-aibot [子命令] [参数] [--选项 值]",
 		...section("子命令", [
-			...alignedRows(WECOM_COMMANDS.map((command) => [command.name, command.description])),
+			...alignedRows(COMMANDS.map((command) => [command.name, command.description])),
 			"",
 			"  不带子命令时弹出子命令菜单",
 			"  子命令的用法与选项：/wecom-aibot <子命令> --help（只显示帮助，不执行动作）",
-			"  企微侧另有 sessions、send、screen、cancel，在企微中发 /wecom-aibot --help 查看",
+			"  企微侧另有 sessions、send、card、screen、cancel",
+			"  在企微中发 /wecom-aibot --help 查看",
 		]),
 		...section("配置", [...configPaths(), "  字段、作用域与示例：/wecom-aibot config --help"]),
 		...section("生命周期", [
@@ -599,7 +597,7 @@ function totalHelpText(): string {
 	].join("\n");
 }
 
-function optionRows(command: WeComCommand): string[] {
+function optionRows(command: CommandSpec): string[] {
 	const rows: [string, string][] = command.options.map((option) => [
 		`--${option.name} ${option.value}`.trim(),
 		option.description,
@@ -609,7 +607,7 @@ function optionRows(command: WeComCommand): string[] {
 	return alignedRows(rows);
 }
 
-function topicHelpText(topic: WeComCommand): string {
+function topicHelpText(topic: CommandSpec): string {
 	const lines = [`${topic.name} — ${topic.description}`, `用法：/wecom-aibot ${topic.usage}`];
 	if (topic.details.length)
 		lines.push(
@@ -648,8 +646,8 @@ function configHelpText(): string {
 		...section("选项", optionRows(command)),
 		...section("示例", [
 			"  /wecom-aibot config --scope global edit",
-			"  /wecom-aibot config --scope session set screenshotTheme=light",
-			"  /wecom-aibot config --scope global set notificationMode=screenshot notificationScope=all-runs",
+			"  /wecom-aibot config --scope global set notificationScope=all-runs",
+			"  /wecom-aibot config --scope session set controlPrompts=继续,运行测试,总结进度",
 			"  /wecom-aibot config --scope session unset defaultChatId",
 			"  /wecom-aibot config --scope global whoami",
 		]),
@@ -678,26 +676,23 @@ interface Candidate {
  * one that can be followed gets its trailing space, so the next Tab goes a level deeper. A complete token gets
  * no list, so Enter runs the command instead of applying a completion.
  */
-export function completeWecom(
-	prefix: string,
-	themes: () => readonly string[],
-): { value: string; label: string }[] | null {
+export function completeArguments(prefix: string): { value: string; label: string }[] | null {
 	const tokens = prefix.trimStart().split(/\s+/);
 	const current = (tokens.pop() ?? "").toLowerCase();
 	const head = tokens.length ? `${tokens.join(" ")} ` : "";
-	const all = candidatesAt(tokens, current, themes);
+	const all = candidatesAt(tokens, current);
 	const labels = columns(all.map((item) => [item.name ?? item.value, item.description] as const));
 	const shown = all.flatMap((item, index) =>
 		item.value.toLowerCase().startsWith(current) ? [{ item, label: labels[index] }] : [],
 	);
 	if (!shown.length || shown.some(({ item }) => item.value.toLowerCase() === current)) return null;
 	const spaced = (item: Candidate) =>
-		item.takesValue || (!item.value.endsWith("=") && candidatesAt([...tokens, item.value], "", themes).length > 0);
+		item.takesValue || (!item.value.endsWith("=") && candidatesAt([...tokens, item.value], "").length > 0);
 	return shown.map(({ item, label }) => ({ value: `${head}${item.value}${spaced(item) ? " " : ""}`, label }));
 }
 
 /** The words that may follow `tokens`: config's target, positionals, options, then --help. */
-function candidatesAt(tokens: string[], current: string, themes: () => readonly string[]): Candidate[] {
+function candidatesAt(tokens: string[], current: string): Candidate[] {
 	if (!tokens.length) return topLevel();
 	const command = commandNamed(tokens[0]);
 	const rest = tokens.slice(1).map((token) => token.toLowerCase());
@@ -720,7 +715,7 @@ function candidatesAt(tokens: string[], current: string, themes: () => readonly 
 		if (!words.length) early.add(name);
 		if (command.options.some((option) => rest[i] === `--${option.name}`)) i++;
 	}
-	const option = (item: WeComOption): Candidate => ({
+	const option = (item: OptionSpec): Candidate => ({
 		value: `--${item.name}`,
 		name: `--${item.name}${item.value ? ` ${item.value}` : ""}`,
 		description: item.description,
@@ -733,12 +728,14 @@ function candidatesAt(tokens: string[], current: string, themes: () => readonly 
 	}
 	const [action] = words;
 	const scoped = used.has("scope");
+	const scopeIndex = rest.indexOf("--scope");
+	const scope = scopeIndex >= 0 ? rest[scopeIndex + 1] : undefined;
 	const configOption = (name: string) => option(command.options.find((item) => item.name === name)!);
 	// The target goes before the action; until it is given, only the actions that may go without it are offered.
 	if (action === undefined)
 		return [
 			...(scoped ? [] : [configOption("scope")]),
-			...configCandidates(words, current, themes).filter((item) => scoped || !SCOPED_ACTIONS.includes(item.value)),
+			...configCandidates(words, current, scope).filter((item) => scoped || !SCOPED_ACTIONS.includes(item.value)),
 			help,
 		];
 	// A target after the action, a --wait before it, or a write without a target is refused when run: offer nothing.
@@ -746,7 +743,7 @@ function candidatesAt(tokens: string[], current: string, themes: () => readonly 
 	if (SCOPED_ACTIONS.includes(action) && !scoped) return [];
 	if (action !== "set" && action !== "unset" && words.length > 1) return [];
 	return [
-		...configCandidates(words, current, themes),
+		...configCandidates(words, current, scope),
 		...(action === "whoami" && !used.has("wait") ? [configOption("wait")] : []),
 		help,
 	];
@@ -754,18 +751,18 @@ function candidatesAt(tokens: string[], current: string, themes: () => readonly 
 
 function topLevel(): Candidate[] {
 	return [
-		...WECOM_COMMANDS.map((command) => ({ value: command.name, description: command.description })),
+		...COMMANDS.map((command) => ({ value: command.name, description: command.description })),
 		{ value: "--help", description: HELP_OPTION.description },
 	];
 }
 
-export function wecomMenu(): { label: string; input: string }[] {
+export function commandMenu(): { label: string; input: string }[] {
 	const items = topLevel();
 	const labels = columns(items.map((item) => [item.value, item.description] as const));
 	return items.map((item, index) => ({ label: labels[index], input: item.value }));
 }
 
-function configCandidates(words: string[], current: string, themes: () => readonly string[]): Candidate[] {
+function configCandidates(words: string[], current: string, scope?: string): Candidate[] {
 	const [action, ...rest] = words.map((word) => word.toLowerCase());
 	const candidates = (items: [value: string, description: string][]): Candidate[] =>
 		items.map(([value, description]) => ({ value, description }));
@@ -782,10 +779,10 @@ function configCandidates(words: string[], current: string, themes: () => readon
 		const equals = current.indexOf("=");
 		const spec = equals < 0 ? undefined : fieldNamed(current.slice(0, equals));
 		if (spec) {
-			const values: [string, string][] =
-				spec.name === "screenshotTheme"
-					? themes().map((name): [string, string] => [name, "pi 主题"])
-					: (spec.choices ?? []).map((choice): [string, string] => [String(choice.value), choice.description]);
+			const values = (spec.choices ?? []).map((choice): [string, string] => [
+				String(choice.value),
+				choice.description,
+			]);
 			return candidates(
 				values.map(([value, description]): [string, string] => [`${spec.name}=${value}`, description]),
 			);
@@ -798,10 +795,10 @@ function configCandidates(words: string[], current: string, themes: () => readon
 	}
 	if (action === "unset")
 		return candidates(
-			FIELDS.filter((item) => !used.has(item.name.toLowerCase())).map((item): [string, string] => [
-				item.name,
-				item.label,
-			]),
+			FIELDS.filter(
+				// The document address lives only in the global layer: a session has none to remove.
+				(item) => !used.has(item.name.toLowerCase()) && (scope === "global" || item.effect !== "document"),
+			).map((item): [string, string] => [item.name, item.label]),
 		);
 	return [];
 }

@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 // Installs the same local TS loader as the real detached gateway.
 import "../../src/gateway/main.mjs";
 import { GatewayClient } from "../../src/extension/gateway-client.ts";
+import { sessionControlCard } from "../../src/extension/control-view.ts";
+import { controlCardId } from "../../src/shared/control-card.ts";
 import { notificationPayload } from "../../src/shared/notification.ts";
 
 let input = "";
@@ -24,9 +26,16 @@ const client = new GatewayClient({ config, source,
   },
 });
 process.on("message", async (message) => {
+  if (message.type === "control") {
+    try {
+      const cardId = controlCardId(source.sessionId);
+      await client.push({ chatId: message.chatId, chatType: 1 }, { kind: "control", cardId, card: sessionControlCard(source, { status: "idle" }) });
+      report({ type: "controlled", cardId });
+    } catch (error) { report({ type: "control-error", error: String(error) }); }
+  }
   if (message.type === "send") {
     try {
-      await client.notify({ chatId: message.chatId, chatType: message.chatType ?? 1 }, notificationPayload("notification", source, message.content));
+      await client.notify({ chatId: message.chatId, chatType: message.chatType ?? 1 }, notificationPayload("notice", source, message.content));
       report({ type: "sent", id: message.id });
     } catch (error) { report({ type: "send-error", id: message.id, error: String(error) }); }
   }

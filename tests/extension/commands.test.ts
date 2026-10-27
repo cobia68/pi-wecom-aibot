@@ -2,16 +2,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { completeWecom, parseWecomInvocation, wecomHelpText, wecomMenu } from "../../src/extension/commands.ts";
+import { commandMenu, completeArguments, helpText, parseInvocation } from "../../src/extension/commands.ts";
 
 function topicHelp(input: string): string {
-	const invocation = parseWecomInvocation(input);
+	const invocation = parseInvocation(input);
 	assert.equal(invocation.kind, "help", `${input} must be help`);
-	return invocation.kind === "help" ? wecomHelpText(invocation.topic) : "";
+	return invocation.kind === "help" ? helpText(invocation.topic) : "";
 }
 
 function errorOf(input: string): string {
-	const invocation = parseWecomInvocation(input);
+	const invocation = parseInvocation(input);
 	assert.equal(invocation.kind, "error", `${input} must be an error`);
 	return invocation.kind === "error" ? invocation.message : "";
 }
@@ -45,12 +45,10 @@ function sectionRows(help: string, title: string): string[] {
 	return rows;
 }
 
-/** pi's theme names, as the extension reads them from ctx.ui.getAllThemes(). */
-const themes = () => ["system", "dark", "light", "rainbow-prism"];
-const values = (prefix: string) => completeWecom(prefix, themes)?.map((item) => item.value) ?? null;
+const values = (prefix: string) => completeArguments(prefix)?.map((item) => item.value) ?? null;
 
 test("the total help lists its sections in a fixed order and never leaves trailing whitespace", () => {
-	const help = wecomHelpText();
+	const help = helpText();
 	const headers = help
 		.split("\n")
 		.filter((line) => line && !line.startsWith(" "))
@@ -82,7 +80,7 @@ test("option rows line up for every command with options", () => {
 });
 
 test("every topic help has a usage line; only config and reset name the paths, and none points back to the total help", () => {
-	const names = (completeWecom("", themes) ?? [])
+	const names = (completeArguments("") ?? [])
 		.map((item) => item.value.trim())
 		.filter((value) => !value.startsWith("-"));
 	assert.equal(names.length, 7);
@@ -103,22 +101,22 @@ test("every topic help has a usage line; only config and reset name the paths, a
 });
 
 test("the total help describes the commands it lists; setup and notify are gone without aliases", () => {
-	const commands = sectionRows(wecomHelpText(), "子命令");
+	const commands = sectionRows(helpText(), "子命令");
 	assert.equal(commands.length, 7);
 	// `help` is not an action: only `--help` opens help, so it must not appear among the subcommands.
-	assert.doesNotMatch(wecomHelpText(), /^ {2}help {2}/m);
+	assert.doesNotMatch(helpText(), /^ {2}help {2}/m);
 	for (const row of commands) assert.ok(descriptionColumn(row), row);
 	// Usage lives under the command itself, not in the total help or another topic.
-	assert.doesNotMatch(wecomHelpText(), /用法：\/wecom-aibot config/);
+	assert.doesNotMatch(helpText(), /用法：\/wecom-aibot config/);
 	assert.doesNotMatch(topicHelp("connect --help"), /用法：\/wecom-aibot config/);
 	for (const removed of ["setup", "notify", "setup whoami", "notify on"]) {
-		assert.doesNotMatch(wecomHelpText(), new RegExp(`^ {2}${removed} {2}`, "m"));
-		const invocation = parseWecomInvocation(removed);
+		assert.doesNotMatch(helpText(), new RegExp(`^ {2}${removed} {2}`, "m"));
+		const invocation = parseInvocation(removed);
 		assert.equal(invocation.kind, "error", removed);
 		assert.match(invocation.kind === "error" ? invocation.message : "", /未知子命令/, removed);
 	}
 	// whoami moved under config: the old name says where it is now, and runs nothing.
-	assert.doesNotMatch(wecomHelpText(), /^ {2}whoami {2}/m);
+	assert.doesNotMatch(helpText(), /^ {2}whoami {2}/m);
 	assert.equal(errorOf("whoami"), "whoami 已移到 config 下：/wecom-aibot config whoami");
 	assert.equal(errorOf("whoami --wait 30"), errorOf("whoami"));
 });
@@ -126,19 +124,10 @@ test("the total help describes the commands it lists; setup and notify are gone 
 test("config help documents scopes, every field with its default, and no retired name", () => {
 	const help = topicHelp("config --help");
 	assert.equal(topicHelp("config --scope session set --help"), help, "help inside config is config's own help");
-	for (const field of [
-		"botId",
-		"secret",
-		"defaultChatId",
-		"defaultChatType",
-		"notificationMode",
-		"notificationScope",
-		"screenshotTheme",
-	])
+	for (const field of ["botId", "secret", "defaultChatId", "defaultChatType", "notificationScope", "controlPrompts"])
 		assert.match(help, new RegExp(`^ {2}${field} `, "m"), field);
-	assert.match(help, /text：.*（默认）/);
 	assert.match(help, /wecom-tasks：.*（默认）/);
-	assert.match(help, /screenshotTheme .*pi 主题名.*不设置时跟随 pi 当前的界面主题/);
+	assert.doesNotMatch(help, /screenshotTheme|截图/);
 	assert.match(help, /^用法：\/wecom-aibot config \[--scope <global\|session>\] <动作> \[字段=值 …\]$/m);
 	assert.match(help, /作用域是命令的目标，写在动作前：config --scope <global\|session> <动作>/);
 	assert.match(help, /^ {2}--scope <global\|session> {2,}写在动作前/m);
@@ -159,7 +148,7 @@ test("config help documents scopes, every field with its default, and no retired
 
 test("connection help never promises persisted consent or recommends the old start action", () => {
 	for (const help of [
-		wecomHelpText(),
+		helpText(),
 		topicHelp("config --help"),
 		topicHelp("connect --help"),
 		topicHelp("disconnect --help"),
@@ -177,14 +166,15 @@ test("help says saving configuration never connects, and whoami only listens thr
 	assert.match(config, /whoami 只识别不保存/);
 	const connect = topicHelp("connect --help");
 	assert.match(connect, /默认推送目标必须齐全/);
-	assert.match(connect, /可引用的会话入口/);
+	assert.match(connect, /创建或复用本 session 的控制卡/);
+	assert.match(connect, /控制卡只在点击后刷新/);
 	assert.match(connect, /没有交互界面且有待处理工作时拒绝切换/);
-	assert.doesNotMatch(wecomHelpText(), /wecom-aibot use/);
+	assert.doesNotMatch(helpText(), /wecom-aibot use/);
 });
 
 test("config takes its target before the action: --scope, action, 字段=值; reading may omit the target", () => {
 	const config = (input: string) => {
-		const invocation = parseWecomInvocation(input);
+		const invocation = parseInvocation(input);
 		assert.equal(invocation.kind, "config", input);
 		return invocation.kind === "config" ? invocation.config : undefined;
 	};
@@ -194,20 +184,20 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 	assert.deepEqual(config("config --scope global show"), { action: "show", scope: "global" });
 	assert.deepEqual(config("config --scope session show"), { action: "show", scope: "session" });
 	assert.deepEqual(config("config --scope=global edit"), { action: "edit", scope: "global" });
-	assert.deepEqual(config("config --scope session set screenshotTheme=light notificationScope=all-runs"), {
+	assert.deepEqual(config("config --scope session set defaultChatId=boss notificationScope=all-runs"), {
 		action: "set",
 		scope: "session",
-		set: { screenshotTheme: "light", notificationScope: "all-runs" },
+		set: { defaultChatId: "boss", defaultChatType: 1, notificationScope: "all-runs" },
 	});
 	assert.deepEqual(config("config --scope session unset defaultChatId"), {
 		action: "unset",
 		scope: "session",
 		remove: ["defaultChatId", "defaultChatType"],
 	});
-	assert.deepEqual(config("config --scope global unset screenshotTheme"), {
+	assert.deepEqual(config("config --scope global unset notificationScope"), {
 		action: "unset",
 		scope: "global",
-		remove: ["screenshotTheme"],
+		remove: ["notificationScope"],
 	});
 	assert.deepEqual(config("config whoami"), { action: "whoami", seconds: 300 });
 	assert.deepEqual(config("config --scope session whoami --wait 30"), {
@@ -217,23 +207,23 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 	});
 	const errors: [string, RegExp][] = [
 		[
-			"config set screenshotTheme=light",
-			/^set 需要 --scope：\/wecom-aibot config --scope session set screenshotTheme=light，或 --scope global/,
+			"config set notificationScope=all-runs",
+			/^set 需要 --scope：\/wecom-aibot config --scope session set notificationScope=all-runs，或 --scope global/,
 		],
 		["config edit", /^edit 需要 --scope/],
 		["config unset defaultChatId", /^unset 需要 --scope：.*config --scope session unset defaultChatId/],
 		["config --scope everyone set x=1", /--scope 只能是 global 或 session/],
 		["config --scope global set --scope session x=1", /--scope 重复给出/],
 		[
-			"config global set notificationMode=text",
-			/作用域改为 --scope，写在动作前：\/wecom-aibot config --scope global set notificationMode=text/,
+			"config global set notificationScope=all-runs",
+			/作用域改为 --scope，写在动作前：\/wecom-aibot config --scope global set notificationScope=all-runs/,
 		],
-		["config set session notificationMode=text", /config --scope session set notificationMode=text/],
+		["config set session notificationScope=all-runs", /config --scope session set notificationScope=all-runs/],
 		["config global", /作用域改为 --scope，写在动作前：\/wecom-aibot config --scope global。/],
 		["config session delete x", /config --scope session <动作>/],
 		["config --global set x=1", /^未知选项 --global。作用域写成 --scope global$/],
 		["config --show", /show 是动作，不带 --/],
-		["config --scope session set --notificationMode text", /字段写成 notificationMode=…，不用 --/],
+		["config --scope session set --notificationScope all-runs", /字段写成 notificationScope=…，不用 --/],
 		["config --scope session set --mode text", /未知选项 --mode.*--scope、--wait、--help；字段写成 字段=值/],
 		["config show --wait 30", /--wait 只用于 whoami/],
 		["config whoami --wait 5", /--wait 须为 10～600/],
@@ -242,13 +232,13 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 		["config show extra", /不接受参数/],
 		["config --scope global edit now", /不接受参数/],
 		["config --scope session set", /至少一个 字段=值/],
-		["config --scope session set screenshotTheme=light bogus=1", /未知字段 bogus.*未做任何修改/],
+		["config --scope session set notificationScope=all-runs bogus=1", /未知字段 bogus.*未做任何修改/],
 		["config --scope global set secret=s", /只能用 .*edit/],
 		["config --scope session unset", /需要字段名/],
 		["test --scope global", /test 不支持 --scope/],
 	];
 	for (const [input, message] of errors) {
-		const invocation = parseWecomInvocation(input);
+		const invocation = parseInvocation(input);
 		assert.equal(invocation.kind, "error", input);
 		assert.match(invocation.kind === "error" ? invocation.message : "", message, input);
 	}
@@ -257,8 +247,8 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 test("the target goes right after config and before the action; --wait goes after whoami", () => {
 	const misplaced: [string, string][] = [
 		[
-			"config set --scope global notificationMode=text",
-			"/wecom-aibot config --scope global set notificationMode=text",
+			"config set --scope global notificationScope=all-runs",
+			"/wecom-aibot config --scope global set notificationScope=all-runs",
 		],
 		["config show --scope session", "/wecom-aibot config --scope session show"],
 		["config edit --scope=global", "/wecom-aibot config --scope global edit"],
@@ -287,7 +277,7 @@ test("a bare action documents no options, yet its completion still offers --help
 		assert.match(topicHelp(`${name} --help`), /^选项$/m, name);
 		assert.match(topicHelp(`${name} --help`), /^ {2}--help {2,}显示当前命令的帮助，不执行动作$/m, name);
 		assert.ok(
-			completeWecom(`${name} -`, themes)?.some((item) => item.value.endsWith("--help")),
+			completeArguments(`${name} -`)?.some((item) => item.value.endsWith("--help")),
 			name,
 		);
 	}
@@ -331,22 +321,17 @@ test("argument completion offers every word that may come next: subcommands, opt
 	assert.deepEqual(values("config --scope global set "), [
 		"config --scope global set defaultChatId=",
 		"config --scope global set defaultChatType=",
-		"config --scope global set notificationMode=",
 		"config --scope global set notificationScope=",
-		"config --scope global set screenshotTheme=",
+		"config --scope global set controlPrompts=",
 		"config --scope global set --help",
 	]);
-	assert.deepEqual(values("config --scope session set notificationMode=text n"), [
-		"config --scope session set notificationMode=text notificationScope=",
+	// A field already given is not offered again.
+	assert.deepEqual(values("config --scope session set notificationScope=all-runs c"), [
+		"config --scope session set notificationScope=all-runs controlPrompts=",
 	]);
-	// The screenshot theme offers pi's own themes; the plugin brings none.
-	assert.deepEqual(values("config --scope session set screenshotTheme=r"), [
-		"config --scope session set screenshotTheme=rainbow-prism ",
-	]);
-	assert.equal(values("config --scope session set screenshotTheme=")?.length, 4);
-	assert.deepEqual(values("config --scope session set notificationmode="), [
-		"config --scope session set notificationMode=text ",
-		"config --scope session set notificationMode=screenshot ",
+	assert.deepEqual(values("config --scope session set notificationscope="), [
+		"config --scope session set notificationScope=wecom-tasks ",
+		"config --scope session set notificationScope=all-runs ",
 	]);
 	assert.deepEqual(values("config --scope session unset d"), [
 		"config --scope session unset defaultChatId ",
@@ -357,7 +342,7 @@ test("argument completion offers every word that may come next: subcommands, opt
 		"config",
 		"config show",
 		"config --scope session set",
-		"config --scope session set screenshotTheme=light",
+		"config --scope session set notificationScope=all-runs",
 		"config --scope session set defaultChatId=",
 		"config whoami --wait ",
 		"config show --help ",
@@ -376,7 +361,7 @@ test("argument completion offers every word that may come next: subcommands, opt
 		"--help ",
 		"connect x",
 	]) {
-		assert.equal(completeWecom(done, themes), null, done);
+		assert.equal(completeArguments(done), null, done);
 	}
 });
 
@@ -390,21 +375,20 @@ test("every completion level and the menu put the descriptions in one column, wh
 		"config --scope global ",
 		"config --scope global set ",
 		"config --scope session set notificationScope=",
-		"config --scope session set screenshotTheme=",
 		"config --scope session unset ",
 	]) {
-		const labels = (completeWecom(prefix, themes) ?? []).map((item) => item.label);
+		const labels = (completeArguments(prefix) ?? []).map((item) => item.label);
 		assert.ok(labels.length > 1, prefix);
 		assert.equal(new Set(labels.map(labelColumn)).size, 1, `${prefix}: ${labels.join(" | ")}`);
 		for (const label of labels) assert.doesNotMatch(label, / — /, label);
 	}
-	const top = labelColumn(completeWecom("", themes)![0].label);
-	for (const item of completeWecom("co", themes) ?? []) assert.equal(labelColumn(item.label), top, item.label);
+	const top = labelColumn(completeArguments("")![0].label);
+	for (const item of completeArguments("co") ?? []) assert.equal(labelColumn(item.label), top, item.label);
 	assert.deepEqual(
-		completeWecom("test x --", themes)?.map((item) => item.label),
+		completeArguments("test x --")?.map((item) => item.label),
 		["--chat-type <1|2>  1 单聊，2 群聊；需同时给出 chatid，省略时为 1", "--help             显示帮助"],
 	);
-	const menu = wecomMenu();
+	const menu = commandMenu();
 	assert.deepEqual(
 		menu.map((item) => item.input),
 		["status", "config", "connect", "disconnect", "test", "log", "reset", "--help"],
@@ -423,8 +407,8 @@ test("-h is an unknown option like any other: only --help shows help", () => {
 });
 
 test("a bare /wecom-aibot opens the menu; options without a subcommand say where they belong, never as status", () => {
-	for (const input of ["", "   ", "--"]) assert.deepEqual(parseWecomInvocation(input), { kind: "choose" }, input);
-	assert.deepEqual(parseWecomInvocation("--help"), { kind: "help" });
+	for (const input of ["", "   ", "--"]) assert.deepEqual(parseInvocation(input), { kind: "choose" }, input);
+	assert.deepEqual(parseInvocation("--help"), { kind: "help" });
 	const messages = [errorOf("-x"), errorOf("--wait 30"), errorOf("--chat-type 2"), errorOf("--help -x")];
 	assert.deepEqual(messages, [
 		"未知选项 -x。查看用法：/wecom-aibot --help；选项写在子命令后面",
@@ -435,7 +419,7 @@ test("a bare /wecom-aibot opens the menu; options without a subcommand say where
 	for (const message of messages) assert.doesNotMatch(message, /status/, message);
 	assert.match(errorOf("--scope global"), /例如 \/wecom-aibot config --scope global show/);
 	assert.match(errorOf("--connect"), /^connect 是子命令，不带 --/);
-	const status = parseWecomInvocation("status");
+	const status = parseInvocation("status");
 	assert.equal(status.kind === "run" && status.command.name, "status");
 	// A --wait before the command name is in the wrong place, like one before whoami.
 	assert.match(errorOf("--wait 30 config whoami"), /^--wait 要写在 whoami 后：\/wecom-aibot config whoami --wait 30/);
@@ -451,7 +435,7 @@ test("error messages never end in a full stop, also when composed from several s
 		"test --chat-type 3 x",
 		"config whoami --wait 5",
 		"config show --wait 30",
-		"config --scope session set screenshotTheme=light bogus=1 x",
+		"config --scope session set notificationScope=all-runs bogus=1 x",
 		"config --scope session unset",
 		"config global set x=1",
 		"config everything",
@@ -459,7 +443,7 @@ test("error messages never end in a full stop, also when composed from several s
 	])
 		assert.ok(!errorOf(input).endsWith("。"), errorOf(input));
 	assert.equal(
-		errorOf("config --scope session set screenshotTheme=light bogus=1 x"),
-		"未知字段 bogus；可用字段：defaultChatId、defaultChatType、notificationMode、notificationScope、screenshotTheme；「x」缺少 =，写成 字段=值。未做任何修改。查看帮助：/wecom-aibot config --help",
+		errorOf("config --scope session set notificationScope=all-runs bogus=1 x"),
+		"未知字段 bogus；可用字段：defaultChatId、defaultChatType、notificationScope、controlPrompts；「x」缺少 =，写成 字段=值。未做任何修改。查看帮助：/wecom-aibot config --help",
 	);
 });

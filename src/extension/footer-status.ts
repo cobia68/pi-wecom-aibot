@@ -2,7 +2,7 @@
 import type { ExtensionContext, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { BridgeConnectionStatus } from "./connection-notices.ts";
 
-export const WECOM_STATUS_KEY = "wecom-aibot";
+export const FOOTER_STATUS_KEY = "wecom-aibot";
 const THEME_WIDGET_KEY = "wecom-aibot-theme";
 export const FLASH_MS = 1_500;
 
@@ -24,7 +24,7 @@ interface StatusBinding {
 	text?: string;
 }
 
-export class WeComStatus {
+export class FooterStatus {
 	private binding: StatusBinding | undefined;
 	private flashTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -51,7 +51,7 @@ export class WeComStatus {
 				dispose: () => {
 					if (this.binding !== owner) return;
 					this.binding = undefined;
-					target.setStatus(WECOM_STATUS_KEY, undefined);
+					target.setStatus(FOOTER_STATUS_KEY, undefined);
 				},
 			}));
 		} else {
@@ -64,12 +64,12 @@ export class WeComStatus {
 	private paint(binding: StatusBinding): void {
 		if (this.binding !== binding) return;
 		const { theme } = binding.ui;
-		const name = theme.fg(COLOR[binding.connection], WECOM_STATUS_KEY);
+		const name = theme.fg(COLOR[binding.connection], FOOTER_STATUS_KEY);
 		const text =
 			binding.pending && binding.connection === "online" ? `${name}${theme.fg("warning", "（待重新接入）")}` : name;
 		if (binding.text === text) return;
 		binding.text = text;
-		binding.ui.setStatus(WECOM_STATUS_KEY, text);
+		binding.ui.setStatus(FOOTER_STATUS_KEY, text);
 	}
 
 	/** A user disconnect: show the error colour for a moment, then remove the name instead of blinking away. */
@@ -89,7 +89,7 @@ export class WeComStatus {
 		this.binding = undefined;
 		if (!binding) return;
 		try {
-			binding.ui.setStatus(WECOM_STATUS_KEY, undefined);
+			binding.ui.setStatus(FOOTER_STATUS_KEY, undefined);
 		} finally {
 			binding.ui.setWidget(THEME_WIDGET_KEY, undefined);
 		}

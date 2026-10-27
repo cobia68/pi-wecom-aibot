@@ -7,16 +7,11 @@
  *   { cmd: "aibot_event_callback", headers, body }   event
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { DeliveryError } from "../shared/delivery.ts";
-import {
-	record,
-	WECOM_ACK_TIMEOUT_MS,
-	WECOM_IMAGE_MAX_BYTES,
-	WECOM_IMAGE_MIN_BYTES,
-	type WeComState,
-} from "../shared/wecom-protocol.ts";
+import { errorMessage } from "../shared/text.ts";
+import { asRecord, WECOM_ACK_TIMEOUT_MS, type WeComState } from "../shared/wecom-protocol.ts";
 
 export interface WeComResponse {
 	errcode: number;
@@ -66,7 +61,7 @@ const MAX_BACKOFF_MS = 30_000;
 const MAX_SUBSCRIBE_FAILURES = 5;
 const REQUEST_TIMEOUT_MS = WECOM_ACK_TIMEOUT_MS;
 
-function genReqId(): string {
+function newReqId(): string {
 	return `pi-${randomUUID()}`;
 }
 
@@ -133,7 +128,7 @@ export class WeComClient {
 			try {
 				ws.close();
 			} catch (error) {
-				this.options.log?.(`WebSocket close failed: ${error instanceof Error ? error.message : String(error)}`);
+				this.options.log?.(`WebSocket close failed: ${errorMessage(error)}`);
 			}
 		}
 		this.setState("disconnected", reason);
@@ -193,7 +188,7 @@ export class WeComClient {
 	}
 
 	private subscribe(): void {
-		const reqId = genReqId();
+		const reqId = newReqId();
 		this.subscribeReqId = reqId;
 		this.setConnectionDeadline("subscription timeout");
 		this.send({
@@ -253,10 +248,10 @@ export class WeComClient {
 			this.options.log?.("ignoring non-JSON frame");
 			return;
 		}
-		const msg = record(parsed);
+		const msg = asRecord(parsed);
 		if (!msg) return;
 
-		const headers = record(msg.headers);
+		const headers = asRecord(msg.headers);
 		const reqId = typeof headers?.req_id === "string" ? headers.req_id : undefined;
 
 		if (msg.cmd === "aibot_msg_callback") {
@@ -322,13 +317,13 @@ export class WeComClient {
 			return undefined;
 		} catch (error) {
 			// A synchronous failure from the transport is not a socket close: report it without reconnecting.
-			const reason = error instanceof Error ? error.message : String(error);
+			const reason = errorMessage(error);
 			this.options.log?.(`send failed: ${reason}`);
 			return `WebSocket send failed: ${reason}`;
 		}
 	}
 
-	sendCommand(cmd: string, body: unknown, reqId = genReqId()): Promise<WeComResponse> {
+	sendCommand(cmd: string, body: unknown, reqId = newReqId()): Promise<WeComResponse> {
 		if (!this.isReady()) return Promise.reject(new DeliveryError("WebSocket is not subscribed", "not_sent"));
 		if (this.pending.has(reqId)) return Promise.reject(new DeliveryError("Request is already pending", "rejected"));
 		const payload: { cmd: string; headers: { req_id: string }; body?: unknown } = { cmd, headers: { req_id: reqId } };
@@ -357,54 +352,30 @@ export class WeComClient {
 		return this.sendCommand("aibot_respond_msg", body, reqId);
 	}
 
-	/** Temporary media: init → chunk (512KB raw) × N → finish, returning the media_id. */
-	async uploadImage(data: Buffer, filename = "pi-notification.png"): Promise<string> {
-		if (data.byteLength < WECOM_IMAGE_MIN_BYTES || data.byteLength > WECOM_IMAGE_MAX_BYTES) {
-			throw new DeliveryError(
-				`图片大小必须在 ${WECOM_IMAGE_MIN_BYTES} 字节到 ${WECOM_IMAGE_MAX_BYTES / 1024 / 1024}MB 之间`,
-				"rejected",
-			);
-		}
-		const name = filename.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").slice(0, 200) || "pi-notification.png";
-		const CHUNK = 512 * 1024;
-		const totalChunks = Math.ceil(data.byteLength / CHUNK);
-		const md5 = createHash("md5").update(data).digest("hex");
-		const init = await this.sendCommand("aibot_upload_media_init", {
-			type: "image",
-			filename: name,
-			total_size: data.byteLength,
-			total_chunks: totalChunks,
-			md5,
-		});
-		const uploadId = bodyField(init, "upload_id");
-		if (!uploadId) throw new DeliveryError("上传初始化没有返回 upload_id", "rejected");
-		for (let index = 0; index < totalChunks; index++) {
-			const chunk = data.subarray(index * CHUNK, (index + 1) * CHUNK);
-			for (let attempt = 0; ; attempt++) {
-				try {
-					await this.sendCommand("aibot_upload_media_chunk", {
-						upload_id: uploadId,
-						chunk_index: index,
-						base64_data: chunk.toString("base64"),
-					});
-					break;
-				} catch (error) {
-					// The server ignores duplicate chunks, so one retry is safe whatever the outcome.
-					if (attempt >= 1) throw error;
-					this.options.log?.(
-						`upload chunk ${index} failed, retrying once: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
-			}
-		}
-		const finish = await this.sendCommand("aibot_upload_media_finish", { upload_id: uploadId });
-		const mediaId = bodyField(finish, "media_id");
-		if (!mediaId) throw new DeliveryError("上传完成没有返回 media_id", "rejected");
-		return mediaId;
-	}
 	/** aibot_send_msg — proactive push to a single user (chat_type=1) or group (chat_type=2). */
 	sendMsg(chatId: string, chatType: 1 | 2, body: Record<string, any>): Promise<WeComResponse> {
 		return this.sendCommand("aibot_send_msg", { chatid: chatId, chat_type: chatType, ...body });
+	}
+
+	/** aibot_respond_welcome_msg — a text or card welcome, within 5 seconds of enter_chat. */
+	respondWelcome(eventReqId: string, body: unknown): Promise<WeComResponse> {
+		return this.sendCommand("aibot_respond_welcome_msg", body, eventReqId);
+	}
+
+	/**
+	 * aibot_respond_update_msg — replace a clicked card, within 5 seconds of its template_card_event. userids
+	 * (group chats only) replaces just those members' copies; without it every copy is replaced.
+	 */
+	updateCard(eventReqId: string, templateCard: Record<string, unknown>, userids?: string[]): Promise<WeComResponse> {
+		return this.sendCommand(
+			"aibot_respond_update_msg",
+			{
+				response_type: "update_template_card",
+				...(userids?.length ? { userids } : {}),
+				template_card: templateCard,
+			},
+			eventReqId,
+		);
 	}
 
 	private rejectAll(err: Error): void {
@@ -414,11 +385,4 @@ export class WeComClient {
 		}
 		this.pending.clear();
 	}
-}
-
-function bodyField(response: WeComResponse, key: string): string | undefined {
-	const value = record(response.body)?.[key];
-	if (typeof value === "string" && value) return value;
-	const direct = response[key];
-	return typeof direct === "string" && direct ? direct : undefined;
 }

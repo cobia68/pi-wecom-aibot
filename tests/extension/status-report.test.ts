@@ -16,7 +16,7 @@ const GLOBAL: Layer = {
 	secret: "private-secret",
 	defaultChatId: "private-user",
 	defaultChatType: 1,
-	notificationMode: "screenshot",
+	notificationScope: "all-runs",
 };
 const SOURCE = {
 	sessionId: "01a16197-cae8-75c6-baef-042069d29d51",
@@ -78,9 +78,9 @@ test("a session that has not connected reads as one headline and one aligned tab
 			"  模型      cline · deepseek",
 			"  工作目录  pi-wecom-aibot",
 			"",
-			"  通知方式  screenshot（global）",
-			"  通知范围  wecom-tasks（内置默认值）",
-			"  截图主题  跟随 pi 当前主题（内置默认值）",
+			"  通知范围  all-runs（global）",
+			"  提示词    无（内置默认值）",
+			"  会话文档  未配置",
 			"",
 			`  配置文件  ${CONFIG_FILE}`,
 			"  会话覆盖  无",
@@ -115,7 +115,7 @@ test("a registration adds the gateway and task rows and shows what it uses, not 
 		"  任务      执行中，排队 2，待发通知 1",
 	]);
 	const rows = lines.filter((line) => line.startsWith("  "));
-	assert.ok(rows.length >= 12);
+	assert.ok(rows.length >= 11);
 	for (const row of rows) assert.equal(valueColumn(row), 12, row);
 	assert.doesNotMatch(text, /new-user|private-secret/);
 });
@@ -211,18 +211,18 @@ test("files that cannot be used keep the session, the paths and no guessed setti
 	assert.ok(lines.includes("  机器人    配置无法使用（见上一条提示）"));
 	assert.ok(lines.includes("  session   01a16197-cae8-75c6-baef-042069d29d51"));
 	assert.ok(lines.includes(`  会话覆盖  ${OVERRIDES}`), "the file to check is named");
-	assert.ok(!lines.some((line) => /默认推送|通知方式|通知范围|截图主题/.test(line)));
+	assert.ok(!lines.some((line) => /默认推送|通知范围|提示词/.test(line)));
 	const unstarted = statusReport(snapshot({ overrideFile: undefined }));
 	assert.doesNotMatch(unstarted, /会话覆盖/);
 });
 
 test("settings name the layer they come from, and the override row names the overridden fields", () => {
-	const resolved = mergeLayers(GLOBAL, { screenshotTheme: "light", defaultChatId: "group-id", defaultChatType: 2 });
+	const resolved = mergeLayers(GLOBAL, { defaultChatId: "group-id", defaultChatType: 2, controlPrompts: ["继续"] });
 	const lines = statusReport(snapshot({ resolved })).split("\n");
 	assert.ok(lines.includes("  默认推送  group-id（群聊）"));
-	assert.ok(lines.includes("  截图主题  light（session）"));
-	assert.ok(lines.includes("  通知方式  screenshot（global）"));
-	assert.ok(lines.includes("  会话覆盖  defaultChatId、defaultChatType、screenshotTheme"));
+	assert.ok(lines.includes("  提示词    「继续」（session）"));
+	assert.ok(lines.includes("  通知范围  all-runs（global）"));
+	assert.ok(lines.includes("  会话覆盖  defaultChatId、defaultChatType、controlPrompts"));
 });
 
 test("the menu title keeps the icon and the state, without the reason or the next step", () => {

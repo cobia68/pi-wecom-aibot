@@ -2,14 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { marked } from "marked";
 import {
-	formatNotification,
+	ABORTED_SUFFIX,
 	formatProcessingStatus,
-	lastParagraphs,
 	MAX_NOTIFICATION_BYTES,
 	notificationPayload,
-	notificationProblem,
 	quotedSessions,
-	renderNotification,
+	sessionMarkdown,
+	sessionNote,
 } from "../../src/shared/notification.ts";
 
 const source = {
@@ -19,143 +18,76 @@ const source = {
 	directoryName: "pi-wecom-aibot",
 };
 
-test("metadata renders as three unstyled lines without changing body Markdown", () => {
-	const message = formatNotification(source, "**正文强调**", { kind: "test" });
+test("text outside a card opens with two unstyled source lines and keeps the body's Markdown", () => {
+	const message = sessionMarkdown(source, "**正文强调**");
 	const header = message.split("\n\n")[0];
 	const html = marked.parse(header, { async: false, breaks: false });
-	assert.equal((html.match(/<br\s*\/?>/g) ?? []).length, 2, "来源区必须有两个实际换行");
+	assert.equal((html.match(/<br\s*\/?>/g) ?? []).length, 1, "来源区两行之间必须有实际换行");
 	assert.doesNotMatch(html, /<(?:strong|b|code)\b/, "来源区统一使用普通字体");
 	assert.match(marked.parse(message, { async: false, breaks: false }), /<strong>正文强调<\/strong>/);
 });
 
-test("takes trailing paragraphs across Windows line endings", () => {
-	assert.equal(lastParagraphs("开头\r\n\r\n中间\r\n\r\n结尾\r\n", 2), "中间\n\n结尾");
-});
-
-test("blank lines inside fenced code do not split the excerpt", () => {
-	const code = "```ts\nconst value = 1;\n\nconsole.log(value);\n```";
-	assert.equal(lastParagraphs(`说明\n\n${code}\n\n最后一段`, 2), `${code}\n\n最后一段`);
-});
-
-test("excerpt truncation keeps the tail and session ID within the UTF-8 byte limit", () => {
-	const message = formatNotification(source, `${"汉字🙂".repeat(4000)}最后结论`, { tailParagraphs: 3 });
+test("a long body is cut from the end within the UTF-8 byte limit, keeping its source and suffix", () => {
+	const message = sessionMarkdown(source, `开头结论${"汉字🙂".repeat(4000)}`, ABORTED_SUFFIX);
 	assert.ok(Buffer.byteLength(message, "utf8") <= MAX_NOTIFICATION_BYTES);
-	assert.match(message, /pi-session-1/);
-	assert.match(message, /test-provider/);
-	assert.match(message, /Model A/);
-	assert.match(message, /pi-wecom-aibot/);
-	assert.match(message, /前文已截断/);
-	assert.match(message, /最后结论$/);
-	assert.equal(message.includes("\ufffd"), false);
-});
-
-test("invalid paragraph counts cannot silently change the excerpt", () => {
-	for (const count of [0, -1, 1.5, 21]) assert.throws(() => lastParagraphs("text", count), /tail_paragraphs/);
-});
-
-test("the sendability check returns the same reasons without rendering", () => {
-	assert.equal(notificationProblem(source, "正文"), undefined);
-	assert.match(notificationProblem(source, "   ")!, /没有可发送的文本/);
-	assert.match(notificationProblem(source, "正文", { tailParagraphs: 0 })!, /tail_paragraphs/);
-	assert.match(notificationProblem({ ...source, sessionId: "bad id" }, "正文")!, /session_id/);
-	assert.match(notificationProblem(source, "x".repeat(MAX_NOTIFICATION_BYTES))!, /20480/);
-	// Whatever the check accepts, the renderer accepts too, with the same layout.
-	const body = "第一段\n\n第二段";
-	assert.equal(notificationProblem(source, body, { tailParagraphs: 1 }), undefined);
-	assert.match(renderNotification(source, lastParagraphs(body, 1), { excerpt: true }), /第二段$/);
-});
-
-test("metadata and abort notice both count towards the byte budget", () => {
-	assert.throws(() => formatNotification(source, "x".repeat(MAX_NOTIFICATION_BYTES)), /20480/);
-	const message = formatNotification(source, "汉🙂".repeat(6000), {
-		kind: "completion",
-		tailParagraphs: 2,
-		aborted: true,
-	});
-	assert.ok(Buffer.byteLength(message, "utf8") <= MAX_NOTIFICATION_BYTES);
-	assert.match(message, /^🔔 pi-wecom-aibot · 会话通知 {2}\n/);
-	assert.match(message, /本轮任务已中止/);
+	assert.match(message, /^🆔 session: pi-session-1/);
+	assert.match(message, /开头结论/);
+	assert.match(message, /内容过长已截断/);
+	assert.ok(message.endsWith(ABORTED_SUFFIX));
 	assert.equal(message.includes("\ufffd"), false);
 	assert.throws(
-		() =>
-			formatNotification({ ...source, modelName: "x".repeat(MAX_NOTIFICATION_BYTES) }, "result", {
-				tailParagraphs: 1,
-			}),
+		() => sessionMarkdown({ ...source, modelName: "x".repeat(MAX_NOTIFICATION_BYTES) }, "r"),
 		/来源信息过长/,
 	);
 });
 
-test("metadata stays on a single line and embedded backticks cannot break the header", () => {
-	const message = formatNotification(
-		{ ...source, modelName: "Model `A`\nextra", directoryName: "project`name" },
-		"body",
+test("metadata stays on its lines and embedded backticks cannot break the header", () => {
+	const message = sessionMarkdown({ ...source, modelName: "Model `A`\nextra", directoryName: "project`name" }, "body");
+	assert.ok(
+		message.startsWith("🆔 session: pi-session-1  \n🏷️ project\\`name · test-provider · Model \\`A\\` extra\n\n"),
 	);
-	assert.ok(message.startsWith("🔔 project\\`name · 会话通知  \n"));
-	assert.ok(message.includes("\n🏷️ test-provider · Model \\`A\\` extra  \n🆔 session: "));
-	assert.throws(() => formatNotification({ ...source, sessionId: "another\nsession" }, "body"), /session_id/);
+	assert.throws(() => sessionMarkdown({ ...source, sessionId: "another\nsession" }, "body"), /session_id/);
 });
 
-test("every published envelope round-trips: a quoted notification or status routes to its exact session", () => {
-	const tricky = {
-		...source,
-		sessionId: "session_with_[brackets]\\suffix",
-		directoryName: "project session: notes",
-		modelName: "model `A`",
-	};
-	for (const kind of ["notification", "completion", "reply", "test", "connect"] as const) {
-		const message = formatNotification(tricky, `body\nsession: another-session`, { kind });
-		assert.deepEqual(quotedSessions(message), [tricky.sessionId], kind);
+test("everything the bot writes outside a card routes a quote back to its exact session", () => {
+	const tricky = { ...source, sessionId: "session_with_[brackets]\\suffix", directoryName: "project session: notes" };
+	const written = [
+		sessionMarkdown(tricky, "body\nsession: another-session"),
+		sessionNote(tricky.sessionId, "中止请求未送达：会话已离线"),
+		...(["stopped", "busy", "failed"] as const).map((state) => formatProcessingStatus(tricky.sessionId, state)),
+	];
+	for (const message of written) {
+		assert.deepEqual(quotedSessions(message), [tricky.sessionId], message);
 		// WeCom may prefix each quoted line with "> ".
-		assert.deepEqual(
-			quotedSessions(
-				message
-					.split("\n")
-					.map((line) => `> ${line}`)
-					.join("\n"),
-			),
-			[tricky.sessionId],
-			`${kind} quoted`,
-		);
-	}
-	for (const state of ["running", "settled", "notifying", "stopped", "waiting", "busy", "failed"] as const) {
-		assert.deepEqual(quotedSessions(formatProcessingStatus(tricky.sessionId, state)), [tricky.sessionId], state);
-	}
-	// A source header without its session line never falls back to another ID in the text.
-	assert.deepEqual(quotedSessions("project · 会话通知\nprovider · model"), [""]);
-});
-
-test("a quoted notification routes by its session line, with or without icons in the metadata", () => {
-	for (const layout of ["project · 会话通知  \nprovider · model  \nsession: s1\n\nresult", "session: s1  \n执行中…"]) {
-		assert.deepEqual(quotedSessions(layout), ["s1"]);
-		assert.deepEqual(
-			quotedSessions(
-				layout
-					.split("\n")
-					.map((line) => `> ${line}`)
-					.join("\n"),
-			),
-			["s1"],
-		);
+		const quoted = message
+			.split("\n")
+			.map((line) => `> ${line}`)
+			.join("\n");
+		assert.deepEqual(quotedSessions(quoted), [tricky.sessionId], `quoted ${message}`);
 	}
 });
 
-test("pi's notification payload, rendered by the gateway, is exactly the formatted notification", () => {
+test("other quoted text routes only when every session marker in it is a clean line naming one ID", () => {
+	assert.deepEqual(quotedSessions("前面的话\nsession: s1\n后面的话"), ["s1"]);
+	assert.deepEqual(quotedSessions("说明\nsession: s1\nsession: s2"), ["s1", "s2"]);
+	// Prose that mentions a session is damage, never a guess.
+	assert.deepEqual(quotedSessions("说明\nsession: s1\n另一个 session: s2 的输出"), ["s1", ""]);
+	assert.deepEqual(quotedSessions("没有任何会话标记"), []);
+});
+
+test("pi's payload is bounded for IPC and carries only the options it was given", () => {
 	const long = `开头\n\n${"汉字🙂".repeat(30_000)}\n\n结尾`;
-	const cases = [
-		["completion", "最终结果\n\n验证通过", { tailParagraphs: 1, aborted: true }],
-		["completion", long, { tailParagraphs: 3 }],
-		["reply", long, {}],
-		["notification", "自定义正文", {}],
-		["test", "部署测试正文", {}],
-		["connect", "引用本条消息发送任务", {}],
-	] as const;
-	for (const [kind, text, options] of cases) {
-		const payload = notificationPayload(kind, source, text, options);
-		assert.ok(Buffer.byteLength(payload.text) <= 256 * 1024, "the IPC body is bounded");
-		assert.equal(
-			renderNotification(payload.source, payload.text, payload),
-			formatNotification(source, text, { kind, ...options }),
-			kind,
-		);
-	}
+	const payload = notificationPayload("result", source, long, {
+		title: "  ✅ 完成  ",
+		taskId: "task-1",
+		aborted: true,
+	});
+	assert.ok(Buffer.byteLength(payload.text) <= 256 * 1024);
+	assert.equal(payload.text.includes("\ufffd"), false);
+	assert.equal(payload.title, "✅ 完成");
+	assert.equal(payload.taskId, "task-1");
+	assert.equal(payload.aborted, true);
+	assert.deepEqual(notificationPayload("notice", source, "正文"), { kind: "notice", source, text: "正文" });
+	assert.throws(() => notificationPayload("notice", source, "   "), /没有可发送的文本/);
+	assert.throws(() => notificationPayload("notice", { ...source, sessionId: "bad id" }, "正文"), /session_id/);
 });

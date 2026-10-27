@@ -9,11 +9,13 @@ import type { Socket } from "node:net";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { agentDirectory, gatewayDirectory } from "./agent-path.ts";
+import { type CardModel, validCardModel } from "./card.ts";
+import { isControlCardId } from "./control-card.ts";
 import type { DeliveryFailure } from "./delivery.ts";
-import type { GatewayImage, GatewayNotification, NotificationSource } from "./notification-types.ts";
+import type { GatewayNotification, SessionSource } from "./notification-types.ts";
 import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComState } from "./wecom-protocol.ts";
 
-export const GATEWAY_PROTOCOL_VERSION = 6;
+export const GATEWAY_PROTOCOL_VERSION = 12;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;
 export const IPC_MAX_BYTES = 1_048_576;
@@ -37,7 +39,7 @@ export interface GatewayCredentials {
 export interface GatewayRegistration {
 	instanceId: string;
 	registrationId: string;
-	source: NotificationSource;
+	source: SessionSource;
 	config: RegistrationConfig;
 	/** A temporary configuration connection: may watch identities, never receive tasks or publish notifications. */
 	identifyOnly?: boolean;
@@ -50,20 +52,38 @@ export interface SessionTarget {
 }
 
 /** What the gateway may ask one pi; none of them starts a turn. */
-export type BridgeRequestAction = "screen" | "cancel" | "state";
-const BRIDGE_REQUEST_ACTIONS: readonly string[] = ["screen", "cancel", "state"] satisfies BridgeRequestAction[];
+export type BridgeRequestAction = "cancel" | "state" | "click";
+const BRIDGE_REQUEST_ACTIONS: readonly string[] = ["cancel", "state", "click"] satisfies BridgeRequestAction[];
 
-export interface BridgeRequest {
-	action: BridgeRequestAction;
-	target: SessionTarget;
+/** A button on one of this pi's cards: the key, who pressed it and where its card is. */
+export interface CardClick {
+	/** Present only for a session-owned control card, so pi returns a fresh complete model. */
+	cardId?: string;
+	key: string;
+	userid: string;
+	chat: ChatRef;
+	/** The card's dropdowns at the time of the click: question_key → option ID. */
+	selections?: Record<string, string>;
 }
+
+export type BridgeRequest =
+	| { action: "cancel" | "state"; target: SessionTarget }
+	| { action: "click"; target: SessionTarget; click: CardClick };
 
 export interface BridgeResponse {
 	ok: boolean;
 	error?: string;
-	image?: GatewayImage;
 	busy?: boolean;
+	/** A click's outcome, recorded on its card. */
+	note?: string;
+	/** Complete control-card content, rebuilt by its owning pi from current state. */
+	card?: CardModel;
+	/** In a group, replace only these members' copies of the card (update_template_card.userids). */
+	userids?: string[];
 }
+
+/** A control card, or a click's follow-up. The gateway owns rendering and acknowledged delivery. */
+export type PushItem = { kind: "markdown"; text: string } | { kind: "control"; cardId: string; card: CardModel };
 
 export interface ChatIdentity {
 	chatId: string;
@@ -87,18 +107,19 @@ export interface GatewayTask {
 }
 
 /**
- * Shown in the task's status message: running opens the stream; settled may replace it with text, notifying
- * closes it for a separate result. busy/failed: the task was not accepted; stopped revokes forwarding.
+ * running: pi took the task; settled: its result follows and becomes the reply. busy/failed: the task was not
+ * accepted, and stopped revokes forwarding; each replies with why.
  */
-export type TaskState = "running" | "settled" | "notifying" | "stopped" | "busy" | "failed";
+export type TaskState = "running" | "settled" | "stopped" | "busy" | "failed";
 
 export type ClientFrame =
 	| { type: "hello"; version: number; nonce: string }
 	| { type: "register"; registration: GatewayRegistration; proof: string; resume?: boolean }
-	| { type: "source"; source: NotificationSource }
+	| { type: "source"; source: SessionSource }
 	| { type: "ping" | "resume" | "unregister" }
 	| { type: "status"; taskId: string; state: TaskState }
 	| { type: "notify"; id: string; chat: ChatRef; notification: GatewayNotification }
+	| { type: "push"; id: string; chat: ChatRef; item: PushItem }
 	| { type: "watch"; id: string; timeoutMs: number }
 	| { type: "unwatch"; id: string }
 	| { type: "response"; id: string; response: BridgeResponse };
@@ -120,13 +141,15 @@ export interface BridgeClient {
 	start(): void;
 	stop(reason?: string): void;
 	isReady(): boolean;
-	updateSource(source: NotificationSource): void;
+	updateSource(source: SessionSource): void;
 	respond(id: string, response: BridgeResponse): void;
 	resume(): void;
 	/** false when the state could not be handed to the gateway; the gateway ignores tasks it no longer knows. */
 	taskStatus(taskId: string, state: TaskState): boolean;
 	/** Resolves once WeCom acknowledged the push; only a DeliveryError with not_sent is safe to retry. */
 	notify(chat: ChatRef, notification: GatewayNotification): Promise<void>;
+	/** A control card or click follow-up, acknowledged like notify. */
+	push(chat: ChatRef, item: PushItem): Promise<void>;
 	/** /wecom-aibot config whoami: only the message that is exactly the one-time code (`onCode`) resolves, unrouted. */
 	watchIdentity(timeoutMs: number, signal?: AbortSignal, onCode?: (code: string) => void): Promise<ChatIdentity>;
 }
@@ -149,7 +172,7 @@ function endpointKey(botId: string): string {
 		.slice(0, 32);
 }
 
-export function validSource(value: unknown): value is NotificationSource {
+export function validSource(value: unknown): value is SessionSource {
 	if (!value || typeof value !== "object") return false;
 	const source = value as Record<string, unknown>;
 	return (
@@ -160,23 +183,6 @@ export function validSource(value: unknown): value is NotificationSource {
 		[source.provider, source.modelName, source.directoryName].every(
 			(item) => typeof item === "string" && item.length <= 4096,
 		)
-	);
-}
-
-function validImage(value: unknown): value is GatewayImage {
-	const image = value as GatewayImage | undefined;
-	return (
-		!!image &&
-		typeof image === "object" &&
-		image.mime === "image/png" &&
-		typeof image.filename === "string" &&
-		!!image.filename &&
-		image.filename.length <= 256 &&
-		!/[\u0000-\u001f\u007f]/.test(image.filename) &&
-		typeof image.path === "string" &&
-		!!image.path &&
-		image.path.length <= 4096 &&
-		!/[\u0000-\u001f\u007f]/.test(image.path)
 	);
 }
 
@@ -208,17 +214,66 @@ export function validRegistration(value: unknown): value is GatewayRegistration 
 export function validNotification(value: unknown): value is GatewayNotification {
 	if (!value || typeof value !== "object") return false;
 	const notification = value as GatewayNotification;
-	const image = notification.image;
 	return (
-		["notification", "completion", "reply", "test", "connect"].includes(notification.kind) &&
+		["result", "notice", "test"].includes(notification.kind) &&
 		validSource(notification.source) &&
 		typeof notification.text === "string" &&
 		Buffer.byteLength(notification.text) <= 512 * 1024 &&
+		(notification.title === undefined ||
+			(typeof notification.title === "string" && notification.title.length <= 1024)) &&
 		(notification.taskId === undefined || validRequestId(notification.taskId)) &&
-		[notification.excerpt, notification.aborted].every((flag) => flag === undefined || typeof flag === "boolean") &&
-		(notification.imageFailure === undefined ||
-			(typeof notification.imageFailure === "string" && notification.imageFailure.length <= 600)) &&
-		(image === undefined || validImage(image))
+		(notification.aborted === undefined || typeof notification.aborted === "boolean") &&
+		// Every kind may be its session's control card: a result, a wecom_send notice, the deployment test.
+		(notification.control === undefined ||
+			(isControlCardId(notification.control.cardId) && validCardModel(notification.control.card)))
+	);
+}
+
+function validPushItem(value: unknown): value is PushItem {
+	const item = value as PushItem | undefined;
+	if (!item || typeof item !== "object") return false;
+	if (item.kind === "markdown") return typeof item.text === "string" && Buffer.byteLength(item.text) <= 512 * 1024;
+	return item.kind === "control" && isControlCardId(item.cardId) && validCardModel(item.card);
+}
+
+function validClick(value: unknown): value is CardClick {
+	const click = value as CardClick | undefined;
+	return (
+		!!click &&
+		(click.cardId === undefined || isControlCardId(click.cardId)) &&
+		typeof click.key === "string" &&
+		!!click.key &&
+		Buffer.byteLength(click.key) <= 1024 &&
+		typeof click.userid === "string" &&
+		!!click.userid &&
+		click.userid.length <= 1024 &&
+		validChat(click.chat) &&
+		(click.selections === undefined || validSelections(click.selections))
+	);
+}
+
+function validSelections(value: unknown): value is Record<string, string> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const entries = Object.entries(value);
+	return (
+		entries.length <= 10 &&
+		entries.every(
+			([key, option]) =>
+				!!key &&
+				Buffer.byteLength(key) <= 1024 &&
+				typeof option === "string" &&
+				!!option &&
+				Buffer.byteLength(option) <= 128,
+		)
+	);
+}
+
+function validUserids(value: unknown): value is string[] {
+	return (
+		Array.isArray(value) &&
+		value.length > 0 &&
+		value.length <= 1000 &&
+		value.every((id) => typeof id === "string" && !!id && id.length <= 1024)
 	);
 }
 
@@ -302,14 +357,7 @@ export function verifyProof(proof: unknown, expected: string): boolean {
 export type FrameParse<Frame> = { ok: true; frame: Frame } | { ok: false; reason: string };
 
 export function isTaskState(value: unknown): value is TaskState {
-	return (
-		value === "running" ||
-		value === "settled" ||
-		value === "notifying" ||
-		value === "stopped" ||
-		value === "busy" ||
-		value === "failed"
-	);
+	return value === "running" || value === "settled" || value === "stopped" || value === "busy" || value === "failed";
 }
 
 const WE_COM_STATES = new Set<WeComState>(["disconnected", "connecting", "connected", "subscribed"]);
@@ -343,8 +391,11 @@ export function parseClientFrame(value: unknown): FrameParse<ClientFrame> {
 			if (!response || typeof response !== "object" || typeof response.ok !== "boolean")
 				return reject("无效的请求应答");
 			if (response.error !== undefined && typeof response.error !== "string") return reject("无效的错误说明");
-			if (response.image !== undefined && !validImage(response.image)) return reject("无效的图片");
 			if (response.busy !== undefined && typeof response.busy !== "boolean") return reject("无效的忙闲状态");
+			if (response.card !== undefined && !validCardModel(response.card)) return reject("无效的控制卡内容");
+			if (response.note !== undefined && (typeof response.note !== "string" || response.note.length > 200))
+				return reject("无效的点击结果");
+			if (response.userids !== undefined && !validUserids(response.userids)) return reject("无效的卡片更新对象");
 			return accept({ type: "response", id: frame.id, response });
 		}
 		case "status":
@@ -356,6 +407,11 @@ export function parseClientFrame(value: unknown): FrameParse<ClientFrame> {
 			if (!validChat(frame.chat)) return reject("无效的通知目标");
 			if (!validNotification(frame.notification)) return reject("无效的通知");
 			return accept({ type: "notify", id: frame.id, chat: frame.chat, notification: frame.notification });
+		case "push":
+			if (!validRequestId(frame.id)) return reject("无效的请求 ID");
+			if (!validChat(frame.chat)) return reject("无效的推送目标");
+			if (!validPushItem(frame.item)) return reject("无效的推送内容");
+			return accept({ type: "push", id: frame.id, chat: frame.chat, item: frame.item });
 		case "watch":
 			if (!validRequestId(frame.id)) return reject("无效的 whoami 请求");
 			if (typeof frame.timeoutMs !== "number" || !Number.isFinite(frame.timeoutMs) || frame.timeoutMs <= 0)
@@ -406,6 +462,7 @@ export function parseServerFrame(value: unknown): FrameParse<ServerFrame> {
 			if (!request || typeof request !== "object" || !BRIDGE_REQUEST_ACTIONS.includes(request.action))
 				return reject("无效的网关请求");
 			if (!validTarget(request.target)) return reject("无效的请求目标");
+			if (request.action === "click" && !validClick(request.click)) return reject("无效的卡片点击");
 			return accept({ type: "request", id: frame.id, request });
 		}
 		case "result":

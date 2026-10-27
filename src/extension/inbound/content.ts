@@ -1,13 +1,11 @@
 /** The pi prompt for one WeCom message: text, quote, downloaded images and saved attachments. */
+
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import { errorMessage } from "../../shared/text.ts";
 import type { Attachment, InboundMessage } from "../../shared/wecom-protocol.ts";
 import { downloadAndDecrypt, saveMedia } from "./media.ts";
-
-function errMsg(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
-}
 
 /** Files from WeCom are kept in the project, but never committed by accident. */
 async function mediaDirectory(cwd: string): Promise<string> {
@@ -119,7 +117,7 @@ async function buildUserContent(
 			});
 		} catch (err) {
 			signal.throwIfAborted();
-			notes.push(`[图片处理失败：${errMsg(err)}]`);
+			notes.push(`[图片处理失败：${errorMessage(err)}]`);
 		}
 	};
 
@@ -132,7 +130,7 @@ async function buildUserContent(
 			notes.push(`[${kind === "video" ? "视频" : "文件"}已保存到：${file}]`);
 		} catch (err) {
 			signal.throwIfAborted();
-			notes.push(`[${kind}处理失败：${errMsg(err)}]`);
+			notes.push(`[${kind}处理失败：${errorMessage(err)}]`);
 		}
 	};
 

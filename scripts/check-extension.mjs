@@ -26,9 +26,9 @@ await wecom.handler("config --help", {
 		},
 	},
 });
-assert.ok(help.includes("defaultChatId") && help.includes("notificationMode") && help.includes("config.json"));
+assert.ok(help.includes("defaultChatId") && help.includes("notificationScope") && help.includes("config.json"));
 assert.ok(extension.tools.has("wecom_send"));
-assert.equal(extension.tools.get("wecom_send").definition.parameters.properties.screen, undefined);
+assert.equal(extension.tools.get("wecom_send").definition.parameters.properties.screenshot, undefined);
 assert.ok((await wecom.getArgumentCompletions("co")).some((item) => item.value === "connect "));
 assert.ok(extension.handlers.has("session_shutdown"));
 assert.ok(extension.handlers.has("agent_settled"));

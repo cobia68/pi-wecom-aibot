@@ -13,8 +13,8 @@ import {
 	Editor,
 	type TUI,
 } from "@earendil-works/pi-tui";
-import { isWecomArgumentTab, wecomTabCompletion } from "../../src/extension/autocomplete.ts";
-import { completeWecom } from "../../src/extension/commands.ts";
+import { argumentTabCompletion, isArgumentTab } from "../../src/extension/autocomplete.ts";
+import { completeArguments } from "../../src/extension/commands.ts";
 
 /** A provider that records how the wrapper calls it and answers with one fixed result. */
 function recorder(result: AutocompleteSuggestions | null): {
@@ -47,7 +47,7 @@ after(() => rmSync(cwd, { recursive: true, force: true }));
 /** pi's real provider with /wecom-aibot behind it, over a cwd whose only entry is tests/. */
 function realProvider(): AutocompleteProvider {
 	return new CombinedAutocompleteProvider(
-		[{ name: "wecom-aibot", description: "", getArgumentCompletions: (prefix) => completeWecom(prefix, () => []) }],
+		[{ name: "wecom-aibot", description: "", getArgumentCompletions: (prefix) => completeArguments(prefix) }],
 		cwd,
 	);
 }
@@ -59,7 +59,7 @@ async function pressTab(text: string, times = 1): Promise<{ text: string; listed
 		borderColor: id,
 		selectList: { selectedPrefix: id, selectedText: id, description: id, scrollInfo: id, noMatch: id },
 	});
-	editor.setAutocompleteProvider(wecomTabCompletion(realProvider()));
+	editor.setAutocompleteProvider(argumentTabCompletion(realProvider()));
 	editor.setText(text);
 	for (let i = 0; i < times; i++) {
 		editor.handleInput("\t");
@@ -69,7 +69,7 @@ async function pressTab(text: string, times = 1): Promise<{ text: string; listed
 }
 
 test("only a completed /wecom-aibot command name on the first line opens the argument context", () => {
-	const isTab = (text: string) => isWecomArgumentTab([text], 0, text.length);
+	const isTab = (text: string) => isArgumentTab([text], 0, text.length);
 	assert.equal(isTab("/wecom-aibot "), true);
 	assert.equal(isTab("/wecom-aibot c"), true);
 	assert.equal(isTab("  /wecom-aibot config "), true);
@@ -79,28 +79,24 @@ test("only a completed /wecom-aibot command name on the first line opens the arg
 	assert.equal(isTab("/wecom-aibotx "), false);
 	assert.equal(isTab("/wecom-aibot:sub "), false);
 	assert.equal(isTab(""), false);
-	assert.equal(
-		isWecomArgumentTab(["note", "/wecom-aibot "], 1, 13),
-		false,
-		"pi reads only the first line as a command",
-	);
+	assert.equal(isArgumentTab(["note", "/wecom-aibot "], 1, 13), false, "pi reads only the first line as a command");
 });
 
 test("Tab after the command name lists subcommands instead of files", async () => {
 	const top = await pressTab("/wecom-aibot ");
 	assert.equal(top.text, "/wecom-aibot ");
 	assert.equal(top.listed, true);
-	const provider = wecomTabCompletion(realProvider());
+	const provider = argumentTabCompletion(realProvider());
 	const text = "/wecom-aibot ";
 	const suggestions = await provider.getSuggestions([text], 0, text.length, {
 		signal: new AbortController().signal,
 		force: true,
 	});
-	assert.deepEqual(suggestions, { items: completeWecom("", () => []), prefix: "" });
+	assert.deepEqual(suggestions, { items: completeArguments(""), prefix: "" });
 });
 
 test("Tab keeps completing deeper argument levels", async () => {
-	const provider = wecomTabCompletion(realProvider());
+	const provider = argumentTabCompletion(realProvider());
 	const text = "/wecom-aibot config --scope global s";
 	const suggestions = await provider.getSuggestions([text], 0, text.length, {
 		signal: new AbortController().signal,
@@ -132,7 +128,7 @@ test("a chosen word that can be followed gets its space, so the next Tab goes a 
 
 test("the wrapper drops force only inside the argument context", async () => {
 	const { provider: current, forces } = recorder({ items: [{ value: "status", label: "status" }], prefix: "" });
-	const provider = wecomTabCompletion(current);
+	const provider = argumentTabCompletion(current);
 
 	await provider.getSuggestions(["/wecom-aibot "], 0, 13, { signal: new AbortController().signal, force: true });
 	await provider.getSuggestions(["/wecom-aib"], 0, 10, { signal: new AbortController().signal, force: true });
@@ -162,7 +158,7 @@ test("Tab elsewhere keeps pi's file completion", async () => {
 
 test("completion is applied by the provider the wrapper wraps", () => {
 	const item: AutocompleteItem = { value: "config", label: "config" };
-	const provider = wecomTabCompletion(realProvider());
+	const provider = argumentTabCompletion(realProvider());
 	const text = "/wecom-aibot c";
 	const result = provider.applyCompletion([text], 0, text.length, item, "c");
 	assert.deepEqual(result.lines, ["/wecom-aibot config"]);

@@ -14,11 +14,12 @@ import type {
 	ChatIdentity,
 	GatewayRegistration,
 	GatewayStatus,
+	PushItem,
 	ServerFrame,
 	TaskState,
 } from "../../src/shared/gateway-protocol.ts";
 import { sameTarget, sessionTarget } from "../../src/shared/gateway-protocol.ts";
-import type { GatewayNotification, NotificationSource } from "../../src/shared/notification-types.ts";
+import type { GatewayNotification, SessionSource } from "../../src/shared/notification-types.ts";
 import type { ChatRef, WeComState } from "../../src/shared/wecom-protocol.ts";
 
 export class LoopbackClient implements BridgeClient {
@@ -85,7 +86,7 @@ export class LoopbackClient implements BridgeClient {
 		return this.registered && this.state === "subscribed";
 	}
 
-	updateSource(source: NotificationSource): void {
+	updateSource(source: SessionSource): void {
 		if (source.sessionId !== this.registration.source.sessionId) throw new Error("session 已改变，必须重新注册网关");
 		this.registration.source = { ...source };
 		if (this.registered) this.gateway?.updateSource(this.registration.instanceId, source);
@@ -109,6 +110,11 @@ export class LoopbackClient implements BridgeClient {
 	notify(chat: ChatRef, notification: GatewayNotification): Promise<void> {
 		if (!this.isReady()) return Promise.reject(new DeliveryError("共享网关或企微连接未就绪", "not_sent"));
 		return this.gateway!.notify(this.registration.instanceId, chat, notification);
+	}
+
+	push(chat: ChatRef, item: PushItem): Promise<void> {
+		if (!this.isReady()) return Promise.reject(new DeliveryError("共享网关或企微连接未就绪", "not_sent"));
+		return this.gateway!.push(this.registration.instanceId, chat, item);
 	}
 
 	watchIdentity(timeoutMs: number, signal?: AbortSignal, onCode?: (code: string) => void): Promise<ChatIdentity> {

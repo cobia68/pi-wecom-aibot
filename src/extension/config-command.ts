@@ -6,7 +6,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { ChatIdentity } from "../shared/gateway-protocol.ts";
-import { sentences } from "../shared/text.ts";
+import { errorMessage, sentences } from "../shared/text.ts";
 import {
 	type ConfigInvocation,
 	type ConfigScope,
@@ -28,16 +28,19 @@ import {
 	type Layer,
 	type LayerChange,
 	layerFile,
+	MAX_PROMPTS,
 	type ManagedFields,
 	mergeLayers,
+	type PromptsField,
 	patchLayer,
+	promptsProblem,
 	type Resolved,
 	readLayer,
 	SETTING_FIELDS,
 	type SessionConfig,
 	type Source,
-	type ThemeField,
 } from "./config.ts";
+import { docUrlProblem } from "./doc-mcp.ts";
 
 export interface ConfigHost {
 	/** The current session's configuration; throws before pi started a session. */
@@ -64,15 +67,17 @@ export async function runConfig(ctx: ExtensionContext, invocation: ConfigInvocat
 	try {
 		await new ConfigCommand(ctx, host.config(), host).run(invocation);
 	} catch (error) {
-		ctx.ui.notify(`企业微信配置无法使用：${error instanceof Error ? error.message : String(error)}`, "error");
+		ctx.ui.notify(`企业微信配置无法使用：${errorMessage(error)}`, "error");
 	}
 }
 
 /** A value as shown anywhere: a Secret only says whether it is set, a BotID is masked. */
 export function display(name: FieldName, value: unknown): string {
-	if (value === undefined) return name === "screenshotTheme" ? "跟随 pi 当前主题" : "未设置";
+	if (name === "docMcpUrl") return value === undefined ? "未配置" : "已配置";
+	if (Array.isArray(value)) return value.length ? value.map((item) => `「${item}」`).join("、") : "无";
+	if (value === undefined) return "未设置";
 	if (name === "secret") return "已配置";
-	if (name === "botId") return mask(String(value));
+	if (name === "botId") return maskBotId(String(value));
 	if (name === "defaultChatType") return `${value}（${value === 2 ? "群聊" : "单聊"}）`;
 	return String(value);
 }
@@ -81,7 +86,7 @@ export function pendingReconnect(resolved: Resolved | undefined, adopted: string
 	return !!resolved && adopted !== undefined && adopted !== connectionKey(connectionOf(resolved));
 }
 
-export function mask(value: string): string {
+export function maskBotId(value: string): string {
 	if (value.length <= 8) return `${value.slice(0, 2)}****`;
 	return `${value.slice(0, 4)}****${value.slice(-2)}`;
 }
@@ -180,14 +185,6 @@ class ConfigCommand {
 
 	/** One notice for the whole report: pi shows consecutive notices in place of each other. */
 	save(scope: ConfigScope, change: LayerChange, guard?: Guard, note?: string): void {
-		const theme = change.set?.screenshotTheme;
-		if (theme !== undefined && !this.piHasTheme(theme)) {
-			this.notify(
-				`pi 中没有主题 ${theme}，未做任何修改；可用 /wecom-aibot config --scope ${scope} edit 从 pi 的主题列表中选择`,
-				"warning",
-			);
-			return;
-		}
 		const before = this.previous();
 		if (scope === "global")
 			patchLayer("global", change, guard && ((current) => guard(mergeLayers(current, undefined))));
@@ -315,12 +312,6 @@ class ConfigCommand {
 		}
 	}
 
-	/** RPC and print modes list no themes: there the name is saved as given. */
-	private piHasTheme(name: string): boolean {
-		const themes = this.ctx.ui.getAllThemes();
-		return !themes.length || themes.some((theme) => theme.name === name);
-	}
-
 	private layer(scope: ConfigScope): Layer | undefined {
 		return scope === "global" ? readLayer("global") : this.config.layer();
 	}
@@ -364,14 +355,47 @@ class ConfigCommand {
 					`${spec.label}：${describe(resolved, spec.name)}`,
 					() =>
 						plain(
-							spec.choices
-								? this.editChoice(spec, resolved.values[spec.name], overridden(spec.name))
-								: this.editTheme(spec, scope, resolved.values[spec.name], overridden(spec.name)),
+							spec.name === "controlPrompts"
+								? this.editPrompts(spec, scope, resolved.values.controlPrompts, overridden(spec.name))
+								: this.editChoice(spec, resolved.values[spec.name], overridden(spec.name)),
 						),
 				]),
+				// The document belongs to the bot, not to a session: it is global only.
+				...(scope === "global"
+					? [
+							[
+								`会话文档：${display("docMcpUrl", resolved.values.docMcpUrl)}`,
+								() => plain(this.editDocument(resolved.values.docMcpUrl !== undefined)),
+							] as [string, () => Promise<Edit | undefined>],
+						]
+					: []),
 			],
 		);
 		return edit?.();
+	}
+
+	/** The address is shown nowhere: it is typed fresh or removed. */
+	private async editDocument(configured: boolean): Promise<LayerChange | undefined> {
+		const action = configured
+			? await this.choose<"enter" | LayerChange>("会话文档", [
+					["重新输入地址", "enter"],
+					["删除地址（控制卡只更新卡片里的三行）", { remove: ["docMcpUrl"] }],
+				])
+			: "enter";
+		if (action !== "enter") return action;
+		const typed = (
+			await this.ctx.ui.input(
+				"会话文档地址",
+				"工作台 → 智能机器人 → 编辑 → 可使用权限 → 授权后「查看使用方式」里的 streamableHTTP URL；含 apikey，输入时会显示在屏幕上",
+			)
+		)?.trim();
+		if (!typed) return undefined;
+		const problem = docUrlProblem(typed);
+		if (problem) {
+			this.notify(problem, "warning");
+			return undefined;
+		}
+		return { set: { docMcpUrl: typed } };
 	}
 
 	private async editCredentials(current: string | undefined, inherit: boolean): Promise<LayerChange | undefined> {
@@ -391,7 +415,7 @@ class ConfigCommand {
 	): Promise<Pick<ManagedFields, "botId" | "secret"> | undefined> {
 		const typed = await this.ctx.ui.input(
 			"企业微信 BotID",
-			current ? `当前 ${mask(current)}；留空沿用` : "智能机器人 BotID",
+			current ? `当前 ${maskBotId(current)}；留空沿用` : "智能机器人 BotID",
 		);
 		if (typed === undefined) return undefined;
 		const botId = typed.trim() || current;
@@ -470,22 +494,39 @@ class ConfigCommand {
 		return this.choose(spec.label, options);
 	}
 
-	private editTheme(
-		spec: ThemeField,
+	/**
+	 * One prompt per line, in the dropdown's order. Esc saves nothing; an emptied editor means no prompts: the
+	 * global layer drops the field (there is no default to fall back on), a session overrides with none.
+	 */
+	private async editPrompts(
+		spec: PromptsField,
 		scope: ConfigScope,
-		current: string | undefined,
+		current: readonly string[],
 		inherit: boolean,
 	): Promise<LayerChange | undefined> {
-		const options = this.ctx.ui
-			.getAllThemes()
-			.map(({ name }): [string, LayerChange] => [
-				`${name}${name === current ? "（当前）" : ""}`,
-				{ set: { [spec.name]: name } },
+		if (inherit) {
+			const action = await this.choose<"write" | LayerChange>(spec.label, [
+				["编辑提示词（一行一条）", "write"],
+				["取消覆盖，重新继承全局值", { remove: [spec.name] }],
 			]);
-		if (scope === "global")
-			options.unshift([`跟随 pi 当前主题${current === undefined ? "（当前）" : ""}`, { remove: [spec.name] }]);
-		if (inherit) options.push(["取消覆盖，重新继承全局值或跟随 pi 当前主题", { remove: [spec.name] }]);
-		return this.choose(spec.label, options);
+			if (action !== "write") return action;
+		}
+		const typed = await this.ctx.ui.editor(
+			`${spec.label}：一行一条，最多 ${MAX_PROMPTS} 条，按顺序显示在下拉框里；下拉框只显示前 10 个字；清空即为没有提示词`,
+			current.join("\n"),
+		);
+		if (typed === undefined) return undefined;
+		const prompts = typed
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.filter(Boolean);
+		if (!prompts.length) return scope === "global" ? { remove: [spec.name] } : { set: { [spec.name]: [] } };
+		const problem = promptsProblem(prompts);
+		if (problem) {
+			this.notify(`${spec.name} ${problem}，未做任何修改`, "warning");
+			return undefined;
+		}
+		return { set: { [spec.name]: prompts } };
 	}
 
 	private async choose<T>(title: string, options: [label: string, value: T][]): Promise<T | undefined> {
@@ -499,7 +540,7 @@ class ConfigCommand {
 	private report(saved: string, scope: ConfigScope, change: LayerChange, before: Resolved, after: Resolved): string {
 		const changes = FIELDS.filter(
 			(spec) =>
-				before.values[spec.name] !== after.values[spec.name] ||
+				!same(before.values[spec.name], after.values[spec.name]) ||
 				before.sources[spec.name] !== after.sources[spec.name],
 		).map((spec) => {
 			const from = describe(before, spec.name);
@@ -523,16 +564,18 @@ class ConfigCommand {
 	}
 
 	private conclusion(before: Resolved, after: Resolved): string {
-		const settings = SETTING_FIELDS.some((spec) => before.values[spec.name] !== after.values[spec.name]);
+		const settings = SETTING_FIELDS.some((spec) => !same(before.values[spec.name], after.values[spec.name]));
+		const document = before.values.docMcpUrl !== after.values.docMcpUrl;
 		const connection = connectionKey(connectionOf(before)) !== connectionKey(connectionOf(after));
 		const adopted = this.host.adopted();
 		const pending = pendingReconnect(after, adopted);
-		if (!settings && !connection)
+		if (!settings && !document && !connection)
 			return pending
 				? "当前 session 的合并结果不变；之前的修改仍待重新接入，运行 /wecom-aibot connect 后生效"
 				: "当前 session 的合并结果不变，无需操作";
 		const parts: string[] = [];
-		if (settings) parts.push(adopted === undefined ? "通知设置下次使用时生效" : "通知设置已热更新");
+		if (settings) parts.push(adopted === undefined ? "设置下次使用时生效" : "设置已热更新");
+		if (document) parts.push("会话文档地址在下次 connect 或点「刷新卡片」时生效");
 		if (connection || pending)
 			parts.push(
 				adopted === undefined
@@ -547,6 +590,11 @@ class ConfigCommand {
 	private notify(message: string, type: "info" | "warning" = "info"): void {
 		this.ctx.ui.notify(message, type);
 	}
+}
+
+/** Values read from two files: a list compares by its items, not by identity. */
+function same(a: unknown, b: unknown): boolean {
+	return a === b || (Array.isArray(a) && Array.isArray(b) && JSON.stringify(a) === JSON.stringify(b));
 }
 
 function found(identity: ChatIdentity): string {

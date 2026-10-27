@@ -9,6 +9,7 @@ import {
 	type BridgeRequest,
 	type BridgeResponse,
 	type ChatIdentity,
+	type ClientFrame,
 	GATEWAY_PROTOCOL_VERSION,
 	GATEWAY_RETRY_MS,
 	type GatewayCredentials,
@@ -20,6 +21,7 @@ import {
 	IPC_HEARTBEAT_MS,
 	IPC_LEASE_MS,
 	IPC_SEND_TIMEOUT_MS,
+	type PushItem,
 	parseServerFrame,
 	readFrames,
 	sameTarget,
@@ -28,8 +30,8 @@ import {
 	verifyProof,
 	writeFrame,
 } from "../shared/gateway-protocol.ts";
-import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
-import { sentences } from "../shared/text.ts";
+import type { GatewayNotification, SessionSource } from "../shared/notification-types.ts";
+import { errorMessage, sentences } from "../shared/text.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 import type { Connection } from "./config.ts";
 
@@ -40,7 +42,7 @@ const AUTH_FAILED = sentences(
 
 export interface GatewayClientOptions {
 	config: Pick<Connection, "botId" | "secret" | "allowedUserIds">;
-	source: NotificationSource;
+	source: SessionSource;
 	instanceId?: string;
 	identifyOnly?: boolean;
 	onState?: (state: WeComState, detail?: string) => void;
@@ -141,7 +143,7 @@ export class GatewayClient implements BridgeClient {
 		);
 	}
 
-	updateSource(source: NotificationSource): void {
+	updateSource(source: SessionSource): void {
 		if (source.sessionId !== this.registration.source.sessionId) throw new Error("session 已改变，必须重新注册网关");
 		if (JSON.stringify(source) === JSON.stringify(this.registration.source)) return;
 		this.registration.source = { ...source };
@@ -157,6 +159,15 @@ export class GatewayClient implements BridgeClient {
 	}
 
 	notify(chat: ChatRef, notification: GatewayNotification): Promise<void> {
+		return this.acknowledged((id) => ({ type: "notify", id, chat, notification }));
+	}
+
+	push(chat: ChatRef, item: PushItem): Promise<void> {
+		return this.acknowledged((id) => ({ type: "push", id, chat, item }));
+	}
+
+	/** A frame the gateway answers with result{id} once WeCom acknowledged what it sent. */
+	private acknowledged(frame: (id: string) => Extract<ClientFrame, { type: "notify" | "push" }>): Promise<void> {
 		// The bridge owns "is this my session"; the gateway is the trust boundary that enforces it.
 		if (!this.isReady()) return Promise.reject(new DeliveryError("共享网关或企微连接未就绪", "not_sent"));
 		return new Promise((resolve, reject) => {
@@ -166,7 +177,7 @@ export class GatewayClient implements BridgeClient {
 				reject(new DeliveryError("网关通知确认超时，发送结果未知"));
 			}, IPC_SEND_TIMEOUT_MS);
 			this.pending.set(id, { resolve, reject, timer });
-			if (!writeFrame(this.socket!, { type: "notify", id, chat, notification })) {
+			if (!writeFrame(this.socket!, frame(id))) {
 				clearTimeout(timer);
 				this.pending.delete(id);
 				reject(new DeliveryError("网关连接已断开，发送结果未知"));
@@ -339,7 +350,7 @@ export class GatewayClient implements BridgeClient {
 				}
 			},
 			(error) => {
-				this.options.log?.(`共享网关数据未处理：${error instanceof Error ? error.message : String(error)}`);
+				this.options.log?.(`共享网关数据未处理：${errorMessage(error)}`);
 			},
 		);
 	}

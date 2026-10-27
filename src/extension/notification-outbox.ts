@@ -2,31 +2,35 @@
  * The notifications one registration owes. Only a known not-sent result is retained and retried; a rejection
  * is reported for user action, and an unknown ACK outcome is never pushed twice.
  */
-import { rmSync } from "node:fs";
+
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { deliveryFailure } from "../shared/delivery.ts";
-import { NO_REPLY_TEXT, notificationPayload, notificationProblem } from "../shared/notification.ts";
-import type { GatewayNotification, NotificationSource } from "../shared/notification-types.ts";
+import { NO_REPLY_TEXT, notificationPayload } from "../shared/notification.ts";
+import type { GatewayNotification, SessionSource } from "../shared/notification-types.ts";
+import { errorMessage } from "../shared/text.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
-import type { NotificationMode } from "./config.ts";
-import { captureModelIdentity, latestAssistantReply } from "./notification-source.ts";
+import { captureModelIdentity, latestAssistantReply } from "./session-data.ts";
 
 const MAX_QUEUE_SIZE = 50;
 
-/** A wecom_send with after_settle, or the result of a finished task: content is read when the run ends. */
+/** How a run ended, for the done state of the control card its result is sent as. */
+export type RunOutcome = "done" | "aborted" | "failed";
+
+/** A wecom_send with after_settle or the result of a finished run; control cards have their own lifecycle. */
 export interface CompletionRequest {
-	kind?: "connect";
 	taskId?: string;
 	chatId: string;
 	chatType: 1 | 2;
-	source: NotificationSource;
+	source: SessionSource;
+	/** Explicit wecom_send content: the card's headline is its first line, its page shows it all. */
 	content?: string;
-	/** The frozen automatic reply; content holds explicit wecom_send bodies or a connection entry. */
+	/** The frozen automatic reply. */
 	result?: string;
+	/** The card's headline. */
+	title?: string;
 	aborted?: boolean;
-	/** A failure explanation, never a screen capture: it can show what the user is doing locally. */
-	textOnly?: boolean;
-	tailParagraphs?: number;
+	/** pi never ran the task: the card's state is 未执行. */
+	failed?: boolean;
 	afterEntryId: string | null;
 }
 
@@ -34,25 +38,24 @@ export interface OutboxHost {
 	isReady(): boolean;
 	/** Counts subscriptions; a changed value during an attempt means a recovery must be re-checked. */
 	subscription(): number;
-	notificationMode(): NotificationMode;
 	context(): ExtensionContext | undefined;
-	/** Failures resolve to the Markdown fallback rather than rejecting. */
-	prepareImage(
-		notification: GatewayNotification,
-		ctx: ExtensionContext,
-		signal: AbortSignal,
-	): Promise<GatewayNotification>;
 	send(chat: ChatRef, notification: GatewayNotification): Promise<void>;
+	/**
+	 * The notification as a new copy of the session's control card, `note` in its 窗口记录, its page showing
+	 * the body; undefined (or a throw) leaves the gateway to send the body as Markdown.
+	 */
+	controlCard?(
+		ctx: ExtensionContext,
+		outcome: RunOutcome | "live",
+		note: string,
+		source?: SessionSource,
+	): GatewayNotification["control"];
 	log(line: string): void;
 	notify(message: string, type?: "info" | "warning" | "error"): void;
-	/** Aborted when the session is disposed. */
-	signal: AbortSignal;
 }
 
 type Phase =
 	| { kind: "pending" }
-	/** An image is being rendered; settle and reconnect must not start a second capture. */
-	| { kind: "preparing"; promise: Promise<void> }
 	/** The payload is frozen; a reconnect sends exactly this. */
 	| { kind: "ready"; notification: GatewayNotification }
 	| { kind: "delivering"; notification: GatewayNotification; promise: Promise<void> };
@@ -95,18 +98,12 @@ export class NotificationOutbox {
 
 	async prepare(ctx: ExtensionContext, aborted: boolean, boundary: "settled" | "ready" = "settled"): Promise<void> {
 		if (this.disposed) return;
-		const images: Promise<void>[] = [];
 		for (const [key, entry] of this.waiting) {
-			if (entry.phase.kind === "ready") continue;
-			if (entry.phase.kind === "preparing") {
-				images.push(entry.phase.promise);
-				continue;
-			}
+			if (entry.phase.kind !== "pending") continue;
 			try {
 				const request = entry.request;
-				if (request.kind === "connect" && !this.host.isReady()) continue;
 				// A readiness change is not the end of a run: scheduled completions still wait for agent_settled.
-				if (boundary === "ready" && request.kind !== "connect" && request.result === undefined) continue;
+				if (boundary === "ready" && request.result === undefined) continue;
 				if (request.source.sessionId !== ctx.sessionManager.getSessionId())
 					throw new Error("pi session_id 已改变，已取消通知");
 				const answer =
@@ -114,47 +111,34 @@ export class NotificationOutbox {
 						? latestAssistantReply(ctx.sessionManager.getBranch(), request.afterEntryId)
 						: undefined;
 				if (answer) request.source = { ...request.source, ...captureModelIdentity(ctx, answer) };
-				// Autonomous replies keep the tail like a normal reply; scheduled excerpts use completion rules.
-				const ready = notificationPayload(
-					request.kind ?? (request.result !== undefined ? "reply" : "completion"),
+				const ended = request.aborted ?? aborted;
+				// An extracted completion is titled by how its run ended, known only now.
+				const title = request.title ?? (request.content === undefined ? completionTitle(ended) : undefined);
+				const kind = request.result !== undefined ? "result" : "notice";
+				// The session's control card, drawn now while the terminal shows how the run ended.
+				const control = this.controlCard(
+					ctx,
+					request.failed ? "failed" : ended ? "aborted" : "done",
+					kind === "result" ? (title ?? completionTitle(ended)) : noteOf({ kind, title }),
+					request.source,
+				);
+				const notification = notificationPayload(
+					kind,
 					request.source,
 					request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT,
 					{
-						tailParagraphs: request.tailParagraphs,
-						aborted: request.kind === "connect" ? false : (request.aborted ?? aborted),
+						title,
+						aborted: ended,
 						taskId: request.taskId,
+						...(control ? { control } : {}),
 					},
 				);
-				// Validate the Markdown fallback before any image side effects; the gateway renders it once.
-				const problem = notificationProblem(ready.source, ready.text, ready);
-				if (problem) throw new Error(problem);
-				if (request.textOnly || this.host.notificationMode() !== "screenshot") {
-					entry.phase = { kind: "ready", notification: ready };
-					continue;
-				}
-				const prepare = this.host
-					.prepareImage(ready, ctx, this.host.signal)
-					.then((prepared) => {
-						if (this.disposed || this.waiting.get(key) !== entry) {
-							this.removeImage(prepared);
-							return;
-						}
-						entry.phase = {
-							kind: "ready",
-							notification: { ...prepared, ...(request.taskId ? { taskId: request.taskId } : {}) },
-						};
-					})
-					.catch((error: unknown) => this.cancel(key, entry, error));
-				entry.phase = { kind: "preparing", promise: prepare };
-				images.push(prepare);
+				entry.phase = { kind: "ready", notification };
 			} catch (error) {
 				this.cancel(key, entry, error);
 			}
 		}
-		// Text notifications start their writes synchronously; images flush once their files are ready.
-		const flush = this.flush();
-		if (images.length) await Promise.all(images).then(() => this.flush());
-		else await flush;
+		await this.flush();
 	}
 
 	async flush(): Promise<void> {
@@ -180,7 +164,6 @@ export class NotificationOutbox {
 				.send({ chatId: entry.request.chatId, chatType: entry.request.chatType }, notification)
 				.then(() => {
 					this.handedOver.delete(entry);
-					this.removeImage(notification);
 					if (!this.disposed)
 						this.host.log(`notification delivered for session ${entry.request.source.sessionId}`);
 				})
@@ -189,14 +172,13 @@ export class NotificationOutbox {
 					const outcome = deliveryFailure(error);
 					if (outcome === "not_sent") {
 						retained = this.handedOver.has(entry);
-						if (retained) this.host.log(`notification not sent; retained for reconnect: ${errMsg(error)}`);
+						if (retained) this.host.log(`notification not sent; retained for reconnect: ${errorMessage(error)}`);
 						return;
 					}
 					this.handedOver.delete(entry);
-					this.removeImage(notification);
-					this.host.log(`notification failed (${outcome}): ${errMsg(error)}`);
+					this.host.log(`notification failed (${outcome}): ${errorMessage(error)}`);
 					this.host.notify(
-						`企微通知${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errMsg(error)}`,
+						`企微通知${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errorMessage(error)}`,
 						"warning",
 					);
 				})
@@ -206,7 +188,7 @@ export class NotificationOutbox {
 					// A resubscribe during this attempt already passed it by; retry here or that recovery is lost.
 					if (retained && !this.disposed && this.host.subscription() !== subscription && this.host.isReady()) {
 						void this.flush().catch((error: unknown) =>
-							this.host.log(`notification retry failed: ${errMsg(error)}`),
+							this.host.log(`notification retry failed: ${errorMessage(error)}`),
 						);
 					}
 				});
@@ -219,46 +201,44 @@ export class NotificationOutbox {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
-		for (const entry of this.waiting.values()) this.removeImage(imageOf(entry));
-		for (const entry of this.handedOver) this.removeImage(imageOf(entry));
 		this.waiting.clear();
 		this.handedOver.clear();
+	}
+
+	private controlCard(
+		ctx: ExtensionContext,
+		outcome: RunOutcome,
+		note: string,
+		source: SessionSource,
+	): GatewayNotification["control"] {
+		try {
+			return this.host.controlCard?.(ctx, outcome, note, source);
+		} catch (error) {
+			this.host.log(`sent as Markdown: the control card could not be drawn: ${errorMessage(error)}`);
+			return undefined;
+		}
 	}
 
 	private cancel(key: string, entry: Entry, error: unknown): void {
 		if (this.disposed || this.waiting.get(key) !== entry) return;
 		this.waiting.delete(key);
-		this.host.log(`notification cancelled: ${errMsg(error)}`);
-		this.host.notify(`企微通知已取消：${errMsg(error)}`, "warning");
-	}
-
-	/** A rendered notification can show the screen, so a file that cannot be deleted is reported, not ignored. */
-	private removeImage(notification: GatewayNotification | undefined): void {
-		removeNotificationImage(notification, (line) => this.host.log(line));
+		this.host.log(`notification cancelled: ${errorMessage(error)}`);
+		this.host.notify(`企微通知已取消：${errorMessage(error)}`, "warning");
 	}
 }
 
-export function removeNotificationImage(
-	notification: GatewayNotification | undefined,
-	log: (line: string) => void,
-): void {
-	const path = notification?.image?.path;
-	if (!path) return;
-	try {
-		rmSync(path, { force: true });
-	} catch (error) {
-		log(`could not delete notification image ${path}: ${errMsg(error)}`);
-	}
+/** 窗口记录 of a published notice: its headline, marked as a notice unless it leads with its own emoji. */
+export function noteOf(notification: Pick<GatewayNotification, "kind" | "title">): string {
+	if (notification.kind === "test") return "🧪 部署测试：点任一按钮验证回调";
+	const title = notification.title ?? "会话通知";
+	return /^\p{Extended_Pictographic}/u.test(title) ? title : `📣 ${title}`;
 }
 
-function imageOf(entry: Entry): GatewayNotification | undefined {
-	return entry.phase.kind === "ready" || entry.phase.kind === "delivering" ? entry.phase.notification : undefined;
+/** The headline of a run's answer when nobody named one. */
+export function completionTitle(aborted: boolean): string {
+	return aborted ? "⛔ 本轮已中止" : "✅ 本轮完成";
 }
 
-function keyOf(request: Pick<CompletionRequest, "source" | "chatId" | "chatType" | "kind">): string {
-	return JSON.stringify([request.source.sessionId, request.chatType, request.chatId, request.kind ?? "result"]);
-}
-
-function errMsg(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
+function keyOf(request: Pick<CompletionRequest, "source" | "chatId" | "chatType">): string {
+	return JSON.stringify([request.source.sessionId, request.chatType, request.chatId]);
 }

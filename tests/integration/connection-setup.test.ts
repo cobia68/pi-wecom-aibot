@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { after, afterEach, beforeEach, test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { GatewayClientOptions } from "../../src/extension/gateway-client.ts";
+import { controlKey } from "../../src/shared/control-card.ts";
 import { DeliveryError } from "../../src/shared/delivery.ts";
-import type { BridgeClient, ChatIdentity } from "../../src/shared/gateway-protocol.ts";
+import type { BridgeClient, ChatIdentity, PushItem } from "../../src/shared/gateway-protocol.ts";
 import type { GatewayNotification } from "../../src/shared/notification-types.ts";
 import type { ChatRef } from "../../src/shared/wecom-protocol.ts";
 
@@ -23,7 +24,7 @@ async function flush(): Promise<void> {
 	for (let i = 0; i < 3; i++) await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
-function harness() {
+function harness(entries: unknown[] = []) {
 	const handlers = new Map<string, Handler[]>();
 	const clients: ReturnType<typeof controlledClient>[] = [];
 	const tools = new Map<string, any>();
@@ -41,7 +42,8 @@ function harness() {
 		sessionManager: {
 			getSessionId: () => "session-connect",
 			getHeader: () => null,
-			getBranch: () => [],
+			getBranch: () => entries,
+			getEntries: () => entries,
 			getLeafId: () => null,
 		},
 		ui: {
@@ -62,9 +64,11 @@ function harness() {
 		let ready = false;
 		let finishIdentity: ((error?: Error, value?: ChatIdentity) => void) | undefined;
 		const pushes: { chat: ChatRef; notification: GatewayNotification }[] = [];
+		const controls: { chat: ChatRef; item: Extract<PushItem, { kind: "control" }> }[] = [];
 		const control = {
 			options,
 			pushes,
+			controls,
 			stops: [] as string[],
 			failure: undefined as Error | undefined,
 			watching: () => finishIdentity !== undefined,
@@ -95,6 +99,10 @@ function harness() {
 			updateSource() {},
 			respond() {},
 			taskStatus: () => ready,
+			async push(chat, item) {
+				if (item.kind === "control") controls.push({ chat, item });
+				if (control.failure) throw control.failure;
+			},
 			async notify(chat, notification) {
 				pushes.push({ chat, notification });
 				if (control.failure) throw control.failure;
@@ -131,6 +139,9 @@ function harness() {
 		registerTool(tool: { name: string }) {
 			tools.set(tool.name, tool);
 		},
+		appendEntry(customType: string, data: unknown) {
+			entries.push({ type: "custom", customType, data });
+		},
 		sendUserMessage() {
 			assert.fail("configuration must not dispatch pi tasks");
 		},
@@ -148,6 +159,7 @@ function harness() {
 	cleanup.push(() => emit("session_shutdown"));
 	return {
 		ctx,
+		entries,
 		clients,
 		notices,
 		confirms,
@@ -197,29 +209,38 @@ test("connect requires a default target but never requires having identified one
 	assert.equal(h.clients.length, 1, "a manually configured target is sufficient");
 });
 
-test("a connection entry waits for readiness and is sent once across repeated connect and automatic recovery", async () => {
+test("a session control waits for readiness, is reused by automatic recovery, and is sent again by every connect", async () => {
 	const h = harness();
 	await h.emit("session_start");
 	await h.command("connect");
 	const c = h.clients[0];
-	assert.equal(c.pushes.length, 0);
+	assert.equal(c.controls.length, 0);
 	c.publish();
 	await flush();
-	assert.equal(c.pushes.length, 1);
-	assert.equal(c.pushes[0].notification.kind, "connect");
-	assert.equal(c.pushes[0].notification.source.sessionId, "session-connect");
-	assert.equal(c.pushes[0].chat.chatId, "old-user");
-	assert.match(c.pushes[0].notification.text, /引用本条消息/);
-	await h.command("connect");
+	assert.equal(c.controls.length, 1);
+	const card = c.controls[0].item.card;
+	assert.equal(card.label, "空闲");
+	assert.equal(card.quote, "点「刷新卡片」读取画面", "no terminal to read and no document");
+	assert.equal(card.subtitle, "🆔 session-id: session-connect");
+	assert.deepEqual(
+		card.actions.map((action) => action.key),
+		["refresh", "send", "model", "abort"].map((action) => controlKey(action as "refresh", "session-connect")),
+		"no prompts configured; each key names the session",
+	);
+	assert.equal(c.controls[0].chat.chatId, "old-user");
 	c.publish(false);
 	c.publish();
 	await flush();
-	assert.equal(c.pushes.length, 1);
+	assert.equal(c.controls.length, 1, "automatic recovery reuses the card");
+	await h.command("connect");
+	await flush();
+	assert.equal(c.controls.length, 2, "every connect publishes a new one");
+	assert.notEqual(c.controls[1].item.cardId, c.controls[0].item.cardId);
 	assert.equal(h.clients.length, 1);
 });
 
 for (const outcome of ["rejected", "unknown"] as const) {
-	test(`a ${outcome} connection entry never disconnects the bridge or automatically resends`, async () => {
+	test(`a ${outcome} control card never disconnects the bridge or automatically resends`, async () => {
 		const h = harness();
 		await h.emit("session_start");
 		await h.command("connect");
@@ -233,11 +254,11 @@ for (const outcome of ["rejected", "unknown"] as const) {
 		c.publish(false);
 		c.publish();
 		await flush();
-		assert.equal(c.pushes.length, 1);
+		assert.equal(c.controls.length, 1);
 	});
 }
 
-test("a known-unsent connection entry is retained and delivered after recovery", async () => {
+test("a known-unsent control card is retained and delivered after recovery", async () => {
 	const h = harness();
 	await h.emit("session_start");
 	await h.command("connect");
@@ -249,8 +270,44 @@ test("a known-unsent connection entry is retained and delivered after recovery",
 	c.publish(false);
 	c.publish();
 	await flush();
-	assert.equal(c.pushes.length, 2);
-	assert.deepEqual(c.pushes[1], c.pushes[0], "retry uses the exact frozen notification");
+	assert.equal(c.controls.length, 2);
+	assert.equal(c.controls[1].item.cardId, c.controls[0].item.cardId, "a definitely unwritten card retains its ID");
+	assert.equal(c.controls[1].item.card.quote, c.controls[0].item.card.quote);
+});
+
+test("control receipts never restore connection consent, and each connect after disconnect or restore sends a new card", async () => {
+	const h = harness();
+	const first = await connected(h);
+	assert.equal(first.controls.length, 1);
+	await h.command("disconnect");
+	await h.command("connect");
+	h.clients[1].publish();
+	await flush();
+	assert.equal(h.clients[1].controls.length, 1, "connect after disconnect publishes a new card");
+	assert.notEqual(h.clients[1].controls[0].item.cardId, first.controls[0].item.cardId);
+	await h.emit("session_shutdown");
+	const restored = harness([...h.entries]);
+	await restored.emit("session_start");
+	assert.equal(restored.clients.length, 0, "a receipt is not consent to reconnect");
+	await restored.command("connect");
+	restored.clients[0].publish();
+	await flush();
+	assert.equal(restored.clients[0].controls.length, 1);
+	restored.clients[0].publish(false);
+	restored.clients[0].publish();
+	await flush();
+	assert.equal(restored.clients[0].controls.length, 1, "automatic recovery reuses the card just sent");
+});
+
+test("a fork carrying its parent's journal creates its own independent control card", async () => {
+	const parent = harness();
+	const connectedParent = await connected(parent);
+	const fork = harness([...parent.entries]);
+	Object.assign(fork.ctx.sessionManager, { getSessionId: () => "session-fork" });
+	const connectedFork = await connected(fork);
+	assert.equal(connectedFork.controls.length, 1);
+	assert.equal(connectedFork.controls[0].item.card.subtitle, "🆔 session-id: session-fork");
+	assert.notEqual(connectedFork.controls[0].item.cardId, connectedParent.controls[0].item.cardId);
 });
 
 test("config with a manual target saves configuration without creating a client or entry", async () => {
@@ -281,6 +338,7 @@ test("offline config whoami uses a temporary registration then closes it without
 	assert.equal(readLayer("global")?.defaultChatId, "group");
 	assert.equal(c.stops.length, 1);
 	assert.equal(c.pushes.length, 0);
+	assert.equal(c.controls.length, 0);
 	assert.equal(c.client.isReady(), false);
 	await h.command("connect");
 	assert.equal(h.clients.length, 2);
@@ -358,7 +416,7 @@ for (const changed of [false, true]) {
 		await pending;
 		assert.equal(c.stops.length, 0, "saving a target never disconnects");
 		assert.equal(readLayer("global")?.defaultChatId, changed ? "new-user" : "old-user");
-		assert.equal(c.pushes.length, 1, "whoami never sends an extra entry");
+		assert.equal(c.controls.length, 1, "whoami never sends an extra control card");
 		if (changed) {
 			assert.match(h.confirms[0], /保存不会断开当前接入/);
 			assert.match(h.notices.at(-1)!, /当前接入仍使用旧配置，运行 \/wecom-aibot connect 后生效/);
@@ -418,5 +476,5 @@ test("a hand-edited target is not silently hot-reloaded when reconnection is dec
 	assert.equal(h.clients.length, 2);
 	h.clients[1].publish();
 	await flush();
-	assert.equal(h.clients[1].pushes[0].chat.chatId, "new-user");
+	assert.equal(h.clients[1].controls[0].chat.chatId, "new-user");
 });

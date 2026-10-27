@@ -9,7 +9,7 @@ import { sentences } from "../shared/text.ts";
 import type { BridgeSession } from "./bridge-session.ts";
 import type { Connection } from "./config.ts";
 
-export interface SetupHost {
+export interface WhoamiHost {
 	bridge(): BridgeSession | undefined;
 	/** Reuse the formal bridge when it uses this bot, or open a temporary identity-only registration with it. */
 	beginIdentity(ctx: ExtensionContext, connection: Connection): BridgeSession;
@@ -19,10 +19,10 @@ export interface SetupHost {
 }
 
 /** One identification at a time: a second must not replace the first one's code. */
-export class SessionSetup {
+export class Whoami {
 	private identifying = false;
 
-	constructor(private readonly host: SetupHost) {}
+	constructor(private readonly host: WhoamiHost) {}
 
 	/** Cancelling, a timeout or a failure is reported here and returns undefined. */
 	async identify(ctx: ExtensionContext, connection: Connection, seconds: number): Promise<ChatIdentity | undefined> {

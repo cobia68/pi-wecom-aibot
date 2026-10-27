@@ -1,7 +1,7 @@
 /**
  * What `/wecom-aibot status` reports: one headline whose icon tells the connection state, then the
  * details in one aligned table. pi shows the whole notice in its dim colour, so the icon is its only
- * colour; each icon also has its own shape, so a monochrome screenshot keeps the meaning. The four
+ * colour; each icon also has its own shape, so the meaning holds without colour. The four
  * icons are all East Asian wide, so the state never shifts the text after it by a column.
  */
 import { stripVTControlCharacters } from "node:util";
@@ -154,9 +154,9 @@ function sessionRows({ source }: StatusSnapshot): [string, string][] {
 function settingRows({ resolved }: StatusSnapshot): [string, string][] {
 	if (!resolved) return [];
 	return [
-		["通知方式", describe(resolved, "notificationMode")],
 		["通知范围", describe(resolved, "notificationScope")],
-		["截图主题", describe(resolved, "screenshotTheme")],
+		["提示词", describe(resolved, "controlPrompts")],
+		["会话文档", describe(resolved, "docMcpUrl")],
 	];
 }
 

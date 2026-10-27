@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { BridgeConnectionStatus } from "../../src/extension/connection-notices.ts";
-import { WECOM_STATUS_KEY, WeComStatus } from "../../src/extension/status.ts";
+import { FOOTER_STATUS_KEY, FooterStatus } from "../../src/extension/footer-status.ts";
 import { fixtureTheme, installTuiFixture } from "../support/tui-fixture.ts";
 
 function context(mode: ExtensionContext["mode"] = "tui", hasUI = true) {
@@ -30,7 +30,7 @@ function context(mode: ExtensionContext["mode"] = "tui", hasUI = true) {
 
 test("the name stays exactly wecom-aibot; only its foreground color indicates the connection state", () => {
 	const ctx = context();
-	const status = new WeComStatus();
+	const status = new FooterStatus();
 	const cases: [BridgeConnectionStatus, ThemeColor][] = [
 		["online", "success"],
 		["reconnecting", "warning"],
@@ -38,7 +38,7 @@ test("the name stays exactly wecom-aibot; only its foreground color indicates th
 	];
 	for (const [connection, color] of cases) {
 		status.update(ctx, connection);
-		const text = ctx.statuses.get(WECOM_STATUS_KEY)!;
+		const text = ctx.statuses.get(FOOTER_STATUS_KEY)!;
 		assert.equal(text, ctx.ui.theme.fg(color, "wecom-aibot"));
 		assert.equal(stripVTControlCharacters(text), "wecom-aibot");
 		assert.equal(visibleWidth(text), 11);
@@ -48,10 +48,10 @@ test("the name stays exactly wecom-aibot; only its foreground color indicates th
 
 test("a user disconnect keeps the error colour briefly, then removes the name", async () => {
 	const ctx = context();
-	const status = new WeComStatus(5);
+	const status = new FooterStatus(5);
 	status.update(ctx, "online");
 	status.flash(ctx);
-	assert.equal(ctx.statuses.get(WECOM_STATUS_KEY), ctx.ui.theme.fg("error", "wecom-aibot"));
+	assert.equal(ctx.statuses.get(FOOTER_STATUS_KEY), ctx.ui.theme.fg("error", "wecom-aibot"));
 	assert.equal(ctx.widgets.size, 1);
 	await new Promise((resolve) => setTimeout(resolve, 25));
 	assert.equal(ctx.statuses.size, 0);
@@ -60,17 +60,17 @@ test("a user disconnect keeps the error colour briefly, then removes the name", 
 
 test("a reconnect during the flash cancels its pending removal", async () => {
 	const ctx = context();
-	const status = new WeComStatus(10);
+	const status = new FooterStatus(10);
 	status.flash(ctx);
 	status.update(ctx, "online");
 	await new Promise((resolve) => setTimeout(resolve, 40));
-	assert.equal(ctx.statuses.get(WECOM_STATUS_KEY), ctx.ui.theme.fg("success", "wecom-aibot"));
+	assert.equal(ctx.statuses.get(FOOTER_STATUS_KEY), ctx.ui.theme.fg("success", "wecom-aibot"));
 	status.clear();
 });
 
 test("without a terminal UI a disconnect flash changes nothing", () => {
 	for (const ctx of [context("rpc"), context("json"), context("print"), context("tui", false)]) {
-		new WeComStatus(1).flash(ctx);
+		new FooterStatus(1).flash(ctx);
 		assert.deepEqual(ctx.writes, []);
 		assert.equal(ctx.widgets.size, 0);
 	}
@@ -78,27 +78,27 @@ test("without a terminal UI a disconnect flash changes nothing", () => {
 
 test("fresh SDK contexts and changes with the same color do not cause redundant footer writes", () => {
 	const ctx = context();
-	const status = new WeComStatus();
+	const status = new FooterStatus();
 	status.update(ctx, "reconnecting");
 	status.update({ ...ctx }, "reconnecting");
 	status.update({ ...ctx }, "reconnecting");
-	assert.deepEqual(ctx.writes, [[WECOM_STATUS_KEY, ctx.ui.theme.fg("warning", "wecom-aibot")]]);
+	assert.deepEqual(ctx.writes, [[FOOTER_STATUS_KEY, ctx.ui.theme.fg("warning", "wecom-aibot")]]);
 	assert.equal(ctx.widgets.size, 1);
 	status.clear();
 	status.clear();
 	assert.equal(ctx.writes.length, 2);
-	assert.deepEqual(ctx.writes[1], [WECOM_STATUS_KEY, undefined]);
+	assert.deepEqual(ctx.writes[1], [FOOTER_STATUS_KEY, undefined]);
 	assert.equal(ctx.widgets.size, 0);
 });
 
 test("pi theme invalidation repaints an idle status without a connection event or polling", () => {
 	const ctx = context();
-	const status = new WeComStatus();
+	const status = new FooterStatus();
 	status.update(ctx, "online");
-	const dark = ctx.statuses.get(WECOM_STATUS_KEY);
+	const dark = ctx.statuses.get(FOOTER_STATUS_KEY);
 	Object.assign(ctx.ui, { theme: fixtureTheme("light") });
 	ctx.root.invalidate();
-	const light = ctx.statuses.get(WECOM_STATUS_KEY);
+	const light = ctx.statuses.get(FOOTER_STATUS_KEY);
 	assert.notEqual(light, dark);
 	assert.equal(light, ctx.ui.theme.fg("success", "wecom-aibot"));
 	const count = ctx.writes.length;
@@ -112,7 +112,7 @@ test("the theme observer occupies no rows, leaves other widgets alone, and canno
 	const other = { render: () => ["Other widget"], invalidate() {} };
 	ctx.ui.setWidget("other-widget", () => other);
 	const before = ctx.containers[3].render(80);
-	const status = new WeComStatus();
+	const status = new FooterStatus();
 	status.update(ctx, "online");
 	assert.deepEqual(ctx.containers[3].render(80), before);
 	const observer = [...ctx.widgets.values()].find((widget) => widget !== other);
@@ -127,13 +127,13 @@ test("the theme observer occupies no rows, leaves other widgets alone, and canno
 	status.update(ctx, "reconnecting");
 	observer.invalidate();
 	observer.dispose?.();
-	assert.equal(ctx.statuses.get(WECOM_STATUS_KEY), ctx.ui.theme.fg("warning", "wecom-aibot"));
+	assert.equal(ctx.statuses.get(FOOTER_STATUS_KEY), ctx.ui.theme.fg("warning", "wecom-aibot"));
 	status.clear();
 });
 
 test("a host-disposed theme observer drops its old binding and allows a fresh binding", () => {
 	const ctx = context();
-	const status = new WeComStatus();
+	const status = new FooterStatus();
 	status.update(ctx, "online");
 	assert.equal(ctx.widgets.size, 1);
 	const [widgetKey] = ctx.widgets.keys();
@@ -141,7 +141,7 @@ test("a host-disposed theme observer drops its old binding and allows a fresh bi
 	assert.equal(ctx.statuses.size, 0);
 	status.update(ctx, "online");
 	assert.equal(ctx.widgets.size, 1);
-	assert.equal(ctx.statuses.get(WECOM_STATUS_KEY), ctx.ui.theme.fg("success", "wecom-aibot"));
+	assert.equal(ctx.statuses.get(FOOTER_STATUS_KEY), ctx.ui.theme.fg("success", "wecom-aibot"));
 	status.clear();
 });
 
@@ -150,12 +150,12 @@ test("rebinding a different UI removes the old entry and observer but preserves 
 	const b = context();
 	a.statuses.set("other", "Other A");
 	b.statuses.set("other", "Other B");
-	const status = new WeComStatus();
+	const status = new FooterStatus();
 	status.update(a, "online");
 	status.update(b, "online");
 	assert.deepEqual([...a.statuses], [["other", "Other A"]]);
 	assert.equal(a.widgets.size, 0);
-	assert.equal(b.statuses.get(WECOM_STATUS_KEY), b.ui.theme.fg("success", "wecom-aibot"));
+	assert.equal(b.statuses.get(FOOTER_STATUS_KEY), b.ui.theme.fg("success", "wecom-aibot"));
 	status.update(b, undefined);
 	assert.deepEqual([...b.statuses], [["other", "Other B"]]);
 	assert.equal(b.widgets.size, 0);
@@ -163,7 +163,7 @@ test("rebinding a different UI removes the old entry and observer but preserves 
 
 test("without a visible connection, neither the name nor a theme observer is installed", () => {
 	const ctx = context();
-	const status = new WeComStatus();
+	const status = new FooterStatus();
 	status.update(ctx, undefined);
 	ctx.root.invalidate();
 	assert.deepEqual(ctx.writes, []);
@@ -171,7 +171,7 @@ test("without a visible connection, neither the name nor a theme observer is ins
 });
 
 test("no status or theme observer is installed in RPC, JSON, print or UI-less contexts", () => {
-	const status = new WeComStatus();
+	const status = new FooterStatus();
 	for (const ctx of [context("rpc"), context("json"), context("print"), context("tui", false)]) {
 		status.update(ctx, "online");
 		assert.deepEqual(ctx.writes, []);
@@ -187,7 +187,7 @@ test("no status or theme observer is installed in RPC, JSON, print or UI-less co
 
 test("pi's real footer retains its model and usage rows, applies the name's color and fits narrow terminals", () => {
 	const ctx = context();
-	const status = new WeComStatus();
+	const status = new FooterStatus();
 	const session = {
 		sessionManager: SessionManager.inMemory(process.cwd()),
 		state: { model: { id: "test-model", provider: "test-provider", contextWindow: 2048 } },

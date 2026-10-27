@@ -6,11 +6,11 @@ import { dirname, join } from "node:path";
 import { after, afterEach, beforeEach, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { FLASH_MS } from "../../src/extension/footer-status.ts";
 import type { GatewayClientOptions } from "../../src/extension/gateway-client.ts";
-import { FLASH_MS } from "../../src/extension/status.ts";
 import type { BridgeClient, GatewayStatus } from "../../src/shared/gateway-protocol.ts";
 import type { WeComState } from "../../src/shared/wecom-protocol.ts";
-import { fixtureTheme, fixtureThemes } from "../support/tui-fixture.ts";
+import { fixtureTheme } from "../support/tui-fixture.ts";
 
 const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-aibot-status-test-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -47,6 +47,7 @@ function connection(options: GatewayClientOptions) {
 		respond() {},
 		resume() {},
 		taskStatus: () => ready,
+		async push() {},
 		async notify() {
 			if (!ready) throw new Error("not connected");
 		},
@@ -86,6 +87,7 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
 		answers: [] as boolean[],
 	};
 	const state = { sessionId: `session-${instances.length}` };
+	const entries: unknown[] = [];
 	let command!: (input: string, ctx: ExtensionContext) => Promise<void>;
 	const ctx = {
 		mode,
@@ -96,7 +98,8 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
 		sessionManager: {
 			getSessionId: () => state.sessionId,
 			getHeader: () => null,
-			getBranch: () => [],
+			getBranch: () => entries,
+			getEntries: () => entries,
 			getLeafId: () => null,
 		},
 		ui: {
@@ -110,7 +113,6 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
 				const pick = dialogs.picks.shift();
 				return pick && options.find((option) => pick.test(option));
 			},
-			getAllThemes: fixtureThemes,
 			setWidget() {},
 			setStatus(statusKey: string, text: string | undefined) {
 				assert.equal(statusKey, key, "the extension owns only its status entry");
@@ -133,6 +135,9 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
 			command = options.handler;
 		},
 		registerTool() {},
+		appendEntry(customType: string, data: unknown) {
+			entries.push({ type: "custom", customType, data });
+		},
 		sendUserMessage() {},
 	} as unknown as ExtensionAPI;
 	extension(pi, {
@@ -239,7 +244,7 @@ test("a saved connection change keeps the name green and adds a pending reconnec
 	assert.equal(client.stopped.length, 0, "saving never disconnects");
 	// A setting is no connection change: nothing waits for connect.
 	await h.command("config --scope global set defaultChatId=private-user");
-	await h.command("config --scope session set screenshotTheme=light");
+	await h.command("config --scope session set notificationScope=all-runs");
 	assert.equal(h.statuses.get(key), label("success"));
 	await h.command("config --scope global set defaultChatId=new-user");
 	await h.command("connect");

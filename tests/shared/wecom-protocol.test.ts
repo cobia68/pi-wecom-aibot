@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseInbound, quotedImage, senderOf } from "../../src/shared/wecom-protocol.ts";
+import { cardSelections, parseInbound, quotesMedia, senderOf } from "../../src/shared/wecom-protocol.ts";
 
 const base = {
 	msgid: "m1",
@@ -124,42 +124,38 @@ test("malformed callbacks are rejected instead of guessed", () => {
 	);
 });
 
-test("a quote that is not plainly text reports its type, field names and any image link", () => {
-	const image = { url: "https://example.invalid/q", aeskey: "KEY", md5: "m" };
-	assert.deepEqual(quotedImage({ ...base, quote: { msgtype: "image", image } }), {
-		msgtype: "image",
-		quoteFields: ["msgtype", "image"],
-		imageFields: ["url", "aeskey", "md5"],
-		url: image.url,
-		aeskey: "KEY",
-	});
-	const mixed = {
-		msgtype: "mixed",
-		mixed: {
-			msg_item: [
-				{ msgtype: "text", text: { content: "hi" } },
-				{ msgtype: "image", image: { url: "u" } },
-			],
-		},
-	};
-	assert.deepEqual(quotedImage({ ...base, quote: mixed }), {
-		msgtype: "mixed",
-		quoteFields: ["msgtype", "mixed"],
-		imageFields: ["url"],
-		url: "u",
-	});
-	assert.deepEqual(quotedImage({ ...base, quote: { msgtype: "image" } }), {
-		msgtype: "image",
-		quoteFields: ["msgtype"],
-		imageFields: [],
-	});
-	// An unexpected shape is reported rather than silently skipped.
-	assert.deepEqual(quotedImage({ ...base, quote: { msgtype: "file", file: { url: "f" } } }), {
-		msgtype: "file",
-		quoteFields: ["msgtype", "file"],
-		imageFields: [],
-	});
+test("a quote of an image, a file or a mix is media; text, Markdown and voice are words", () => {
+	for (const quote of [
+		{ msgtype: "image", image: { url: "https://example.invalid/q", aeskey: "KEY" } },
+		{ msgtype: "image" },
+		{ msgtype: "file", file: { url: "f" } },
+		{ msgtype: "mixed", mixed: { msg_item: [{ msgtype: "text", text: { content: "hi" } }] } },
+	])
+		assert.equal(quotesMedia({ ...base, quote }), true, quote.msgtype);
 	for (const msgtype of ["text", "markdown", "voice"])
-		assert.equal(quotedImage({ ...base, quote: { msgtype, [msgtype]: { content: "x" } } }), undefined, msgtype);
-	assert.equal(quotedImage(base), undefined);
+		assert.equal(quotesMedia({ ...base, quote: { msgtype, [msgtype]: { content: "x" } } }), false, msgtype);
+	assert.equal(quotesMedia(base), false);
+});
+
+test("a click's dropdowns become question → first option, bounded and without prototype keys", () => {
+	const event = (items: unknown) => ({ selected_items: { selected_item: items } });
+	assert.deepEqual(
+		cardSelections(
+			event([
+				{ question_key: "prompt", option_ids: { option_id: ["continue", "ignored"] } },
+				{ question_key: "other", option_ids: { option_id: ["b"] } },
+			]),
+		),
+		{ prompt: "continue", other: "b" },
+	);
+	assert.equal(cardSelections({}), undefined);
+	assert.equal(cardSelections(event([])), undefined);
+	assert.equal(cardSelections(event([{ question_key: "", option_ids: { option_id: ["x"] } }])), undefined);
+	assert.equal(
+		cardSelections(event([{ question_key: "p", option_ids: { option_id: ["x".repeat(129)] } }])),
+		undefined,
+	);
+	const polluted = cardSelections(event([{ question_key: "__proto__", option_ids: { option_id: ["x"] } }]));
+	assert.equal(Object.getPrototypeOf(polluted), Object.prototype);
+	assert.equal(({} as Record<string, unknown>).x, undefined);
 });

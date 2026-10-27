@@ -23,10 +23,10 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { pluginDirectory } from "../shared/agent-path.ts";
-import { sentences } from "../shared/text.ts";
+import { errorMessage, sentences } from "../shared/text.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
+import { docUrlProblem } from "./doc-mcp.ts";
 
-export type NotificationMode = "text" | "screenshot";
 export type NotificationScope = "wecom-tasks" | "all-runs";
 
 export interface ManagedFields {
@@ -34,14 +34,16 @@ export interface ManagedFields {
 	secret: string;
 	defaultChatId: string;
 	defaultChatType: 1 | 2;
-	notificationMode: NotificationMode;
 	notificationScope: NotificationScope;
-	screenshotTheme: string;
+	/** The smart robot's document MCP address (streamableHTTP URL); it carries an apikey. */
+	docMcpUrl: string;
+	/** The control card's 提示词 dropdown: each one is sent as typed when 发送 is pressed. */
+	controlPrompts: string[];
 }
 export type FieldName = keyof ManagedFields;
 /** Read where they are used, so a change applies without a new registration. */
-export type Settings = Pick<ManagedFields, "notificationMode" | "notificationScope"> &
-	Partial<Pick<ManagedFields, "screenshotTheme">>;
+export type Settings = Pick<ManagedFields, "notificationScope" | "controlPrompts"> &
+	Partial<Pick<ManagedFields, "docMcpUrl">>;
 export type Layer = Partial<ManagedFields> & { allowedUserIds?: string[] };
 export interface LayerChange {
 	set?: Partial<ManagedFields>;
@@ -68,22 +70,34 @@ export interface ConnectionField extends FieldBase {
 
 export interface ChoiceField extends FieldBase {
 	effect: "setting";
-	name: "notificationMode" | "notificationScope";
-	choices: readonly Choice<NotificationMode | NotificationScope>[];
-	default: NotificationMode | NotificationScope;
+	name: "notificationScope";
+	choices: readonly Choice<NotificationScope>[];
+	default: NotificationScope;
 }
 
-/** pi's own themes are the values: the plugin brings none, and without one pi's current theme is used. */
-export interface ThemeField extends FieldBase {
+/** A list typed one item per line in `config edit`, or comma-separated in `config set` when no item has a comma or space; none by default. */
+export interface PromptsField extends FieldBase {
 	effect: "setting";
-	name: "screenshotTheme";
+	name: "controlPrompts";
+	choices?: undefined;
+	default: readonly string[];
+}
+
+export type SettingField = ChoiceField | PromptsField;
+
+/** The dropdown holds at most 10 options (WeCom); a prompt is a task, bounded like one line of it. */
+export const MAX_PROMPTS = 10;
+export const MAX_PROMPT_LENGTH = 500;
+
+/** Global only, typed only in `config edit`: the address is a credential, shown as set or not set. */
+export interface DocumentField extends FieldBase {
+	effect: "document";
+	name: "docMcpUrl";
 	choices?: undefined;
 	default?: undefined;
 }
 
-export type SettingField = ChoiceField | ThemeField;
-
-export type FieldSpec = ConnectionField | SettingField;
+export type FieldSpec = ConnectionField | SettingField | DocumentField;
 
 /** Every managed field, in display order. */
 export const FIELDS: readonly FieldSpec[] = [
@@ -111,20 +125,9 @@ export const FIELDS: readonly FieldSpec[] = [
 		effect: "connection",
 	},
 	{
-		name: "notificationMode",
-		label: "通知方式",
-		description: "正式通知用文字还是当前终端截图",
-		choices: [
-			{ value: "text", description: "文字，支持 Markdown 排版" },
-			{ value: "screenshot", description: "当前 pi 终端截图，可能包含工具输出等画面内容" },
-		],
-		default: "text",
-		effect: "setting",
-	},
-	{
 		name: "notificationScope",
 		label: "自动结束通知范围",
-		description: "哪些运行结束后自动通知；显式发送、部署测试和连接入口通知不受影响",
+		description: "哪些运行结束后自动通知；显式发送、部署测试和会话控制卡不受影响",
 		choices: [
 			{ value: "wecom-tasks", description: "仅自动回传企微发起的任务结果" },
 			{ value: "all-runs", description: "已接入会话的每轮完整运行结束后都通知；企微任务不重复发送" },
@@ -133,11 +136,18 @@ export const FIELDS: readonly FieldSpec[] = [
 		effect: "setting",
 	},
 	{
-		name: "screenshotTheme",
-		label: "截图主题",
-		description:
-			"截图用的 pi 主题名，如 dark、light 或已安装的自定义主题；不设置时跟随 pi 当前的界面主题。只影响截图，不改变 pi 本身的界面",
+		name: "controlPrompts",
+		label: "控制卡提示词",
+		description: `控制卡「提示词」下拉框的候选，最多 ${MAX_PROMPTS} 条；点「发提示词」时把选中的那条原样作为本 session 的任务。下拉框只显示前 10 个字。config set 用英文逗号分隔（controlPrompts=继续,运行测试）；含空格或逗号的提示词用 config edit 一行一条填写，清空编辑器即为没有提示词。不设置时没有提示词，控制卡不显示下拉框和「发提示词」`,
+		default: [],
 		effect: "setting",
+	},
+	{
+		name: "docMcpUrl",
+		label: "会话文档",
+		description:
+			"智能机器人「文档」授权后的 streamableHTTP URL（工作台 → 智能机器人 → 可使用权限）。配置后，插件在企业微信里建一份文档，每个 session 一页，写最近的回复和通知，点控制卡的引用区打开。地址含 apikey：只能用 /wecom-aibot config --scope global edit 填写，查看时只显示是否已配置",
+		effect: "document",
 	},
 ];
 
@@ -160,11 +170,47 @@ export function fieldNamed(name: string): FieldSpec | undefined {
 
 const ALL = FIELDS.map((spec) => spec.name);
 const GROUPS = ALL.filter((name) => fieldsWith(name)[0] === name).map(fieldsWith);
-/** The credentials are typed only in `config edit`: a typed command stays in the input history. */
-export const SETTABLE: readonly FieldName[] = ALL.filter((name) => name !== "botId" && name !== "secret");
+/** The credentials and the document address are typed only in `config edit`: a typed command stays in the input history. */
+export const SETTABLE: readonly FieldName[] = ALL.filter(
+	(name) => name !== "botId" && name !== "secret" && name !== "docMcpUrl",
+);
 
 /** Written by earlier versions: reads ignore them, the next save drops them. Other unknown fields are kept. */
-const OBSOLETE = ["sendMode", "notifyEveryRun", "enabled", "welcome", "screenMode", "imageHosts", "fontFiles"];
+const OBSOLETE = [
+	"sendMode",
+	"notifyEveryRun",
+	"enabled",
+	"welcome",
+	"screenMode",
+	"imageHosts",
+	"fontFiles",
+	"notificationMode",
+	"screenshotTheme",
+];
+
+/** One rule for the file, `config set` and `config edit`: what a 提示词 list may hold. */
+export function promptsProblem(value: unknown): string | undefined {
+	if (!Array.isArray(value)) return "必须是提示词字符串组成的数组";
+	if (value.length > MAX_PROMPTS) return `最多 ${MAX_PROMPTS} 条提示词，现在 ${value.length} 条`;
+	const seen = new Set<string>();
+	for (const [index, prompt] of value.entries()) {
+		const at = `第 ${index + 1} 条`;
+		if (typeof prompt !== "string" || !prompt.trim()) return `${at}是空的`;
+		if (prompt !== prompt.trim()) return `${at}首尾有空白`;
+		if ([...prompt].length > MAX_PROMPT_LENGTH) return `${at}超过 ${MAX_PROMPT_LENGTH} 字`;
+		if (/[\u0000-\u001f\u007f\u2028\u2029]/.test(prompt)) return `${at}含换行或控制字符`;
+		if (seen.has(prompt)) return `${at}与前面重复：${prompt}`;
+		seen.add(prompt);
+	}
+	return undefined;
+}
+
+/** `config set controlPrompts=a,b`: split at ASCII commas only, so a Chinese comma stays inside a prompt. */
+export function parsePrompts(text: string): { prompts: string[] } | { problem: string } {
+	const prompts = text.split(",").map((item) => item.trim());
+	const problem = promptsProblem(prompts);
+	return problem ? { problem: `controlPrompts ${problem}` } : { prompts };
+}
 
 /** Values are used as given; a userid or chatid never contains quotes or spaces, so such a value was pasted with something else. */
 export function chatIdProblem(chatId: string): string | undefined {
@@ -199,6 +245,12 @@ function parseLayer(raw: Record<string, unknown>, scope: Scope): Layer {
 	for (const spec of FIELDS) {
 		const value = raw[spec.name];
 		if (value === undefined) continue;
+		if (spec.name === "controlPrompts") {
+			const problem = promptsProblem(value);
+			if (problem) throw invalid(spec.name, problem);
+			layer[spec.name] = [...(value as string[])];
+			continue;
+		}
 		const problem = spec.choices
 			? spec.choices.some((choice) => choice.value === value)
 				? undefined
@@ -207,7 +259,11 @@ function parseLayer(raw: Record<string, unknown>, scope: Scope): Layer {
 				? "必须是非空字符串"
 				: spec.name === "defaultChatId"
 					? chatIdProblem(value)
-					: undefined;
+					: spec.name === "docMcpUrl"
+						? scope === "global"
+							? docUrlProblem(value)
+							: `只能写在全局配置 ${CONFIG_FILE} 中`
+						: undefined;
 		if (problem) throw invalid(spec.name, problem);
 		layer[spec.name] = value;
 	}
@@ -264,7 +320,7 @@ function parseObject(text: string, what: string): Record<string, unknown> {
 	try {
 		value = JSON.parse(text);
 	} catch (error) {
-		throw new Error(`${what} 不是有效的 JSON：${errMsg(error)}`);
+		throw new Error(`${what} 不是有效的 JSON：${errorMessage(error)}`);
 	}
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${what} 不是 JSON 对象`);
 	return value as Record<string, unknown>;
@@ -275,7 +331,7 @@ function readIfExists<T>(file: string, read: (file: string) => T): T | undefined
 		return read(file);
 	} catch (error) {
 		if (isErrnoException(error) && error.code === "ENOENT") return undefined;
-		throw new Error(`无法读取 ${file}：${errMsg(error)}`);
+		throw new Error(`无法读取 ${file}：${errorMessage(error)}`);
 	}
 }
 
@@ -308,7 +364,8 @@ export function mergeLayers(global: Layer | undefined, session: Layer | undefine
 	const values: Record<string, unknown> = {};
 	const sources: Partial<Record<FieldName, Source>> = {};
 	for (const spec of SETTING_FIELDS) {
-		if (spec.default !== undefined) values[spec.name] = spec.default;
+		if (spec.default !== undefined)
+			values[spec.name] = Array.isArray(spec.default) ? [...spec.default] : spec.default;
 		sources[spec.name] = "default";
 	}
 	const owner = (name: FieldName): [Source, Layer] | undefined =>
@@ -394,7 +451,10 @@ export class SessionConfig {
 		} catch (error) {
 			if (!this.lastGood) throw error;
 			if (!this.warned)
-				this.report(sentences(`企业微信配置无法使用：${errMsg(error)}`, "继续使用上一次有效的配置"), "warning");
+				this.report(
+					sentences(`企业微信配置无法使用：${errorMessage(error)}`, "继续使用上一次有效的配置"),
+					"warning",
+				);
 			this.warned = true;
 			return this.lastGood;
 		}
@@ -469,7 +529,9 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 		}
 		if (!SETTABLE.includes(spec.name)) {
 			problems.push(
-				`${spec.name} 只能用 /wecom-aibot config --scope <global|session> edit 输入：命令会留在输入历史中`,
+				spec.name === "docMcpUrl"
+					? "docMcpUrl 只能用 /wecom-aibot config --scope global edit 输入：地址含 apikey，命令会留在输入历史中"
+					: `${spec.name} 只能用 /wecom-aibot config --scope <global|session> edit 输入：命令会留在输入历史中`,
 			);
 			continue;
 		}
@@ -482,6 +544,12 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 			problems.push(
 				`${spec.name} 缺少值；删除字段请用 /wecom-aibot config --scope <global|session> unset ${spec.name}`,
 			);
+			continue;
+		}
+		if (spec.name === "controlPrompts") {
+			const parsed = parsePrompts(text);
+			if ("problem" in parsed) problems.push(parsed.problem);
+			else set[spec.name] = parsed.prompts;
 			continue;
 		}
 		const choice = spec.choices?.find((item) => String(item.value).toLowerCase() === text.toLowerCase());
@@ -517,10 +585,6 @@ function unknownField(typed: string, names: readonly FieldName[]): string {
 	if (typed.toLowerCase() === "allowedUserIds".toLowerCase())
 		return `allowedUserIds 不由 config 管理，请直接编辑全局配置文件 ${CONFIG_FILE}`;
 	return `未知字段 ${typed}；可用字段：${names.join("、")}`;
-}
-
-function errMsg(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {

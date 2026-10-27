@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
+import { controlCardFor } from "../../src/shared/control-card.ts";
 import {
 	GATEWAY_PROTOCOL_VERSION,
 	gatewayEndpoint,
@@ -119,6 +120,12 @@ test("real pi processes elect one detached gateway, survive the first pi exit an
 	assert.equal(received.filter((frame) => frame.cmd === "aibot_subscribe").length, 1);
 	assert.equal(connections.length, 1);
 	assert.ok(daemonPids.size >= 1);
+	// Leave a control card for every pi in the gateway cache: none of them is an extra member or lease.
+	for (const worker of workers) worker.child.send!({ type: "control", chatId: "user" });
+	await until(
+		() => workers.every((worker) => worker.frames.some((frame) => frame.type === "controlled")),
+		"all session controls delivered",
+	);
 	const winner = connections[0];
 	winner.send(
 		JSON.stringify({
@@ -160,9 +167,23 @@ test("real pi processes elect one detached gateway, survive the first pi exit an
 	);
 	assert.equal(connections.length, 1);
 	for (const frame of received.filter((item) => item.cmd === "aibot_send_msg")) {
-		const text = frame.body.markdown.content;
-		const match = /project-([ABC]).*\n🏷️ provider-\1 · model-\1.*\n🆔 session: session-\1/.exec(text);
-		assert.ok(match, "source fields must stay in the same pi session");
+		// The worker notifies without a control card, which the gateway sends as Markdown naming its session.
+		if (frame.body.msgtype === "markdown") {
+			const id = /^🆔 session: session-([ABC]) {2}\n🏷️ project-\1 · provider-\1 · model-\1\n/.exec(
+				frame.body.markdown.content,
+			)?.[1];
+			assert.ok(id, "source fields must stay in the same pi session");
+			continue;
+		}
+		const card = frame.body.template_card;
+		const id = /^📁 project-([ABC])$/.exec(card.main_title.title)?.[1];
+		assert.ok(id, "a control card names its own directory");
+		assert.equal(
+			card.main_title.desc,
+			`🤖 model-${id} · provider-${id}`,
+			"source fields stay in the same pi session",
+		);
+		assert.ok(controlCardFor(card.task_id, `session-${id}`));
 	}
 	survivors[0].child.send!({ type: "quit" });
 	await until(() => survivors[0].exited, "one remaining pi exits normally");
