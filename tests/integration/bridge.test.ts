@@ -3108,6 +3108,56 @@ test("controlPrompts fills the dropdown; 发送 sends the whole prompt, and an o
 	assert.match(noteOf(lastUpdate()), /^没有提示词：先在 pi 里设置 controlPrompts$/);
 });
 
+test("controlPrompts+= and -= change one layer's list in place; a session without one copies what it inherits", async (t) => {
+	const notices: string[] = [];
+	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
+	const global = async () => JSON.parse(await readFile(CONFIG_FILE, "utf8")).controlPrompts;
+	const session = async () => JSON.parse(await readFile(layerFile({ session: sessionId }), "utf8")).controlPrompts;
+	await command("config --scope global set controlPrompts+=继续,运行测试", ctx);
+	assert.deepEqual(await global(), ["继续", "运行测试"], "a global layer without a list starts from none");
+	await command("config --scope global set controlPrompts+=继续,部署", ctx);
+	assert.deepEqual(await global(), ["继续", "运行测试", "部署"]);
+	assert.match(
+		notices.at(-1)!,
+		/controlPrompts：「继续」、「运行测试」（global） → 「继续」、「运行测试」、「部署」（global）[\s\S]*\n「继续」已经在列表里，跳过/,
+	);
+	// Nothing to do is said so, and nothing is written.
+	await command("config --scope global set controlPrompts-=没有这条", ctx);
+	assert.equal(
+		notices.at(-1),
+		"「没有这条」不在列表里，跳过。controlPrompts 仍是 「继续」、「运行测试」、「部署」，无需修改",
+	);
+	// The first edit of a session copies the inherited list, and says the copy is its own from now on.
+	await command("config --scope session set controlPrompts-=运行测试", ctx);
+	assert.deepEqual(await session(), ["继续", "部署"]);
+	assert.deepEqual(await global(), ["继续", "运行测试", "部署"], "the global list is untouched");
+	assert.match(
+		notices.at(-1)!,
+		/已把继承的 3 条提示词复制到本 session 再修改。之后与全局独立，要重新跟随全局时运行 \/wecom-aibot config --scope session unset controlPrompts/,
+	);
+	await command("config --scope global set controlPrompts+=总结", ctx);
+	assert.deepEqual(await session(), ["继续", "部署"], "the copy does not follow the global list");
+	await command("config --scope session set controlPrompts+=提交", ctx);
+	assert.deepEqual(await session(), ["继续", "部署", "提交"]);
+	assert.doesNotMatch(notices.at(-1)!, /复制/, "its own list is changed in place");
+	// Emptied: a session keeps its override of none; the global layer drops the field.
+	await command("config --scope session set controlPrompts-=继续,部署,提交", ctx);
+	assert.deepEqual(await session(), []);
+	await command("config --scope global set controlPrompts-=继续,运行测试,部署,总结", ctx);
+	assert.equal(await global(), undefined);
+	// Ten at most: an edit that would pass it writes nothing.
+	await command(
+		`config --scope global set controlPrompts=${Array.from({ length: 9 }, (_, i) => `p${i}`).join(",")}`,
+		ctx,
+	);
+	await command("config --scope global set controlPrompts+=a,b", ctx);
+	assert.equal(
+		notices.at(-1),
+		"controlPrompts 最多 10 条，加上后有 11 条；先用 controlPrompts-= 删掉几条。未做任何修改",
+	);
+	assert.equal((await global()).length, 9);
+});
+
 test("a button no card draws today, such as 最近回复 or 查看通知, does nothing", async () => {
 	const print = sessionFingerprint(sessionId);
 	for (const retired of ["latest", "notice"]) {

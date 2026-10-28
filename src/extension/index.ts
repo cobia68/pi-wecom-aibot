@@ -21,6 +21,7 @@ import {
 	layerFile,
 	pendingReconnect,
 	type Resolved,
+	readLayer,
 	SessionConfig,
 	type Settings,
 } from "./config.ts";
@@ -149,6 +150,20 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 	function sessionConfig(): SessionConfig {
 		if (!config) throw new Error("pi 会话尚未启动");
 		return config;
+	}
+
+	/**
+	 * controlPrompts-='s completions: the list the scope uses now, as config set would change it. A file that
+	 * cannot be read offers none; running the command reports why.
+	 */
+	function promptsIn(scope: "global" | "session"): readonly string[] {
+		try {
+			return scope === "global"
+				? (readLayer("global")?.controlPrompts ?? [])
+				: sessionConfig().read().values.controlPrompts;
+		} catch {
+			return [];
+		}
 	}
 
 	function settings(): Settings {
@@ -408,7 +423,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 
 	pi.registerCommand("wecom-aibot", {
 		description: "管理当前 pi 的企业微信智能机器人（不带子命令时弹出菜单，--help 查看用法）",
-		getArgumentCompletions: (prefix) => completeArguments(prefix),
+		getArgumentCompletions: (prefix) => completeArguments(prefix, promptsIn),
 		handler: async (input, ctx) => {
 			sessionCtx = ctx;
 			refreshStatus();

@@ -10,6 +10,7 @@ import {
 	type FieldSpec,
 	fieldNamed,
 	type ManagedFields,
+	type PromptsEdit,
 	parseAssignments,
 	parseRemovals,
 	SESSIONS_DIR,
@@ -67,7 +68,7 @@ const CONFIG_COMMAND: CommandSpec = {
 	details: [
 		"两层配置：global 是全局默认，session 是当前 pi 会话的显式覆盖。优先级：内置默认值 < global < session",
 		"作用域是命令的目标，写在动作前：config --scope <global|session> <动作>。edit、set、unset 必须写；不写作用域时只读：show 显示合并结果，whoami 只识别不保存",
-		"set 写成 字段=值，可一次给多个：先全部校验再一次保存，有错误时一项都不写",
+		"set 写成 字段=值，可一次给多个：先全部校验再一次保存，有错误时一项都不写。controlPrompts 还能写 controlPrompts+=新提示、controlPrompts-=旧提示，只加或只删几条",
 		"botId 与 secret、defaultChatId 与 defaultChatType 各为一组，成组保存、成组删除。botId、secret 只能用 edit 输入（命令会留在输入历史中）；输入时屏幕上会显示 Secret",
 		"whoami：在要识别的聊天里把 pi 显示的 6 位验证码发给机器人（群聊需 @机器人）。识别不受白名单限制；没有接入时临时连接，不出现在在线会话列表，也不接收任务",
 		"保存配置不会断开或重连：通知范围、控制卡提示词等设置下次使用时生效，凭据、默认目标或白名单要运行 /wecom-aibot connect 才切换；每个 session 都需手动 /wecom-aibot connect",
@@ -154,7 +155,7 @@ export type ConfigInvocation =
 	| { action: "choose"; scope?: ConfigScope }
 	| { action: "show"; scope?: ConfigScope }
 	| { action: "edit"; scope: ConfigScope }
-	| { action: "set"; scope: ConfigScope; set: Partial<ManagedFields> }
+	| { action: "set"; scope: ConfigScope; set: Partial<ManagedFields>; prompts?: PromptsEdit }
 	| { action: "unset"; scope: ConfigScope; remove: FieldName[] }
 	/** Identify a chat by its one-time code; with a scope, save it as that layer's default target. */
 	| { action: "whoami"; scope?: ConfigScope; seconds: number };
@@ -245,7 +246,7 @@ const CONFIG_ACTION_TABLE = [
 	{
 		action: "set",
 		usage: "--scope <global|session> set 字段=值 …",
-		help: "修改字段，未给出的字段保持不变",
+		help: "修改字段，未给出的字段保持不变；controlPrompts+= / -= 只加或只删几条",
 		short: "修改字段：字段=值",
 	},
 	{
@@ -497,7 +498,10 @@ function parseConfigArgs(args: string[], options: Map<string, string>, positionO
 			const parsed = parseAssignments(values);
 			return "problems" in parsed
 				? rejected(parsed.problems)
-				: { kind: "config", config: { action, scope, set: parsed.set } };
+				: {
+						kind: "config",
+						config: { action, scope, set: parsed.set, ...(parsed.prompts ? { prompts: parsed.prompts } : {}) },
+					};
 		}
 		case "unset": {
 			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " notificationScope");
@@ -660,6 +664,8 @@ function configHelpText(): string {
 			"  /wecom-aibot config --scope global edit",
 			"  /wecom-aibot config --scope global set notificationScope=all-runs",
 			"  /wecom-aibot config --scope session set controlPrompts=继续,运行测试,总结进度",
+			"  /wecom-aibot config --scope global set controlPrompts+=部署到测试环境",
+			"  /wecom-aibot config --scope global set controlPrompts-=运行测试",
 			"  /wecom-aibot config --scope session unset defaultChatId",
 			"  /wecom-aibot config --scope global whoami",
 		]),
@@ -686,25 +692,33 @@ interface Candidate {
 /**
  * Each returned value replaces all text after "/wecom-aibot ". Every word that may come next is offered, and
  * one that can be followed gets its trailing space, so the next Tab goes a level deeper. A complete token gets
- * no list, so Enter runs the command instead of applying a completion.
+ * no list, so Enter runs the command instead of applying a completion. `prompts` reads the list a scope uses
+ * now, for controlPrompts-=.
  */
-export function completeArguments(prefix: string): { value: string; label: string }[] | null {
+export function completeArguments(
+	prefix: string,
+	prompts: (scope: ConfigScope) => readonly string[] = () => [],
+): { value: string; label: string }[] | null {
 	const tokens = prefix.trimStart().split(/\s+/);
 	const current = (tokens.pop() ?? "").toLowerCase();
 	const head = tokens.length ? `${tokens.join(" ")} ` : "";
-	const all = candidatesAt(tokens, current);
+	const all = candidatesAt(tokens, current, prompts);
 	const labels = columns(all.map((item) => [item.name ?? item.value, item.description] as const));
 	const shown = all.flatMap((item, index) =>
 		item.value.toLowerCase().startsWith(current) ? [{ item, label: labels[index] }] : [],
 	);
 	if (!shown.length || shown.some(({ item }) => item.value.toLowerCase() === current)) return null;
 	const spaced = (item: Candidate) =>
-		item.takesValue || (!item.value.endsWith("=") && candidatesAt([...tokens, item.value], "").length > 0);
+		item.takesValue || (!item.value.endsWith("=") && candidatesAt([...tokens, item.value], "", prompts).length > 0);
 	return shown.map(({ item, label }) => ({ value: `${head}${item.value}${spaced(item) ? " " : ""}`, label }));
 }
 
 /** The words that may follow `tokens`: config's target, positionals, options, then --help. */
-function candidatesAt(tokens: string[], current: string): Candidate[] {
+function candidatesAt(
+	tokens: string[],
+	current: string,
+	prompts: (scope: ConfigScope) => readonly string[],
+): Candidate[] {
 	if (!tokens.length) return topLevel();
 	const command = commandNamed(tokens[0]);
 	const rest = tokens.slice(1).map((token) => token.toLowerCase());
@@ -747,7 +761,9 @@ function candidatesAt(tokens: string[], current: string): Candidate[] {
 	if (action === undefined)
 		return [
 			...(scoped ? [] : [configOption("scope")]),
-			...configCandidates(words, current, scope).filter((item) => scoped || !SCOPED_ACTIONS.includes(item.value)),
+			...configCandidates(words, current, scope, prompts).filter(
+				(item) => scoped || !SCOPED_ACTIONS.includes(item.value),
+			),
 			help,
 		];
 	// A target after the action, a --wait before it, or a write without a target is refused when run: offer nothing.
@@ -755,7 +771,7 @@ function candidatesAt(tokens: string[], current: string): Candidate[] {
 	if (SCOPED_ACTIONS.includes(action) && !scoped) return [];
 	if (action !== "set" && action !== "unset" && words.length > 1) return [];
 	return [
-		...configCandidates(words, current, scope),
+		...configCandidates(words, current, scope, prompts),
 		...(action === "whoami" && !used.has("wait") ? [configOption("wait")] : []),
 		help,
 	];
@@ -774,16 +790,32 @@ export function commandMenu(): { label: string; input: string }[] {
 	return items.map((item, index) => ({ label: labels[index], input: item.value }));
 }
 
-function configCandidates(words: string[], current: string, scope?: string): Candidate[] {
+function configCandidates(
+	words: string[],
+	current: string,
+	scope: string | undefined,
+	prompts: (scope: ConfigScope) => readonly string[],
+): Candidate[] {
 	const [action, ...rest] = words.map((word) => word.toLowerCase());
 	const candidates = (items: [value: string, description: string][]): Candidate[] =>
 		items.map(([value, description]) => ({ value, description }));
 	if (action === undefined)
 		return candidates(CONFIG_ACTION_TABLE.map((item): [string, string] => [item.action, item.short]));
-	const used = new Set(rest.map((word) => word.split("=")[0]));
+	/** A field once given, whichever of =, += or -= it was given with. */
+	const fieldOf = (word: string) => word.split("=")[0].replace(/[+-]$/, "");
+	const used = new Set(rest.map(fieldOf));
 	if (action === "set") {
 		const equals = current.indexOf("=");
-		const spec = equals < 0 ? undefined : fieldNamed(current.slice(0, equals));
+		const spec = equals < 0 ? undefined : fieldNamed(fieldOf(current));
+		if (spec?.name === "controlPrompts") {
+			// Only -= picks from what is there; =, += take new text. A prompt with a space cannot be one word.
+			if (current[equals - 1] !== "-" || !isScope(scope)) return [];
+			return candidates(
+				prompts(scope)
+					.filter((prompt) => !/[\s,]/.test(prompt))
+					.map((prompt): [string, string] => [`${spec.name}-=${prompt}`, "删掉这一条"]),
+			);
+		}
 		if (spec) {
 			const values = (spec.choices ?? []).map((choice): [string, string] => [
 				String(choice.value),
@@ -794,8 +826,15 @@ function configCandidates(words: string[], current: string, scope?: string): Can
 			);
 		}
 		return candidates(
-			FIELDS.filter((item) => SETTABLE.includes(item.name) && !used.has(item.name.toLowerCase())).map(
-				(item): [string, string] => [`${item.name}=`, item.label],
+			FIELDS.filter((item) => SETTABLE.includes(item.name) && !used.has(item.name.toLowerCase())).flatMap(
+				(item): [string, string][] =>
+					item.name === "controlPrompts"
+						? [
+								[`${item.name}=`, `${item.label}：整份替换`],
+								[`${item.name}+=`, `${item.label}：加在末尾`],
+								[`${item.name}-=`, `${item.label}：删掉几条`],
+							]
+						: [[`${item.name}=`, item.label]],
 			),
 		);
 	}

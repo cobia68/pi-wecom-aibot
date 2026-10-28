@@ -185,6 +185,18 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 		scope: "session",
 		set: { defaultChatId: "boss", defaultChatType: 1, notificationScope: "all-runs" },
 	});
+	assert.deepEqual(config("config --scope global set controlPrompts+=部署,提交 notificationScope=all-runs"), {
+		action: "set",
+		scope: "global",
+		set: { notificationScope: "all-runs" },
+		prompts: { op: "add", prompts: ["部署", "提交"] },
+	});
+	assert.deepEqual(config("config --scope session set controlPrompts-=运行测试"), {
+		action: "set",
+		scope: "session",
+		set: {},
+		prompts: { op: "remove", prompts: ["运行测试"] },
+	});
 	assert.deepEqual(config("config --scope session unset defaultChatId"), {
 		action: "unset",
 		scope: "session",
@@ -316,12 +328,17 @@ test("argument completion offers every word that may come next: subcommands, opt
 		"config --scope global set defaultChatType=",
 		"config --scope global set notificationScope=",
 		"config --scope global set controlPrompts=",
+		"config --scope global set controlPrompts+=",
+		"config --scope global set controlPrompts-=",
 		"config --scope global set --help",
 	]);
-	// A field already given is not offered again.
+	// A field already given is not offered again, whichever of =, += or -= it was given with.
 	assert.deepEqual(values("config --scope session set notificationScope=all-runs c"), [
 		"config --scope session set notificationScope=all-runs controlPrompts=",
+		"config --scope session set notificationScope=all-runs controlPrompts+=",
+		"config --scope session set notificationScope=all-runs controlPrompts-=",
 	]);
+	assert.equal(values("config --scope session set controlPrompts+=a c"), null);
 	assert.deepEqual(values("config --scope session set notificationscope="), [
 		"config --scope session set notificationScope=wecom-tasks ",
 		"config --scope session set notificationScope=all-runs ",
@@ -356,6 +373,29 @@ test("argument completion offers every word that may come next: subcommands, opt
 	]) {
 		assert.equal(completeArguments(done), null, done);
 	}
+});
+
+test("controlPrompts-= completes the prompts of the scope it is written for; = and += take new text", () => {
+	const lists = { global: ["继续", "运行测试", "has space", "a,b"], session: ["只在 session"] };
+	const asked: string[] = [];
+	const complete = (prefix: string) =>
+		completeArguments(prefix, (scope) => {
+			asked.push(scope);
+			return lists[scope];
+		})?.map((item) => item.value) ?? null;
+	assert.deepEqual(complete("config --scope global set controlPrompts-="), [
+		"config --scope global set controlPrompts-=继续 ",
+		"config --scope global set controlPrompts-=运行测试 ",
+	]);
+	assert.deepEqual(
+		complete("config --scope global set controlPrompts-=运"),
+		["config --scope global set controlPrompts-=运行测试 "],
+		"one word each: a prompt with a space or a comma cannot be written here",
+	);
+	assert.equal(complete("config --scope session set controlPrompts-="), null, "no word of the session's list");
+	assert.deepEqual(asked, ["global", "global", "session"]);
+	for (const free of ["config --scope global set controlPrompts=", "config --scope global set controlPrompts+="])
+		assert.equal(complete(free), null, free);
 });
 
 test("every completion level and the menu put the descriptions in one column, which filtering keeps still", () => {

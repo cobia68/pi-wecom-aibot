@@ -28,6 +28,7 @@ const {
 	layerFile,
 	mergeLayers,
 	parseAssignments,
+	applyPromptsEdit,
 	parseRemovals,
 	patchLayer,
 	readLayer,
@@ -442,6 +443,52 @@ test("the document address is global only, never settable by command, and must b
 		connectionKey(connectionOf(mergeLayers(bot, undefined))),
 		"the address is not part of a registration",
 	);
+});
+
+test("controlPrompts+= and -= name the prompts to add or take out; only controlPrompts has them, once a command", () => {
+	assert.deepEqual(parseAssignments(["controlPrompts+=部署, 提交"]), {
+		set: {},
+		prompts: { op: "add", prompts: ["部署", "提交"] },
+	});
+	assert.deepEqual(parseAssignments(["ControlPrompts-=运行测试", "notificationScope=all-runs"]), {
+		set: { notificationScope: "all-runs" },
+		prompts: { op: "remove", prompts: ["运行测试"] },
+	});
+	for (const [tokens, problem] of [
+		[["controlPrompts+="], /controlPrompts\+= 后面要写提示词/],
+		[["controlPrompts-="], /controlPrompts-= 后面要写提示词/],
+		[["controlPrompts+=a,,b"], /第 2 条是空的/],
+		[["controlPrompts+=a,a"], /第 2 条与前面重复/],
+		[[`controlPrompts+=${"长".repeat(501)}`], /超过 500 字/],
+		[
+			["notificationScope+=all-runs"],
+			/只有 controlPrompts 能用 \+= 和 -=；notificationScope 写成 notificationScope=值/,
+		],
+		[["controlPrompts+=a", "controlPrompts-=b"], /controlPrompts 重复给出/],
+		[["controlPrompts=a", "controlPrompts+=b"], /controlPrompts 重复给出/],
+		[["bogus+=x"], /未知字段 bogus/],
+	] as const) {
+		const result = parseAssignments(tokens);
+		assert.ok("problems" in result, tokens.join(" "));
+		assert.match(result.problems.join("\n"), problem, tokens.join(" "));
+	}
+});
+
+test("a list edit adds at the end and takes out by the exact text, skipping what is already so, within ten", () => {
+	assert.deepEqual(applyPromptsEdit(["继续"], { op: "add", prompts: ["部署", "继续"] }), {
+		prompts: ["继续", "部署"],
+		skipped: ["继续"],
+	});
+	assert.deepEqual(applyPromptsEdit(["继续", "部署"], { op: "remove", prompts: ["继续", "没有"] }), {
+		prompts: ["部署"],
+		skipped: ["没有"],
+	});
+	assert.deepEqual(applyPromptsEdit(["继续"], { op: "remove", prompts: ["继续"] }), { prompts: [], skipped: [] });
+	const nine = Array.from({ length: 9 }, (_, i) => `p${i}`);
+	assert.deepEqual(applyPromptsEdit(nine, { op: "add", prompts: ["p9"] }), { prompts: [...nine, "p9"], skipped: [] });
+	assert.deepEqual(applyPromptsEdit(nine, { op: "add", prompts: ["a", "b"] }), {
+		problem: "controlPrompts 最多 10 条，加上后有 11 条；先用 controlPrompts-= 删掉几条",
+	});
 });
 
 test("controlPrompts is a list: comma-separated in set, checked the same way in a file, and inherited like any setting", () => {

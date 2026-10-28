@@ -19,6 +19,7 @@ import {
 } from "./commands.ts";
 import {
 	addAllowedUser,
+	applyPromptsEdit,
 	type ChoiceField,
 	type Connection,
 	chatIdProblem,
@@ -32,6 +33,7 @@ import {
 	layerFile,
 	type ManagedFields,
 	mergeLayers,
+	type PromptsEdit,
 	type PromptsField,
 	patchLayer,
 	pendingReconnect,
@@ -89,7 +91,9 @@ class ConfigCommand {
 			case "edit":
 				return this.edit(invocation.scope);
 			case "set":
-				return this.save(invocation.scope, { set: invocation.set });
+				return invocation.prompts
+					? this.editPromptList(invocation.scope, invocation.set, invocation.prompts)
+					: this.save(invocation.scope, { set: invocation.set });
 			case "unset":
 				return this.unset(invocation.scope, invocation.remove);
 			case "whoami":
@@ -155,6 +159,43 @@ class ConfigCommand {
 				`文件：${this.file(scope)}`,
 			].join("\n"),
 		);
+	}
+
+	/**
+	 * controlPrompts+= / -=: the list this layer uses now, changed. A session without its own list starts from
+	 * the one it inherits and keeps the copy, independent of the global list from then on.
+	 */
+	private editPromptList(scope: ConfigScope, set: Partial<ManagedFields>, edit: PromptsEdit): void {
+		const own = this.layer(scope)?.controlPrompts;
+		const current = own ?? (scope === "global" ? [] : this.config.read().values.controlPrompts);
+		const applied = applyPromptsEdit(current, edit);
+		if ("problem" in applied) {
+			this.notify(sentences(applied.problem, "未做任何修改"), "warning");
+			return;
+		}
+		const skipped = applied.skipped.length
+			? `${applied.skipped.map((prompt) => `「${prompt}」`).join("、")}${edit.op === "add" ? "已经在列表里" : "不在列表里"}，跳过`
+			: undefined;
+		const changed = applied.prompts.length !== current.length;
+		if (!changed && !Object.keys(set).length) {
+			this.notify(sentences(skipped, `controlPrompts 仍是 ${display("controlPrompts", current)}，无需修改`));
+			return;
+		}
+		// An emptied list: the global layer drops the field, a session overrides with none, as in config edit.
+		const change: LayerChange =
+			changed && !applied.prompts.length && scope === "global"
+				? { set, remove: ["controlPrompts"] }
+				: { set: changed ? { ...set, controlPrompts: applied.prompts } : set };
+		const copied =
+			changed && scope === "session" && own === undefined
+				? sentences(
+						current.length
+							? `已把继承的 ${current.length} 条提示词复制到本 session 再修改`
+							: "本 session 新建了自己的提示词列表",
+						"之后与全局独立，要重新跟随全局时运行 /wecom-aibot config --scope session unset controlPrompts",
+					)
+				: undefined;
+		this.save(scope, change, undefined, [skipped, copied].filter(Boolean).join("\n") || undefined);
 	}
 
 	unset(scope: ConfigScope, fields: FieldName[]): void {

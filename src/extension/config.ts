@@ -135,7 +135,7 @@ export const FIELDS: readonly FieldSpec[] = [
 	{
 		name: "controlPrompts",
 		label: "控制卡提示词",
-		description: `控制卡「提示词」下拉框的候选，最多 ${MAX_PROMPTS} 条；点「发提示词」时把选中的那条原样作为本 session 的任务。下拉框只显示前 10 个字。config set 用英文逗号分隔（controlPrompts=继续,运行测试）；含空格或逗号的提示词用 config edit 一行一条填写，清空编辑器即为没有提示词。不设置时没有提示词，控制卡不显示下拉框和「发提示词」`,
+		description: `控制卡「提示词」下拉框的候选，最多 ${MAX_PROMPTS} 条；点「发提示词」时把选中的那条原样作为本 session 的任务。下拉框只显示前 10 个字。config set 用英文逗号分隔（controlPrompts=继续,运行测试），整份替换；controlPrompts+=新提示 加在末尾，controlPrompts-=旧提示 删掉一条，多条也用英文逗号分隔；session 还没有自己的提示词时，+= 和 -= 先复制继承来的那份再改，之后与全局独立。含空格或逗号的提示词用 config edit 一行一条填写，清空编辑器即为没有提示词。不设置时没有提示词，控制卡不显示下拉框和「发提示词」`,
 		default: [],
 		effect: "setting",
 	},
@@ -522,9 +522,18 @@ function firstLine(file: string): string {
 
 // ---------------------------------------------------------------- command values
 
-export function parseAssignments(tokens: readonly string[]): { set: Partial<ManagedFields> } | { problems: string[] } {
+/** `controlPrompts+=a,b` adds to the list a layer uses now, `controlPrompts-=a` takes out of it. */
+export interface PromptsEdit {
+	op: "add" | "remove";
+	prompts: string[];
+}
+
+export function parseAssignments(
+	tokens: readonly string[],
+): { set: Partial<ManagedFields>; prompts?: PromptsEdit } | { problems: string[] } {
 	const problems: string[] = [];
 	const set: Record<string, unknown> = {};
+	let prompts: PromptsEdit | undefined;
 	const seen = new Set<FieldName>();
 	for (const token of tokens) {
 		const equals = token.indexOf("=");
@@ -532,7 +541,9 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 			problems.push(`「${token}」缺少 =，写成 字段=值`);
 			continue;
 		}
-		const typed = token.slice(0, equals);
+		const sign = token[equals - 1];
+		const op = sign === "+" ? "add" : sign === "-" ? "remove" : undefined;
+		const typed = token.slice(0, op ? equals - 1 : equals);
 		const text = token.slice(equals + 1);
 		const spec = fieldNamed(typed);
 		if (!spec) {
@@ -547,6 +558,10 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 			);
 			continue;
 		}
+		if (op && spec.name !== "controlPrompts") {
+			problems.push(`只有 controlPrompts 能用 += 和 -=；${spec.name} 写成 ${spec.name}=值`);
+			continue;
+		}
 		if (seen.has(spec.name)) {
 			problems.push(`${spec.name} 重复给出`);
 			continue;
@@ -554,13 +569,16 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 		seen.add(spec.name);
 		if (!text) {
 			problems.push(
-				`${spec.name} 缺少值；删除字段请用 /wecom-aibot config --scope <global|session> unset ${spec.name}`,
+				op
+					? `${spec.name}${sign}= 后面要写提示词`
+					: `${spec.name} 缺少值；删除字段请用 /wecom-aibot config --scope <global|session> unset ${spec.name}`,
 			);
 			continue;
 		}
 		if (spec.name === "controlPrompts") {
 			const parsed = parsePrompts(text);
 			if ("problem" in parsed) problems.push(parsed.problem);
+			else if (op) prompts = { op, prompts: parsed.prompts };
 			else set[spec.name] = parsed.prompts;
 			continue;
 		}
@@ -579,7 +597,31 @@ export function parseAssignments(tokens: readonly string[]): { set: Partial<Mana
 		problems.push("defaultChatType 需要和 defaultChatId 一起给出，例如 defaultChatId=<群 chatid> defaultChatType=2");
 	// Saved explicitly: the group replaces the layer's old type too.
 	else if (set.defaultChatId !== undefined) set.defaultChatType ??= 1;
-	return problems.length ? { problems } : { set: set as Partial<ManagedFields> };
+	if (problems.length) return { problems };
+	return { set: set as Partial<ManagedFields>, ...(prompts ? { prompts } : {}) };
+}
+
+/**
+ * The list after `edit`: an added prompt goes last, one already there is skipped; a removed one not there is
+ * skipped. Both are named in `skipped`. More than MAX_PROMPTS is refused.
+ */
+export function applyPromptsEdit(
+	current: readonly string[],
+	edit: PromptsEdit,
+): { prompts: string[]; skipped: string[] } | { problem: string } {
+	const skipped: string[] = [];
+	let prompts = [...current];
+	for (const prompt of edit.prompts) {
+		const present = prompts.includes(prompt);
+		if (edit.op === "add" ? present : !present) skipped.push(prompt);
+		else if (edit.op === "add") prompts.push(prompt);
+		else prompts = prompts.filter((item) => item !== prompt);
+	}
+	if (prompts.length > MAX_PROMPTS)
+		return {
+			problem: `controlPrompts 最多 ${MAX_PROMPTS} 条，加上后有 ${prompts.length} 条；先用 controlPrompts-= 删掉几条`,
+		};
+	return { prompts, skipped };
 }
 
 export function parseRemovals(tokens: readonly string[]): { remove: FieldName[] } | { problems: string[] } {

@@ -122,6 +122,8 @@ pi install .
 /wecom-aibot config show                                   # 当前 session 合并后的配置，标明每项来源
 /wecom-aibot config --scope global edit                    # 交互编辑全局配置
 /wecom-aibot config --scope session set controlPrompts=继续,运行测试
+/wecom-aibot config --scope global set controlPrompts+=部署到测试环境   # 加一条提示词
+/wecom-aibot config --scope global set controlPrompts-=运行测试       # 删一条提示词
 /wecom-aibot config --scope session unset controlPrompts   # 删除覆盖，重新继承全局值
 /wecom-aibot config --scope global whoami                  # 发验证码识别聊天，设为全局默认推送目标
 ```
@@ -160,7 +162,7 @@ pi install .
 | `defaultChatId`     | 默认推送目标：单聊填 userid，群聊填群 chatid                                              |
 | `defaultChatType`   | 默认推送目标类型：`1` 单聊（只给 `defaultChatId` 时即为单聊），`2` 群聊                   |
 | `notificationScope` | 自动结束通知范围：`wecom-tasks`（默认）只回传企微下发的任务；`all-runs` 时**本地终端里自己敲的提示词跑完也发通知**到默认目标（没有默认目标则不发），企微任务不重复发送 |
-| `controlPrompts`    | 控制卡「发提示词」的候选，最多 10 条，按顺序显示；点「发提示词」后在下拉框里选一条，点「确认发送」把它原样作为本 session 的任务。下拉框只显示每条的前 10 个字，发出去的是整条。`set` 用英文逗号分隔（`controlPrompts=继续,运行测试`，中文逗号算在提示词里）；含空格或英文逗号的用 `edit` 一行一条填写，清空编辑器即为没有提示词。全局和 session 都能设。不设置时没有提示词，控制卡不显示下拉框和「发提示词」 |
+| `controlPrompts`    | 控制卡「发提示词」的候选，最多 10 条，按顺序显示；点「发提示词」后在下拉框里选一条，点「确认发送」把它原样作为本 session 的任务。下拉框只显示每条的前 10 个字，发出去的是整条。`set` 用英文逗号分隔（`controlPrompts=继续,运行测试`，中文逗号算在提示词里），整份替换；只加或只删几条写 `controlPrompts+=部署` 或 `controlPrompts-=运行测试`（多条同样用英文逗号分隔）：加的放在末尾，已有的跳过；删的要和原文一字不差，没有的跳过；加上后超过 10 条时报错，一项不改。session 还没有自己的提示词时，`+=`、`-=` 先把继承来的那份复制过来再改，之后与全局独立，`unset` 后重新跟随全局。`-=` 后按 Tab 列出这一层现有的提示词。含空格或英文逗号的用 `edit` 一行一条填写，清空编辑器即为没有提示词。全局和 session 都能设。不设置时没有提示词，控制卡不显示下拉框和「发提示词」 |
 | `docMcpUrl`         | 会话文档地址：智能机器人「文档」授权后的 streamableHTTP URL。只能写在全局配置里，只能用 `config --scope global edit` 填写；地址含 apikey，查看时只显示是否已配置。不配置时，控制卡「刷新卡片」只更新卡片上的三行 |
 | `allowedUserIds`    | 允许使用机器人的 userid 名单；不写或留空表示所有人都能用。只能写在全局配置中，不由 `config` 管理；`config whoami` 识别出名单外的人时，会问要不要加入 |
 
