@@ -824,10 +824,11 @@ export class BridgeSession {
 		const signal = options.signal ?? this.lifetime.signal;
 		if (this.identifyOnly) throw new Error("临时识别连接不能发送通知，请运行 /wecom-aibot connect 正式接入");
 		signal.throwIfAborted();
+		// The tool's context and the one pi reports now must both be this session's.
 		const ctx = options.ctx ?? this.host.context();
-		if (!ctx || ctx.sessionManager.getSessionId() !== this.sessionId)
-			throw new Error("pi session_id 已改变，已取消通知");
-		if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId)
+		const current = (context: ExtensionContext | undefined) =>
+			context?.sessionManager.getSessionId() === this.sessionId;
+		if (this.disposed || !ctx || !current(ctx) || !current(this.host.context()))
 			throw new Error("pi 会话已停止或切换，已取消通知");
 		// A notice or the deployment test is this session's control card, drawn as the terminal is now.
 		const control = this.publishedCard(ctx, undefined, noteOf(notification), notification.source, options.steps);

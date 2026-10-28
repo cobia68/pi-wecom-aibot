@@ -11,6 +11,7 @@ import {
 	parseControlKey,
 	sessionFingerprint,
 } from "../../src/shared/control-card.ts";
+import { deliveryFailure } from "../../src/shared/delivery.ts";
 import type { GatewayRegistration, ServerFrame } from "../../src/shared/gateway-protocol.ts";
 import { notificationPayload } from "../../src/shared/notification.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
@@ -387,20 +388,20 @@ test("a result arrives as its session's control card; another session's card is 
 	click(cardId, key(a, "refresh"));
 	assert.equal(a.requests().length, 1);
 	assert.equal((a.requests()[0] as any).request.click.cardId, cardId);
-	// A card ID of another session is never sent: the reply goes as Markdown, naming the sender's session.
-	await gateway.notify(
-		"A",
-		{ chatId: "alice", chatType: 1 },
-		{
-			...notificationPayload("result", a.registration.source, "SECOND", { title: "✅ 本轮完成" }),
-			control: { cardId: controlCardId("session-B"), card: done },
-		},
+	// A card ID of another session is refused, not sent in another form: the error names why.
+	const before = ws().sent.length;
+	await assert.rejects(
+		gateway.notify(
+			"A",
+			{ chatId: "alice", chatType: 1 },
+			{
+				...notificationPayload("result", a.registration.source, "SECOND", { title: "✅ 本轮完成" }),
+				control: { cardId: controlCardId("session-B"), card: done },
+			},
+		),
+		(error: unknown) => deliveryFailure(error) === "rejected" && /控制卡不属于发送 pi 的 session/.test(String(error)),
 	);
-	const second = ws()
-		.sent.filter((frame) => frame.cmd === "aibot_send_msg")
-		.at(-1).body;
-	assert.equal(second.msgtype, "markdown");
-	assert.match(second.markdown.content, /^🆔 session: session-A[\s\S]*\*\*✅ 本轮完成\*\*\n\nSECOND$/);
+	assert.equal(ws().sent.length, before, "nothing is sent");
 });
 
 test("a refused result control card is sent as Markdown with the reply, so the result is never lost", async () => {

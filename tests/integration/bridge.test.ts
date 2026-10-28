@@ -1057,6 +1057,16 @@ test("proactive push waits for the server acknowledgement", async () => {
 	assert.equal((await result).details.chat_type, 2);
 });
 
+test("wecom_send tells the model what of its next-step comment the card did not take", async () => {
+	const tool = tools.get("wecom_send");
+	const ok = await tool.execute("ok", { chatid: "test-user", content: '结论\n<!-- wecom_next ["继续"] -->' });
+	assert.equal(ok.content[0].text, "已发送到 test-user");
+	const broken = await tool.execute("broken", { chatid: "test-user", content: "结论\n<!-- wecom_next [继续] -->" });
+	assert.match(broken.content[0].text, /^已发送到 test-user。wecom_next 不是有效的 JSON：/);
+	const card = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
+	assert.doesNotMatch(JSON.stringify(card.body), /wecom_next/, "the comment is still taken out");
+});
+
 test("a malformed incoming message cannot block the next queued request", async () => {
 	inbound("malformed", { chattype: "group", text: { content: 123 } });
 	inbound("valid");
@@ -1863,6 +1873,21 @@ for (const accept of [true, false]) {
 		);
 	});
 }
+
+test("config whoami says when the allowlist cannot be read, never that there is none, and offers nothing", async (t) => {
+	const notices = identityDialogs(t, async () => assert.fail("nothing to confirm without a readable allowlist"));
+	const pending = command("config whoami", ctx);
+	await drain();
+	// The file breaks while the code is waited for: the bot was read, the allowlist cannot be.
+	const config = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
+	await writeFile(CONFIG_FILE, JSON.stringify({ ...config, allowedUserIds: "test-user" }));
+	plain(notices.codes[0], { from: { userid: "colleague" } });
+	await pending;
+	const report = notices.at(-1)!;
+	assert.match(report, /^已识别单聊：chatid=colleague/m, "the identity is still reported");
+	assert.match(report, /无法确认 allowedUserIds：.*allowedUserIds 无效/);
+	assert.doesNotMatch(report, /未配置 allowedUserIds/);
+});
 
 test("a reconnect during the confirmation keeps a chat identified with the same bot", async (t) => {
 	const notices = identityDialogs(t, async () => {

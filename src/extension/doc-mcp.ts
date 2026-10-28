@@ -107,7 +107,7 @@ export class DocMcpClient {
 				clientInfo: { name: "pi-wecom-aibot", version: "1" },
 			});
 			this.protocol = typeof result.protocolVersion === "string" ? result.protocolVersion : PROTOCOL_VERSION;
-			await this.post({ jsonrpc: "2.0", method: "notifications/initialized" });
+			await this.notify("notifications/initialized");
 		})().catch((error: unknown) => {
 			this.reset();
 			throw error;
@@ -121,11 +121,34 @@ export class DocMcpClient {
 		this.protocol = undefined;
 	}
 
+	/** A JSON-RPC request: its reply's result object, else a DocError saying what came back instead. */
 	private async request(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-		return (await this.post({ jsonrpc: "2.0", id: this.nextId++, method, params })) ?? {};
+		const id = this.nextId++;
+		const { response, text } = await this.post({ jsonrpc: "2.0", id, method, params });
+		const payloads = response.headers.get("content-type")?.includes("text/event-stream") ? sseData(text) : [text];
+		for (const payload of payloads) {
+			const reply = asRecord(parseJson(payload));
+			if (reply?.id !== id) continue;
+			const error = asRecord(reply.error);
+			if (error)
+				throw new DocError(
+					`文档服务 ${String(error.code)}：${this.redact(String(error.message ?? "")).slice(0, 200)}`,
+					"rpc",
+				);
+			const result = asRecord(reply.result);
+			if (!result) throw new DocError(`文档服务 ${method} 的结果不是对象`, "protocol");
+			return result;
+		}
+		throw new DocError(`文档服务没有返回 ${method} 的结果`, "protocol");
 	}
 
-	private async post(message: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
+	/** A JSON-RPC notification: no reply is read. */
+	private async notify(method: string): Promise<void> {
+		await this.post({ jsonrpc: "2.0", method });
+	}
+
+	/** One HTTP exchange; a failed or non-2xx one is a DocError. */
+	private async post(message: Record<string, unknown>): Promise<{ response: Response; text: string }> {
 		const headers: Record<string, string> = {
 			"content-type": "application/json",
 			accept: "application/json, text/event-stream",
@@ -156,20 +179,7 @@ export class DocMcpClient {
 				"http",
 				response.status,
 			);
-		if (message.id === undefined) return undefined;
-		const payloads = response.headers.get("content-type")?.includes("text/event-stream") ? sseData(text) : [text];
-		for (const payload of payloads) {
-			const reply = asRecord(parseJson(payload));
-			if (reply?.id !== message.id) continue;
-			const error = asRecord(reply.error);
-			if (error)
-				throw new DocError(
-					`文档服务 ${String(error.code)}：${this.redact(String(error.message ?? "")).slice(0, 200)}`,
-					"rpc",
-				);
-			return asRecord(reply.result) ?? {};
-		}
-		throw new DocError(`文档服务没有返回 ${String(message.method)} 的结果`, "protocol");
+		return { response, text };
 	}
 
 	private redact(text: string): string {

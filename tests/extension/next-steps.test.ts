@@ -15,17 +15,27 @@ test("a reply's next-step comment is taken out of its text and becomes its steps
 	assert.equal(withoutNextSteps('正文\n<!--wecom_next ["x"]-->'), "正文");
 });
 
-test("steps that are not a list of strings, empty, repeated, too long or too many are dropped", () => {
-	assert.deepEqual(
-		splitNextSteps("正文<!-- wecom_next {oops} -->"),
-		{ text: "正文", steps: [] },
-		"the comment still goes",
-	);
-	assert.deepEqual(splitNextSteps('<!-- wecom_next {"a":1} -->').steps, []);
-	assert.deepEqual(splitNextSteps('<!-- wecom_next [" a ", "", 7, "a", "b"] -->').steps, ["a", "b"]);
-	assert.deepEqual(splitNextSteps(`<!-- wecom_next ["${"长".repeat(501)}", "ok"] -->`).steps, ["ok"]);
+test("steps that are not a list of strings, too long or too many are dropped and named; empty and repeated ones quietly", () => {
+	const broken = splitNextSteps("正文<!-- wecom_next {oops} -->");
+	assert.equal(broken.text, "正文", "the comment still goes");
+	assert.deepEqual(broken.steps, []);
+	assert.match(broken.problem ?? "", /^wecom_next 不是有效的 JSON：/);
+	assert.deepEqual(splitNextSteps('<!-- wecom_next {"a":1} -->'), {
+		text: "",
+		steps: [],
+		problem: "wecom_next 应是字符串数组",
+	});
+	const mixed = splitNextSteps('<!-- wecom_next [" a ", "", 7, "a", "b"] -->');
+	assert.deepEqual(mixed.steps, ["a", "b"]);
+	assert.match(mixed.problem ?? "", /^wecom_next 有 1 项未采用/, "the number, not the empty or repeated one");
+	const long = splitNextSteps(`<!-- wecom_next ["${"长".repeat(501)}", "ok"] -->`);
+	assert.deepEqual(long.steps, ["ok"]);
+	assert.match(long.problem ?? "", /有 1 项未采用/);
 	const many = JSON.stringify(Array.from({ length: 12 }, (_, i) => `step ${i}`));
-	assert.equal(splitNextSteps(`<!-- wecom_next ${many} -->`).steps.length, 10);
+	const capped = splitNextSteps(`<!-- wecom_next ${many} -->`);
+	assert.equal(capped.steps.length, 10);
+	assert.match(capped.problem ?? "", /有 2 项未采用/);
+	assert.equal(splitNextSteps('<!-- wecom_next ["a", "a", " "] -->').problem, undefined);
 });
 
 test("the terminal's lines of the comment are left out of the card's quote, even when wrapped", () => {

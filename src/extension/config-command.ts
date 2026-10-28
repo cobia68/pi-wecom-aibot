@@ -167,7 +167,14 @@ class ConfigCommand {
 
 	/** One notice for the whole report: pi shows consecutive notices in place of each other. */
 	save(scope: ConfigScope, change: LayerChange, guard?: Guard, note?: string): void {
-		const before = this.previous();
+		// A save may be what repairs the files: when they cannot be read yet, the report only says it saved. If
+		// they still cannot be read after it, the read below throws.
+		let before: Resolved | undefined;
+		try {
+			before = this.config.read();
+		} catch {
+			before = undefined;
+		}
 		if (scope === "global")
 			patchLayer("global", change, guard && ((current) => guard(mergeLayers(current, undefined))));
 		else this.config.patch(change, guard && ((current) => guard(mergeLayers(readLayer("global"), current))));
@@ -279,41 +286,40 @@ class ConfigCommand {
 	 * anyone may send tasks, so starting one for a single person is left to a hand edit.
 	 */
 	private async offerAllowlist(identity: ChatIdentity): Promise<string | undefined> {
-		const allowed = this.previous()?.allowedUserIds;
-		if (!allowed?.length || allowed.includes(identity.userid) || !this.ctx.hasUI)
-			return this.allowlistNote(identity, allowed);
+		const allowlist = readAllowlist();
+		if ("problem" in allowlist || !allowlist.ids.length || allowlist.ids.includes(identity.userid) || !this.ctx.hasUI)
+			return this.allowlistNote(identity, allowlist);
 		const ok = await this.ctx.ui.confirm(
 			`把 ${identity.userid} 加入 allowedUserIds？`,
 			`写进全局配置 ${this.file("global")}；运行 /wecom-aibot connect 后，这个人才能给 pi 发任务`,
 		);
-		if (!ok) return this.allowlistNote(identity, allowed);
+		if (!ok) return this.allowlistNote(identity, allowlist);
 		try {
 			addAllowedUser(identity.userid);
 		} catch (error) {
 			return `没有加入 allowedUserIds：${errorMessage(error)}`;
 		}
-		const resolved = this.previous();
-		if (resolved) this.host.changed(resolved);
-		return `已把 ${identity.userid} 加入 allowedUserIds；运行 /wecom-aibot connect 后生效`;
+		const added = `已把 ${identity.userid} 加入 allowedUserIds；运行 /wecom-aibot connect 后生效`;
+		let resolved: Resolved;
+		try {
+			resolved = this.config.read();
+		} catch (error) {
+			return sentences(added, `但配置现在无法读取：${errorMessage(error)}`);
+		}
+		this.host.changed(resolved);
+		return added;
 	}
 
-	private allowlistNote(identity: ChatIdentity, allowed = this.previous()?.allowedUserIds): string | undefined {
-		if (allowed?.includes(identity.userid)) return undefined;
-		return allowed?.length
+	/** An unreadable allowlist is said so, never taken for none: none would invite anyone in. */
+	private allowlistNote(identity: ChatIdentity, allowlist = readAllowlist()): string | undefined {
+		if ("problem" in allowlist) return `无法确认 allowedUserIds：${allowlist.problem}`;
+		if (allowlist.ids.includes(identity.userid)) return undefined;
+		return allowlist.ids.length
 			? `userid ${identity.userid} 不在 allowedUserIds 中：加入全局配置文件并运行 /wecom-aibot connect 后，才能给 pi 发任务`
 			: sentences(
 					"当前未配置 allowedUserIds：任何能给机器人发消息的人都能让 pi 执行任务",
 					`建议在 ${this.file("global")} 中加入 "allowedUserIds": [${JSON.stringify(identity.userid)}]，然后运行 /wecom-aibot connect`,
 				);
-	}
-
-	/** A save may be what repairs the files: when they cannot be read yet, the report only says it saved. */
-	private previous(): Resolved | undefined {
-		try {
-			return this.config.read();
-		} catch {
-			return undefined;
-		}
 	}
 
 	private layer(scope: ConfigScope): Layer | undefined {
@@ -615,4 +621,15 @@ function sameBotGuard(bot: Pick<Connection, "botId" | "secret">): Guard {
 /** The global layer alone, as a session without overrides would resolve it. */
 function globalOnly(): Resolved {
 	return mergeLayers(readLayer("global"), undefined);
+}
+
+/** The global allowlist as its file holds it now; none at all is the empty list, both admit everyone. */
+type Allowlist = { ids: readonly string[] } | { problem: string };
+
+function readAllowlist(): Allowlist {
+	try {
+		return { ids: readLayer("global")?.allowedUserIds ?? [] };
+	} catch (error) {
+		return { problem: errorMessage(error) };
+	}
 }

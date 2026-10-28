@@ -131,6 +131,24 @@ test("a record an earlier version kept as screen-pages.json is adopted under the
 	await assert.rejects(access(join(directory, "screen-pages.json")), { code: "ENOENT" });
 });
 
+test("a broken record leaves a card without its page link and icon, and says why in the log", async () => {
+	const directory = await sandbox();
+	await pages(fakeService(), directory).write(source("s1"), "# one");
+	await writeFile(join(directory, "session-doc.json"), "{not json");
+	const lines: string[] = [];
+	const store = new SessionDoc({
+		botId: "aibot-UNIQUE-BOT-ID",
+		mcp: fakeService().mcp,
+		log: (line) => lines.push(line),
+		directory,
+		machine: "host:1",
+	});
+	assert.equal(store.pageUrl("s1"), undefined);
+	assert.equal(store.iconUrl(), undefined);
+	assert.equal(lines.length, 2, "the link and the icon each say so");
+	for (const line of lines) assert.match(line, /会话文档记录 .* 已损坏/);
+});
+
 test("a broken record fails the write: no new document, and the file is left for the user to fix", async () => {
 	const directory = await sandbox();
 	const service = fakeService();

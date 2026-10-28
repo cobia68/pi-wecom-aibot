@@ -115,6 +115,7 @@ export class NotificationOutbox {
 				const kind = request.result !== undefined ? "result" : "notice";
 				// The card offers the body's next steps; nothing sent carries their comment.
 				const body = splitNextSteps(request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT);
+				if (body.problem) this.host.log(body.problem);
 				// The session's control card, drawn now while the terminal shows how the run ended.
 				const control = this.controlCard(
 					ctx,

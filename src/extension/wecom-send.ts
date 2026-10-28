@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { firstLine } from "../shared/card.ts";
 import { notificationPayload } from "../shared/notification.ts";
+import { sentences } from "../shared/text.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
 import type { BridgeSession } from "./bridge-session.ts";
 import { splitNextSteps, withoutNextSteps } from "./next-steps.ts";
@@ -123,7 +124,8 @@ export function registerWecomSend(pi: ExtensionAPI, host: WecomSendHost): void {
 				{ ctx, signal, steps: body.steps },
 			);
 			return {
-				content: [{ type: "text", text: `已发送到 ${request.chatId}` }],
+				// The model wrote the comment: it is told what of it the card did not take.
+				content: [{ type: "text", text: sentences(`已发送到 ${request.chatId}`, body.problem) }],
 				details: {
 					...details,
 					provider: request.source.provider,

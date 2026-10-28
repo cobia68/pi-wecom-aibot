@@ -1027,7 +1027,7 @@ test("an unconfirmed card is never followed by a duplicate", async () => {
 	);
 });
 
-test("a notification without a control card is sent as Markdown with its session; a foreign card ID is never sent", async () => {
+test("a notification without a control card is sent as Markdown with its session; a foreign card ID is refused", async () => {
 	const a = add("A", SESSION_A);
 	a.ws.onSend = (frame) => {
 		if (frame.cmd === "aibot_send_msg") a.ws.acknowledge(frame);
@@ -1035,17 +1035,19 @@ test("a notification without a control card is sent as Markdown with its session
 	const chat = { chatId: "user", chatType: 1 as const };
 	await gateway.notify("A", chat, notificationPayload("notice", a.value.source, "PLAIN", { title: "标题" }));
 	const foreign = { ...controlled(a.value.source).control, cardId: controlCardId(SESSION_B) };
-	await gateway.notify("A", chat, { ...notificationPayload("notice", a.value.source, "FOREIGN"), control: foreign });
+	await assert.rejects(
+		gateway.notify("A", chat, { ...notificationPayload("notice", a.value.source, "FOREIGN"), control: foreign }),
+		/控制卡不属于发送 pi 的 session/,
+	);
 	const pushes = a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
 	assert.deepEqual(
 		pushes.map((frame) => frame.body.msgtype),
-		["markdown", "markdown"],
+		["markdown"],
 	);
 	assert.equal(
 		pushes[0].body.markdown.content,
 		`🆔 session: ${SESSION_A}  \n🏷️ project-A · provider-A · model-A\n\n**标题**\n\nPLAIN`,
 	);
-	assert.match(pushes[1].body.markdown.content, /FOREIGN$/);
 });
 
 test("a card WeCom refuses is sent as Markdown within the UTF-8 byte limit, with its title", async () => {

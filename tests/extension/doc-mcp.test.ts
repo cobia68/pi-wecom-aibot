@@ -106,6 +106,19 @@ test("a tool's errcode or isError is an error that keeps WeCom's code but drops 
 	});
 });
 
+test("a reply whose result is not an object is a protocol error, not an empty result", async (t) => {
+	for (const result of [null, "ok", [1]]) {
+		t.mock.restoreAll();
+		server(t, () => result);
+		await assert.rejects(new DocMcpClient(URL).call("smartpage_create", {}), (error: unknown) => {
+			assert.ok(error instanceof DocError);
+			assert.equal(error.kind, "protocol");
+			assert.equal(error.message, "文档服务 tools/call 的结果不是对象");
+			return true;
+		});
+	}
+});
+
 test("network and HTTP failures never quote the address or its key", async (t) => {
 	t.mock.method(globalThis, "fetch", async () => {
 		throw new TypeError(`fetch failed for ${URL}`);

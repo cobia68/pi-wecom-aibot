@@ -89,19 +89,20 @@ export class SessionDoc {
 
 	/** The page a session already has; reading the record never calls the service, and never fails a card. */
 	pageUrl(sessionId: string): string | undefined {
-		try {
-			return this.read()?.pages[sessionId]?.url;
-		} catch (error) {
-			this.options.log(errorMessage(error));
-			return undefined;
-		}
+		return this.readForCard()?.pages[sessionId]?.url;
 	}
 
 	/** The cards' icon, once this document has one; reading the record never calls the service, never fails a card. */
 	iconUrl(): string | undefined {
+		return this.readForCard()?.iconUrl;
+	}
+
+	/** A card is drawn without what an unreadable record holds; the reason is logged. */
+	private readForCard(): DocRecord | undefined {
 		try {
-			return this.read()?.iconUrl;
-		} catch {
+			return this.read();
+		} catch (error) {
+			this.options.log(errorMessage(error));
 			return undefined;
 		}
 	}

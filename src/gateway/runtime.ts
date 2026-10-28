@@ -331,6 +331,8 @@ export class WeComGateway {
 		if (notification.source.sessionId !== member.source.sessionId)
 			throw new DeliveryError("通知的 session 与发送 pi 不匹配，已拒绝发送", "rejected");
 		if (!notification.text.trim()) throw new DeliveryError("当前 pi 会话没有可发送的文本回复", "rejected");
+		if (notification.control && !controlCardFor(notification.control.cardId, member.source.sessionId))
+			throw new DeliveryError("控制卡不属于发送 pi 的 session", "rejected");
 		await this.publishCard(client, member, chat, notification);
 	}
 
@@ -387,10 +389,7 @@ export class WeComGateway {
 		notification: GatewayNotification,
 	): Promise<void> {
 		member.active = ++this.activity;
-		const control =
-			notification.control && controlCardFor(notification.control.cardId, member.source.sessionId)
-				? notification.control
-				: undefined;
+		const { control } = notification;
 		let refused = !control;
 		if (control) {
 			try {

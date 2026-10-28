@@ -50,23 +50,25 @@ export function senderOf(value: unknown): string | undefined {
 export function parseInbound(value: unknown): InboundMessage | undefined {
 	const body = asRecord(value);
 	const userid = senderOf(body);
-	if (!body || !userid) return undefined;
+	if (!body || !userid || typeof body.msgtype !== "string" || !body.msgtype) return undefined;
 	const group = body.chattype === "group";
 	const rawChatId = group ? body.chatid : userid;
 	const chatId = typeof rawChatId === "string" ? rawChatId.trim() : "";
 	if (!chatId) return undefined;
 	let text = messageText(body);
 	if (text === undefined) return undefined;
+	const media = attachments(body);
+	if (!media) return undefined;
 	if (group) text = text.replace(/^@\S+\s*/, "");
 	const quoteText = body.quote ? quotedWords(body.quote) : undefined;
 	return {
 		msgId: body.msgid === undefined || body.msgid === null ? "" : String(body.msgid),
-		msgtype: typeof body.msgtype === "string" ? body.msgtype : "?",
+		msgtype: body.msgtype,
 		chat: { chatId, chatType: group ? 2 : 1 },
 		userid,
 		text,
 		...(quoteText ? { quoteText } : {}),
-		attachments: attachments(body),
+		attachments: media,
 	};
 }
 
@@ -82,7 +84,7 @@ function messageText(value: unknown): string | undefined {
 			return stringOrUndefined(asRecord(node.voice)?.content);
 		case "mixed": {
 			const items = asRecord(node.mixed)?.msg_item;
-			if (!Array.isArray(items)) return "";
+			if (!Array.isArray(items)) return undefined;
 			const parts: string[] = [];
 			for (const item of items) {
 				const entry = asRecord(item);
@@ -99,7 +101,8 @@ function messageText(value: unknown): string | undefined {
 		case "video":
 			return "[视频]";
 		default:
-			return typeof node?.msgtype === "string" && node.msgtype ? `[${node.msgtype}]` : "";
+			// A kind not listed above is named, not read; no kind at all is malformed.
+			return typeof node?.msgtype === "string" && node.msgtype ? `[${node.msgtype}]` : undefined;
 	}
 }
 
@@ -148,28 +151,30 @@ function quotedWords(value: unknown): string | undefined {
 }
 
 function stringOrUndefined(value: unknown): string | undefined {
-	return value === undefined ? "" : typeof value === "string" ? value : undefined;
+	return typeof value === "string" ? value : undefined;
 }
 
-function attachments(body: Record<string, unknown>): Attachment[] {
+/** The message's own media; undefined when one of them has no URL to fetch it from. */
+function attachments(body: Record<string, unknown>): Attachment[] | undefined {
 	const result: Attachment[] = [];
-	const add = (kind: Attachment["kind"], value: unknown) => {
+	const add = (kind: Attachment["kind"], value: unknown): boolean => {
 		const node = asRecord(value);
-		if (typeof node?.url !== "string" || !node.url) return;
+		if (typeof node?.url !== "string" || !node.url) return false;
 		result.push({
 			kind,
 			url: node.url,
 			...(typeof node.aeskey === "string" && node.aeskey ? { aeskey: node.aeskey } : {}),
 		});
+		return true;
 	};
-	if (body.msgtype === "image") add("image", body.image);
-	if (body.msgtype === "file") add("file", body.file);
-	if (body.msgtype === "video") add("video", body.video);
+	if (body.msgtype === "image" && !add("image", body.image)) return undefined;
+	if (body.msgtype === "file" && !add("file", body.file)) return undefined;
+	if (body.msgtype === "video" && !add("video", body.video)) return undefined;
 	const mixed = asRecord(body.mixed)?.msg_item;
 	if (body.msgtype === "mixed" && Array.isArray(mixed)) {
 		for (const item of mixed) {
 			const entry = asRecord(item);
-			if (entry?.msgtype === "image") add("image", entry.image);
+			if (entry?.msgtype === "image" && !add("image", entry.image)) return undefined;
 		}
 	}
 	return result;

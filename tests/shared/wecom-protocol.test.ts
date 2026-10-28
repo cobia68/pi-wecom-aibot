@@ -124,6 +124,29 @@ test("malformed callbacks are rejected instead of guessed", () => {
 	);
 });
 
+test("a callback missing what its type needs is malformed, never an empty message", () => {
+	const { msgtype: _, ...untyped } = base;
+	const cases: [string, Record<string, unknown>][] = [
+		["no msgtype", untyped],
+		["an empty msgtype", { ...base, msgtype: "" }],
+		["text without content", { ...base, text: {} }],
+		["text without its body", { ...base, text: undefined }],
+		["Markdown without content", { ...base, msgtype: "markdown", markdown: {} }],
+		["voice without a transcript", { ...base, msgtype: "voice", voice: {} }],
+		["mixed without items", { ...base, msgtype: "mixed", mixed: {} }],
+		["a mixed text item without content", { ...base, msgtype: "mixed", mixed: { msg_item: [{ msgtype: "text" }] } }],
+		["an image without its URL", { ...base, msgtype: "image", image: { aeskey: "key" } }],
+		["a file without its URL", { ...base, msgtype: "file", file: {} }],
+		["a video without its body", { ...base, msgtype: "video" }],
+		[
+			"a mixed image without its URL",
+			{ ...base, msgtype: "mixed", mixed: { msg_item: [{ msgtype: "image", image: { url: "" } }] } },
+		],
+	];
+	for (const [what, body] of cases) assert.equal(parseInbound(body), undefined, what);
+	assert.equal(parseInbound({ ...base, text: { content: "" } })?.text, "", "an empty text is still a text");
+});
+
 test("a quote of an image, a file or a mix is media; text, Markdown and voice are words", () => {
 	for (const quote of [
 		{ msgtype: "image", image: { url: "https://example.invalid/q", aeskey: "KEY" } },
