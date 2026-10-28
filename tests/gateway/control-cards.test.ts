@@ -306,21 +306,23 @@ test("an offline owner turns its cached card red; uncached offline controls rece
 	assert.equal(gateway.size, 1);
 	click(controlCardId("offline-session"), controlKey("refresh", "offline-session"));
 	assert.match(ws().sent.at(-1).body.markdown.content, /所属会话已离线/);
-	// A card from before version 10 names no session in its keys: its ID's owner, here gone, is all there is.
-	click(controlCardId("offline-session"), "refresh");
-	assert.match(ws().sent.at(-1).body.markdown.content, /所属会话已离线/);
 });
 
-test("a key from before version 10 refreshes its card: an old 中止 or 设为目标 never acts, and nothing is remembered", async () => {
+test("a key that is not one of today's buttons does nothing and is logged; no click remembers a target", async () => {
 	const a = add("A");
 	const { cardId } = await publish(a);
-	for (const old of ["select", "abort", "send"]) click(cardId, old);
+	const sent = ws().sent.length;
+	for (const old of ["select", "abort", "send", `latest@${fingerprintOf(a)}`]) click(cardId, old);
+	assert.equal(a.requests().length, 0, "no session is asked");
+	assert.equal(ws().sent.length, sent, "no card is updated and no note is sent");
+	const logs = a.frames
+		.filter((frame): frame is Extract<ServerFrame, { type: "log" }> => frame.type === "log")
+		.map((frame) => frame.message);
 	assert.deepEqual(
-		a.requests().map((request) => request.request.action === "click" && request.request.click.key),
-		[key(a, "refresh"), key(a, "refresh"), key(a, "refresh")],
-		"the session that published the card redraws it in today's layout",
+		logs.filter((line) => line.startsWith("已忽略无法识别的卡片按钮")),
+		["select", "abort", "send", `latest@${fingerprintOf(a)}`].map((old) => `已忽略无法识别的卡片按钮：${old}`),
 	);
-	// No click remembers a target: a message without a session is asked about, not delivered.
+	// A message without a session is asked about, not delivered.
 	message("without a chosen target");
 	assert.equal(a.tasks().length, 0);
 });
@@ -540,7 +542,4 @@ test("once a pi's card shows its document's colour logo, every card the gateway 
 	await message("/wecom-aibot sessions");
 	assert.equal(cards().at(-1).button_selection.question_key, "pick");
 	assert.equal(cards().at(-1).source.icon_url, colour, "the session list");
-	// A card from an older version: the retired card.
-	click("p@0123456789ab", "card@session-A");
-	assert.equal(updates().at(-1).body.template_card.source.icon_url, colour, "the retired card");
 });

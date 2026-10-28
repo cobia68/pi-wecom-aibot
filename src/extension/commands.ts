@@ -149,8 +149,6 @@ const COMMANDS: CommandSpec[] = [
 	},
 ];
 
-const MOVED: Record<string, string> = { whoami: "config whoami" };
-
 export type ConfigInvocation =
 	/** No action given: list the forms, all of them or one scope's. */
 	| { action: "choose"; scope?: ConfigScope }
@@ -371,15 +369,7 @@ export function parseInvocation(input: string): Invocation {
 	}
 	if (scan.positional[0] === undefined) return bareInvocation(scan);
 	const command = commandNamed(scan.positional[0]);
-	if (!command) {
-		const moved = MOVED[scan.positional[0].toLowerCase()];
-		return {
-			kind: "error",
-			message: moved
-				? `${scan.positional[0]} 已移到 config 下：/wecom-aibot ${moved}`
-				: "未知子命令，请使用 /wecom-aibot --help 查看用法",
-		};
-	}
+	if (!command) return { kind: "error", message: "未知子命令，请使用 /wecom-aibot --help 查看用法" };
 	if (command === CONFIG_COMMAND) {
 		const misplaced = [
 			...scan.unknown,
@@ -478,17 +468,6 @@ function parseConfigArgs(args: string[], options: Map<string, string>, positionO
 		["/wecom-aibot config", ...(target ? ["--scope", target] : []), ...rest, ...(wait ? ["--wait", wait] : [])].join(
 			" ",
 		);
-	// The earlier spelling with the scope as a word, `config global set …` or `config set global …`: say the new one.
-	if (scope === undefined) {
-		const at = isScope(words[0]) ? 0 : isScope(words[1]) ? 1 : -1;
-		if (at >= 0) {
-			const rest = args.filter((_, index) => index !== at);
-			const head = rest[0]?.toLowerCase() ?? "";
-			const spelled =
-				!rest.length || CONFIG_ACTIONS.includes(head) ? [head, ...rest.slice(1)].filter(Boolean) : ["<动作>"];
-			return error(`作用域改为 --scope，写在动作前：${written(words[at], spelled)}`);
-		}
-	}
 	const [action] = words;
 	const values = args.slice(1);
 	if (scope !== undefined && positionOf.get("scope") !== 0)

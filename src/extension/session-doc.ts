@@ -8,7 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { pluginDirectory } from "../shared/agent-path.ts";
@@ -68,9 +68,6 @@ export interface SessionDocOptions {
 export class SessionDoc {
 	private readonly file: string;
 	private readonly lock: string;
-	/** The record's name before the document was called the session document; adopted once. */
-	private readonly earlier: string;
-	private adopted = false;
 	private readonly bot: string;
 	private readonly machine: string;
 	private readonly now: () => number;
@@ -81,7 +78,6 @@ export class SessionDoc {
 		const directory = options.directory ?? pluginDirectory();
 		this.file = join(directory, "session-doc.json");
 		this.lock = join(directory, "session-doc.lock");
-		this.earlier = join(directory, "screen-pages.json");
 		this.bot = createHash("sha256").update(options.botId).digest("hex").slice(0, 32);
 		this.machine = options.machine ?? hostname();
 		this.now = options.now ?? Date.now;
@@ -330,28 +326,11 @@ export class SessionDoc {
 
 	// ---------------------------------------------------------------- the record
 
-	/** A record an earlier version kept under its old name takes the new one, so its pages are found again. */
-	private adopt(): void {
-		if (this.adopted) return;
-		this.adopted = true;
-		if (existsSync(this.file)) return;
-		try {
-			mkdirSync(join(this.file, ".."), { recursive: true });
-			renameSync(this.earlier, this.file);
-			this.options.log(`会话文档记录已改名为 ${this.file}`);
-		} catch (error) {
-			// No earlier record, or another pi adopted it first; anything else would lose its pages.
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT")
-				this.options.log(`旧的会话文档记录 ${this.earlier} 未能改名：${errorMessage(error)}`);
-		}
-	}
-
 	/**
 	 * Every bot's entries. The file is the only record of the pages: a broken one is an error, never an empty
 	 * record, or a new document would be made and the other bots' pages written over.
 	 */
 	private readAll(): Record<string, unknown> {
-		this.adopt();
 		let text: string;
 		try {
 			text = readFileSync(this.file, "utf8");

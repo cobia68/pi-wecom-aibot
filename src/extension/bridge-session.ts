@@ -14,7 +14,6 @@ import type {
 import { type CardModel, clamp, firstLine, withNote } from "../shared/card.ts";
 import {
 	CONTROL_KEYS,
-	controlCardFor,
 	controlCardId,
 	MAX_PROMPTS,
 	MODEL_QUESTION,
@@ -316,12 +315,11 @@ export class BridgeSession {
 			const cardId = request.click.cardId;
 			// A key names the session its card showed; a card switched to this session was published by another.
 			const parsed = parseControlKey(request.click.key);
-			if (
-				cardId !== undefined &&
-				(parsed
-					? parsed.fingerprint !== sessionFingerprint(this.sessionId)
-					: !controlCardFor(cardId, this.sessionId))
-			) {
+			if (cardId !== undefined && !parsed) {
+				answer({ ok: false, error: "不支持的按钮" });
+				return;
+			}
+			if (parsed && parsed.fingerprint !== sessionFingerprint(this.sessionId)) {
 				answer({ ok: false, error: "控制卡不属于当前 session" });
 				return;
 			}

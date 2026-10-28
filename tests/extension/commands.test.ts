@@ -100,7 +100,7 @@ test("every topic help has a usage line; only config and reset name the paths, a
 	assert.equal(topicHelp("log --help"), "log — 查看最近 20 条日志\n用法：/wecom-aibot log");
 });
 
-test("the total help describes the commands it lists; setup and notify are gone without aliases", () => {
+test("the total help describes the commands it lists; names it does not list are unknown", () => {
 	const commands = sectionRows(helpText(), "子命令");
 	assert.equal(commands.length, 7);
 	// `help` is not an action: only `--help` opens help, so it must not appear among the subcommands.
@@ -109,16 +109,12 @@ test("the total help describes the commands it lists; setup and notify are gone 
 	// Usage lives under the command itself, not in the total help or another topic.
 	assert.doesNotMatch(helpText(), /用法：\/wecom-aibot config/);
 	assert.doesNotMatch(topicHelp("connect --help"), /用法：\/wecom-aibot config/);
-	for (const removed of ["setup", "notify", "setup whoami", "notify on"]) {
+	for (const removed of ["setup", "notify", "setup whoami", "notify on", "whoami", "whoami --wait 30"]) {
 		assert.doesNotMatch(helpText(), new RegExp(`^ {2}${removed} {2}`, "m"));
 		const invocation = parseInvocation(removed);
 		assert.equal(invocation.kind, "error", removed);
 		assert.match(invocation.kind === "error" ? invocation.message : "", /未知子命令/, removed);
 	}
-	// whoami moved under config: the old name says where it is now, and runs nothing.
-	assert.doesNotMatch(helpText(), /^ {2}whoami {2}/m);
-	assert.equal(errorOf("whoami"), "whoami 已移到 config 下：/wecom-aibot config whoami");
-	assert.equal(errorOf("whoami --wait 30"), errorOf("whoami"));
 });
 
 test("config help documents scopes, every field with its default, and no retired name", () => {
@@ -214,13 +210,10 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 		["config unset defaultChatId", /^unset 需要 --scope：.*config --scope session unset defaultChatId/],
 		["config --scope everyone set x=1", /--scope 只能是 global 或 session/],
 		["config --scope global set --scope session x=1", /--scope 重复给出/],
-		[
-			"config global set notificationScope=all-runs",
-			/作用域改为 --scope，写在动作前：\/wecom-aibot config --scope global set notificationScope=all-runs/,
-		],
-		["config set session notificationScope=all-runs", /config --scope session set notificationScope=all-runs/],
-		["config global", /作用域改为 --scope，写在动作前：\/wecom-aibot config --scope global。/],
-		["config session delete x", /config --scope session <动作>/],
+		["config global set notificationScope=all-runs", /^未知动作 global；可用 show、edit、set、unset、whoami/],
+		["config set session notificationScope=all-runs", /^set 需要 --scope：/],
+		["config global", /^未知动作 global/],
+		["config session delete x", /^未知动作 session/],
 		["config --global set x=1", /^未知选项 --global。作用域写成 --scope global$/],
 		["config --show", /show 是动作，不带 --/],
 		["config --scope session set --notificationScope all-runs", /字段写成 notificationScope=…，不用 --/],

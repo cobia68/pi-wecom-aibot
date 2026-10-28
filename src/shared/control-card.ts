@@ -66,11 +66,11 @@ export function controlKey(action: ControlAction, sessionId: string): string {
 	return `${action}@${sessionFingerprint(sessionId)}`;
 }
 
-/** Undefined for a key naming no session (before version 10); a retired button's key refreshes. */
+/** Undefined for a key that is not one of today's buttons. */
 export function parseControlKey(key: string): { action: ControlAction; fingerprint: string } | undefined {
 	const match = KEY.exec(key);
-	if (!match) return undefined;
-	return { action: ACTIONS.has(match[1]) ? (match[1] as ControlAction) : CONTROL_KEYS.refresh, fingerprint: match[2] };
+	if (!match || !ACTIONS.has(match[1])) return undefined;
+	return { action: match[1] as ControlAction, fingerprint: match[2] };
 }
 
 // ---------------------------------------------------------------- dropdowns

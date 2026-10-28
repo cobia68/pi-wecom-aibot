@@ -172,19 +172,6 @@ export const SETTABLE: readonly FieldName[] = ALL.filter(
 	(name) => name !== "botId" && name !== "secret" && name !== "docMcpUrl",
 );
 
-/** Written by earlier versions: reads ignore them, the next save drops them. Other unknown fields are kept. */
-const OBSOLETE = [
-	"sendMode",
-	"notifyEveryRun",
-	"enabled",
-	"welcome",
-	"screenMode",
-	"imageHosts",
-	"fontFiles",
-	"notificationMode",
-	"screenshotTheme",
-];
-
 /** One rule for the file, `config set` and `config edit`: what a 提示词 list may hold. */
 export function promptsProblem(value: unknown): string | undefined {
 	if (!Array.isArray(value)) return "必须是提示词字符串组成的数组";
@@ -300,8 +287,8 @@ export function patchLayer(scope: Scope, change: LayerChange, guard?: (current: 
 }
 
 /**
- * The layer's file as it is on disk now, changed by `edit`, checked and written back without the obsolete
- * fields; `edit` returning undefined leaves the file as it is.
+ * The layer's file as it is on disk now, changed by `edit`, checked and written back; fields it does not know
+ * are kept as they are. `edit` returning undefined leaves the file as it is.
  */
 function rewriteLayer(
 	scope: Scope,
@@ -311,7 +298,6 @@ function rewriteLayer(
 	const raw = readObject(file);
 	const next = edit(raw);
 	if (!next) return parseLayer(raw ?? {}, scope);
-	for (const name of OBSOLETE) delete next[name];
 	const layer = parseLayer(next, scope);
 	writeJson(file, next, scope !== "global");
 	return layer;

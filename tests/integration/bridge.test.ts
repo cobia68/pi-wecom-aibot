@@ -155,10 +155,7 @@ function buttons(frame: any): string[] {
 }
 
 /** Press a button on a card the bot pushed, as WeCom reports it; `selected` is the card's dropdowns. */
-/**
- * A control card's button by its action: on the card, each key also names the session it was drawn for. A
- * card whose keys name none (from before version 10) keeps the bare key.
- */
+/** A control card's button by its action: on the card, each key also names the session it was drawn for. */
 function buttonKey(frame: any, key: string): string {
 	const card = frame.body?.template_card;
 	if (key.includes("@") || !isControlCardId(card?.task_id) || !Object.values(CONTROL_KEYS).includes(key as never))
@@ -245,7 +242,7 @@ function inbound(id: string, extra: Record<string, unknown> = {}): void {
 
 /** Every task names its target: the bridge tests speak the WeCom-side grammar. */
 function taskText(prompt: string): string {
-	return `/wecom-aibot --sessionid ${sessionId} send --prompt ${prompt}`;
+	return `/wecom-aibot --session-id ${sessionId} send --prompt ${prompt}`;
 }
 
 function sendNotification(params: Record<string, unknown>): Promise<any> {
@@ -414,7 +411,7 @@ beforeEach(async (t) => {
 	await drain();
 	initialControl = ws.sent.find((frame) => isControlCardId(frame.body?.template_card?.task_id));
 	// These long-standing task tests start with both their default and task chat already introduced.
-	plain(`/wecom-aibot --sessionid ${sessionId} card`);
+	plain(`/wecom-aibot --session-id ${sessionId} card`);
 	await drain();
 	ws.sent.length = 0;
 });
@@ -2330,7 +2327,7 @@ test("an earlier control card still refreshes the owning pi's live state after g
 });
 
 test("an explicit card command publishes a new control copy in that chat, and the following task reuses it", async () => {
-	plain(`/wecom-aibot --sessionid ${sessionId} card`, { chattype: "group", chatid: "control-group" });
+	plain(`/wecom-aibot --session-id ${sessionId} card`, { chattype: "group", chatid: "control-group" });
 	await drain();
 	const first = ws.sent.find((frame) => isControlCardId(frame.body?.template_card?.task_id));
 	assert.ok(first);
@@ -2340,16 +2337,17 @@ test("an explicit card command publishes a new control copy in that chat, and th
 	plain("not selected yet", { chattype: "group", chatid: "control-group" });
 	await drain();
 	assert.equal(sent.length, 0, "asking for a card does not silently select its session");
-	plain(`/wecom-aibot --sessionid ${sessionId} card`, { chattype: "group", chatid: "control-group" });
+	plain(`/wecom-aibot --session-id ${sessionId} card`, { chattype: "group", chatid: "control-group" });
 	await drain();
 	const copies = ws.sent.filter((frame) => isControlCardId(frame.body?.template_card?.task_id));
 	assert.equal(copies.length, 2);
 	assert.match(copies[1].body.template_card.horizontal_content_list[0].value, /^\d\d:\d\d 已补发控制卡$/);
 	assert.notEqual(copies[0].body.template_card.task_id, copies[1].body.template_card.task_id);
-	// Even the older copy remains operable: a button an earlier version drew refreshes it in today's layout.
-	clickCard(first, "select");
+	// The older copy remains operable.
+	clickCard(first, "refresh");
 	await drain();
 	const redrawn = ws.sent.filter((frame) => frame.cmd === "aibot_respond_update_msg").at(-1);
+	assert.equal(redrawn.body.template_card.task_id, first.body.template_card.task_id);
 	assert.deepEqual(buttons(redrawn), ["refresh", "send", "model", "abort"]);
 	assert.match(noteOf(redrawn), /^画面读取失败/, "a refresh, which here has no terminal to read");
 	plain("still no target", { chattype: "group", chatid: "control-group" });
@@ -2369,7 +2367,7 @@ test("an uncertain manual control delivery is reported as unknown, never as defi
 			ws.receive({ headers: frame.headers, errmsg: "malformed acknowledgement" });
 		else original?.(frame);
 	};
-	plain(`/wecom-aibot --sessionid ${sessionId} card`);
+	plain(`/wecom-aibot --session-id ${sessionId} card`);
 	await drain();
 	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
 	assert.equal(pushes.filter((frame) => isControlCardId(frame.body?.template_card?.task_id)).length, 1);
@@ -2580,7 +2578,7 @@ test("the WeCom list and target-only query ask this pi whether it is busy right 
 		const reply = ws.sent.find((frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === reqId);
 		return /· (执行中|空闲|状态未知)\n/.exec(reply?.body.stream.content ?? "")?.[1];
 	};
-	const commands = ["/wecom-aibot sessions", `/wecom-aibot --sessionid ${sessionId}`];
+	const commands = ["/wecom-aibot sessions", `/wecom-aibot --session-id ${sessionId}`];
 	for (const content of commands) assert.equal(await state(content), "空闲");
 	idle = false;
 	for (const content of commands) assert.equal(await state(content), "执行中", "a run typed in pi itself");
@@ -3110,15 +3108,13 @@ test("controlPrompts fills the dropdown; 发送 sends the whole prompt, and an o
 	assert.match(noteOf(lastUpdate()), /^没有提示词：先在 pi 里设置 controlPrompts$/);
 });
 
-test("最近回复 and 查看通知 on a card drawn before they were retired only refresh it, pushing nothing", async () => {
+test("a button no card draws today, such as 最近回复 or 查看通知, does nothing", async () => {
 	const print = sessionFingerprint(sessionId);
 	for (const retired of ["latest", "notice"]) {
 		ws.sent.length = 0;
 		clickCard(initialControl, `${retired}@${print}`);
 		await drain();
-		assert.match(noteOf(lastUpdate()), /^画面读取失败/, "a refresh, which here has no terminal to read");
-		assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort"]);
-		assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+		assert.deepEqual(ws.sent, [], "no update, no message");
 	}
 });
 
@@ -3191,7 +3187,7 @@ test("more than ten models: 下一页 turns the clicker's copy, and 确认切换
 test("in a group only the member who pressed 中止 is asked to confirm, and only they can confirm", async () => {
 	const aborts: number[] = [];
 	Object.assign(ctx, { abort: () => aborts.push(1) });
-	plain(`/wecom-aibot --sessionid ${sessionId} card`, { chattype: "group", chatid: "team" });
+	plain(`/wecom-aibot --session-id ${sessionId} card`, { chattype: "group", chatid: "team" });
 	await drain();
 	const control = ws.sent.find(
 		(frame) => frame.body?.chatid === "team" && isControlCardId(frame.body?.template_card?.task_id),

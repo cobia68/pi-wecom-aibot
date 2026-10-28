@@ -235,7 +235,7 @@ test("commands and quotes that name a session go straight there; nothing is aske
 	const a = add("A");
 	const b = add("B");
 	await ready();
-	message("/wecom-aibot --sessionid session-A send --prompt named");
+	message("/wecom-aibot --session-id session-A send --prompt named");
 	message("quoted", { quote: quoted("B") });
 	await ready();
 	assert.equal(a.tasks().length, 1);
@@ -393,11 +393,6 @@ test("打开会话 asks the session the dropdown names for a new control card; t
 	assert.equal(kept.button_selection.question_key, "pick", "still the list");
 	assert.equal(kept.button_selection.selected_id, sessionFingerprint("session-B"), "on the session opened");
 	assert.match(kept.horizontal_content_list.at(-1).value, /已打开「project-B · on-B」的控制卡$/);
-	// Buttons of the lists before open the control card too: of the session the list was drawn for.
-	pick(list.task_id, `pick@abort@${first}`);
-	assert.equal(forwarded(a).click.key, "control");
-	pick(list.task_id, "pick@send");
-	assert.equal(forwarded(a).click.key, "control");
 	// 刷新列表 asks every pi again and keeps the dropdown where it was.
 	pick(list.task_id, `pick@refresh@${first}`, "session-B");
 	await ready();
@@ -420,16 +415,20 @@ test("打开会话 asks the session the dropdown names for a new control card; t
 	assert.equal(note.main_title.title, "1 个在线会话");
 	assert.deepEqual(options(note), ["project-B · on-B · 空闲"]);
 	assert.match(note.horizontal_content_list.at(-1).value, /选的会话已离线，请选另一个$/);
-	// Keys of the lists before, and 设为目标 / 清除目标: the card says it is retired, and nothing is remembered.
+	// Keys no list draws today do nothing, and nothing is remembered.
+	const before = ws().sent.length;
+	const seen = b.frames.length;
 	for (const [taskId, key] of [
+		[list.task_id, `pick@abort@${first}`],
+		[list.task_id, "pick@send"],
 		["p@0123456789ab", "card@session-B"],
 		["p@0123456789ab", "page@1"],
 		["p@0123456789ab", "select@session-B"],
 		["c@session-B@0123456789ab", "select"],
-	]) {
+	])
 		click(taskId, key);
-		assert.equal(updated().body.template_card.main_title.title, "这张卡已停用");
-	}
+	assert.equal(ws().sent.length, before, "no card is updated and no note is sent");
+	assert.equal(b.frames.slice(seen).filter((frame) => frame.type === "request").length, 0, "no session is asked");
 	message("still asked");
 	await ready();
 	assert.equal(b.tasks().length, 0);

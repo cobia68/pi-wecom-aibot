@@ -13,22 +13,18 @@ export const PICKER_PAGE = 5;
 
 /** The list's own button: the states again, the dropdown kept. */
 const REFRESH = "refresh";
-/** What lists before this one drew; each now opens the chosen session's control card. */
-const OPENS: readonly string[] = [CONTROL_KEYS.show, CONTROL_KEYS.send, CONTROL_KEYS.model, CONTROL_KEYS.abort];
-const ACTION_KEY = /^pick@([a-z-]{1,32})(?:@([0-9a-f]{64}))?$/;
+const ACTION_KEY = new RegExp(`^pick@(${CONTROL_KEYS.show}|${REFRESH})@([0-9a-f]{64})$`);
 const PAGE_KEY = /^pick@(?:prev|next)@(\d{1,3})$/;
 
 /** `fingerprint`: the session the dropdown showed when drawn, which a click without its choice means. */
-export type PickerAction = { kind: "open" | "refresh"; fingerprint?: string } | { kind: "page"; page: number };
+export type PickerAction = { kind: "open" | "refresh"; fingerprint: string } | { kind: "page"; page: number };
 
 export function pickerAction(key: string): PickerAction | undefined {
 	const page = PAGE_KEY.exec(key);
 	if (page) return { kind: "page", page: Number(page[1]) };
 	const match = ACTION_KEY.exec(key);
 	if (!match) return undefined;
-	const kind = match[1] === REFRESH ? "refresh" : OPENS.includes(match[1]) ? "open" : undefined;
-	if (!kind) return undefined;
-	return { kind, ...(match[2] ? { fingerprint: match[2] } : {}) };
+	return { kind: match[1] === REFRESH ? "refresh" : "open", fingerprint: match[2] };
 }
 
 export function pageOf(sessions: readonly SessionState[], fingerprint: string | undefined): number {
@@ -38,7 +34,7 @@ export function pageOf(sessions: readonly SessionState[], fingerprint: string | 
 
 /**
  * One page, clamped; `selected` keeps the dropdown on a session of that page, else it shows the first row. The
- * task ID has a control card's form: the gateway routes the list's clicks by it, the lists before too.
+ * task ID has a control card's form, naming the first row's session: the gateway routes the list's clicks by it.
  */
 export function sessionPicker(
 	sessions: readonly SessionState[],

@@ -12,7 +12,6 @@ import {
 	PI_ICON_URL,
 	PUBLISH_KEY,
 	parseControlKey,
-	publisherFingerprint,
 	SESSION_QUESTION,
 	sessionFingerprint,
 	sessionLabel,
@@ -831,7 +830,7 @@ export class WeComGateway {
 		this.reply(pending.reqId, response.note ?? "控制卡请求未获确认");
 	}
 
-	/** A button on one of the bot's cards: a question card's, a session list's, a control card's, or a retired one. */
+	/** A button on one of the bot's cards: a question card's, a session list's or a control card's. */
 	private click(inbound: WeComInbound): void {
 		const body = asRecord(inbound.body);
 		const event = asRecord(asRecord(body?.event)?.template_card_event);
@@ -852,28 +851,13 @@ export class WeComGateway {
 			this.pickClick(inbound.reqId, cardId, picked, { ...chat, userid }, cardSelections(event));
 			return;
 		}
-		const fingerprint = publisherFingerprint(cardId);
-		if (fingerprint) {
-			// A key naming no session is from before version 10: it refreshes the copy in today's layout.
-			const parsed = parseControlKey(key) ?? { action: CONTROL_KEYS.refresh, fingerprint };
+		const parsed = isControlCardId(cardId) ? parseControlKey(key) : undefined;
+		if (parsed) {
 			this.controlClick(inbound.reqId, cardId, parsed, { ...chat, userid }, cardSelections(event));
 			return;
 		}
-		this.retire(inbound.reqId, userid);
-	}
-
-	/** A card this gateway no longer draws says so in place, with nothing left to press. */
-	private retire(eventReqId: string, userid: string): void {
-		if (!this.permitted(userid).length) return;
-		void this.client
-			?.updateCard(
-				eventReqId,
-				renderCard(
-					this.forViewer(RETIRED_CARD, { chatId: userid, chatType: 1 }),
-					`retired@${randomUUID().replace(/-/g, "").slice(0, 12)}`,
-				),
-			)
-			.catch((error: unknown) => this.log(`旧卡片未能更新：${errorMessage(error)}`));
+		// A card this version does not draw: its button does nothing.
+		this.log(`已忽略无法识别的卡片按钮：${clampKey(key)}`);
 	}
 
 	/**
@@ -940,7 +924,7 @@ export class WeComGateway {
 			this.showPicker(reply, permitted, picked.page);
 			return;
 		}
-		const chosen = selections?.[PICKER_QUESTION] ?? picked.fingerprint ?? publisherFingerprint(cardId);
+		const chosen = selections?.[PICKER_QUESTION] ?? picked.fingerprint;
 		if (picked.kind === "refresh") {
 			this.showPicker(reply, permitted, { fingerprint: chosen }, "已刷新");
 			return;
@@ -1160,15 +1144,6 @@ const ASK_FALLBACK = [
 	sessionCommand("<id>", "send"),
 	"session ID 写在会话的控制卡上",
 ].join("\n");
-/** What a card from an earlier version turns into when pressed: task_id only matters on a send. */
-const RETIRED_CARD: CardModel = {
-	label: "旧版卡片",
-	tone: "neutral",
-	title: "这张卡已停用",
-	subtitle: "请用最新的控制卡；发 /wecom-aibot sessions 可打开任一会话的控制卡",
-	facts: [],
-	actions: [{ key: "retired", text: "已停用", style: 4 }],
-};
 const TARGET_MISSING = "找不到这个 session ID；它可能已离线或写错";
 const TARGET_GONE = "目标会话已离线";
 const QUOTED_GONE = "引用的会话已离线";
@@ -1183,6 +1158,11 @@ const NO_ONLINE_SESSION = "当前没有在线的 pi 会话：最后一个会话�
 /** Where a control card is recorded: its ID and the session it shows. */
 function cardKey(cardId: string, sessionId: string): string {
 	return fingerprintKey(cardId, sessionFingerprint(sessionId));
+}
+
+/** A button key from WeCom, safe for one log line. */
+function clampKey(key: string): string {
+	return key.replace(/[^\w@-]/g, "?").slice(0, 80);
 }
 
 function fingerprintKey(cardId: string, fingerprint: string): string {

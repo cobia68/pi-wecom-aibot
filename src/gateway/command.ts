@@ -1,14 +1,12 @@
 /**
  * The WeCom side's /wecom-aibot commands: parsing, and the help they print. Pure; the gateway routes what this
  * returns. The target is an option before the action (--session-id <id> send), spelled as pi's own command
- * line and the cards spell it; the spelling before (--sessionid) is still read. --prompt ends parsing.
+ * line and the cards spell it. --prompt ends parsing.
  */
 import { sentences } from "../shared/text.ts";
 
 const COMMAND_PREFIX = "/wecom-aibot";
 const SESSION_OPTION = "--session-id";
-/** Commands copied before the option took pi's spelling still work; help and errors give the new one. */
-const OLD_SESSION_OPTION = "--sessionid";
 const SUBCOMMANDS = ["sessions", "send", "card", "cancel"] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
@@ -35,7 +33,7 @@ export function parseWeComCommand(text: string): WeComCommand {
 	for (let found = tokens.exec(rest); found; found = tokens.exec(rest)) {
 		const token = found[0];
 		if (token === "--help") return sub ? { kind: "help", topic: sub } : { kind: "help" };
-		if (token === SESSION_OPTION || token === OLD_SESSION_OPTION) {
+		if (token === SESSION_OPTION) {
 			const value = tokens.exec(rest)?.[0];
 			if (!value || value.startsWith("--")) return { kind: "error", message: "--session-id 缺少值" };
 			if (sessionId) return { kind: "error", message: "--session-id 重复给出" };

@@ -102,7 +102,7 @@ function message(content: string, body: Record<string, unknown> = {}) {
 }
 
 function send(sessionId: string, text: string, body: Record<string, unknown> = {}) {
-	return message(`/wecom-aibot --sessionid ${sessionId} send --prompt ${text}`, body);
+	return message(`/wecom-aibot --session-id ${sessionId} send --prompt ${text}`, body);
 }
 
 /** Screen and cancel requests; the state questions of session lists are left out. */
@@ -282,8 +282,8 @@ test("temporary identity registrations are hidden and cannot be targeted or publ
 	assert.equal(status.status.sessions, 1);
 	send("identity-session", "must not run");
 	message("must not run either", { quote: quote("identity-session") });
-	message("/wecom-aibot --sessionid identity-session cancel");
-	message("/wecom-aibot --sessionid identity-session");
+	message("/wecom-aibot --session-id identity-session cancel");
+	message("/wecom-aibot --session-id identity-session");
 	assert.match(prompt(), /找不到这个 session ID/);
 	assert.doesNotMatch(prompt(), /project-I/);
 	assert.equal(identifying.peer.messages().length, 0);
@@ -398,7 +398,7 @@ test("a target-only command queries just that pi and returns filled-in commands 
 	const b = add("B", SESSION_B);
 	a.peer.busy = true;
 	b.peer.busy = undefined;
-	message(`/wecom-aibot --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --session-id ${SESSION_A}`);
 	assert.equal(
 		prompt(),
 		[
@@ -417,7 +417,7 @@ test("a target-only command queries just that pi and returns filled-in commands 
 	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
 	assert.equal(requests(a.peer).length, 0);
 	a.peer.busy = false;
-	message(`/wecom-aibot --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --session-id ${SESSION_A}`);
 	assert.match(prompt(), /^· project-A · provider-A · model-A · 空闲\n/);
 	b.peer.busy = false;
 	message("the next message has no target");
@@ -433,7 +433,7 @@ test("a target-only command queries just that pi and returns filled-in commands 
 test("a target-only command with an unknown ID returns the error and the current session list", () => {
 	const a = add("A", SESSION_A);
 	const b = add("B", SESSION_B);
-	message("/wecom-aibot --sessionid missing-session");
+	message("/wecom-aibot --session-id missing-session");
 	assert.match(prompt(), /^找不到这个 session ID/);
 	assert.match(prompt(), /当前有 2 个在线会话/);
 	assert.match(prompt(), new RegExp(SESSION_A));
@@ -449,7 +449,7 @@ test("a single-session query waits up to two seconds and ignores answers from th
 	a.peer.busy = undefined;
 	const replies = () => a.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").length;
 	const before = replies();
-	message(`/wecom-aibot --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --session-id ${SESSION_A}`);
 	const query = a.peer.frames.find((frame) => frame.type === "request" && frame.request.action === "state");
 	assert.ok(query?.type === "request");
 	gateway.response("B", query.id, { ok: true, busy: true });
@@ -468,7 +468,7 @@ test("a pi leaving during a single-session query falls back to the remaining liv
 	const a = add("A", SESSION_A);
 	add("B", SESSION_B);
 	a.peer.busy = undefined;
-	message(`/wecom-aibot --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --session-id ${SESSION_A}`);
 	gateway.unregister("A", a.peer);
 	assert.match(prompt(), /^找不到这个 session ID/);
 	assert.match(prompt(), /当前有 1 个在线会话/);
@@ -480,7 +480,7 @@ test("a re-registered pi cannot inherit an in-flight single-session query", (t) 
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const a = add("A", SESSION_A);
 	a.peer.busy = undefined;
-	message(`/wecom-aibot --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot --session-id ${SESSION_A}`);
 	const next = registration("A", SESSION_B);
 	next.registrationId = "new-registration";
 	const peer = new Peer("A");
@@ -498,13 +498,13 @@ test("single-session queries only reveal sessions the sender can access", () => 
 	const b = add("B", SESSION_B, (value) => {
 		value.config.allowedUserIds = ["bob"];
 	});
-	message(`/wecom-aibot --sessionid ${SESSION_B}`, { from: { userid: "alice" } });
+	message(`/wecom-aibot --session-id ${SESSION_B}`, { from: { userid: "alice" } });
 	assert.match(prompt(), /^找不到这个 session ID/);
 	assert.match(prompt(), new RegExp(SESSION_A));
 	assert.doesNotMatch(prompt(), /project-B/);
 	assert.doesNotMatch(prompt(), new RegExp(SESSION_B));
 	assert.equal(b.peer.frames.filter((frame) => frame.type === "request").length, 0);
-	message(`/wecom-aibot --sessionid ${SESSION_A}`, { from: { userid: "alice" } });
+	message(`/wecom-aibot --session-id ${SESSION_A}`, { from: { userid: "alice" } });
 	assert.match(prompt(), /^· project-A · provider-A · model-A · 空闲\n/);
 	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
 });
@@ -564,7 +564,7 @@ test("a command wins over a quote: the named session takes it", () => {
 test("an explicit target wins over a conflicting quote for cancel too", () => {
 	const a = add("A", SESSION_A);
 	const b = add("B", SESSION_B);
-	message(`/wecom-aibot --sessionid ${SESSION_A} cancel`, { quote: quote(SESSION_B) });
+	message(`/wecom-aibot --session-id ${SESSION_A} cancel`, { quote: quote(SESSION_B) });
 	assert.equal(requests(a.peer).at(-1)!.request.action, "cancel");
 	assert.equal(requests(b.peer).length, 0);
 });
@@ -584,14 +584,14 @@ test("commands never infer a missing target from a quoted notification or image"
 
 test("--prompt keeps spaces, dashes, newlines and command-looking text verbatim, with no UUID exception", () => {
 	const a = add("A", SESSION_A);
-	const text = `修复  --screen 和 --sessionid ${SESSION_B} 的解析\n第二行 --help --prompt\n\n`;
+	const text = `修复  --screen 和 --session-id ${SESSION_B} 的解析\n第二行 --help --prompt\n\n`;
 	send(SESSION_A, text);
 	assert.equal(a.peer.messages()[0].task.message.text, text);
 });
 
 test("a target written only after --prompt remains prose and cannot supply the missing command target", () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot send --prompt 正文 --sessionid ${SESSION_A}`);
+	message(`/wecom-aibot send --prompt 正文 --session-id ${SESSION_A}`);
 	assert.equal(a.peer.messages().length, 0);
 	assert.match(prompt(), /^send 需要目标：/);
 	assert.doesNotMatch(prompt(), /必须写在 --prompt 之前/);
@@ -600,7 +600,7 @@ test("a target written only after --prompt remains prose and cannot supply the m
 test("the action-first target syntax reports its replacement without executing any action", () => {
 	const a = add("A", SESSION_A);
 	for (const action of ["send", "card", "cancel"]) {
-		message(`/wecom-aibot ${action} --sessionid ${SESSION_A}${action === "send" ? " --prompt task" : ""}`);
+		message(`/wecom-aibot ${action} --session-id ${SESSION_A}${action === "send" ? " --prompt task" : ""}`);
 		assert.match(prompt(), /^--session-id 要写在动作前：/);
 		assert.ok(prompt().includes(`/wecom-aibot --session-id ${SESSION_A} ${action}`));
 	}
@@ -611,11 +611,11 @@ test("the action-first target syntax reports its replacement without executing a
 test("help never queries or operates on a supplied target, even when it is offline", () => {
 	const a = add("A", SESSION_A);
 	for (const content of [
-		`/wecom-aibot --sessionid ${SESSION_A} --help`,
-		"/wecom-aibot --sessionid offline-session --help",
-		"/wecom-aibot --sessionid offline-session send --help",
-		`/wecom-aibot --sessionid ${SESSION_A} card --help`,
-		`/wecom-aibot --sessionid ${SESSION_A} cancel --help`,
+		`/wecom-aibot --session-id ${SESSION_A} --help`,
+		"/wecom-aibot --session-id offline-session --help",
+		"/wecom-aibot --session-id offline-session send --help",
+		`/wecom-aibot --session-id ${SESSION_A} card --help`,
+		`/wecom-aibot --session-id ${SESSION_A} cancel --help`,
 	]) {
 		message(content);
 		assert.match(prompt(), /sessions|send|card|cancel/);
@@ -630,21 +630,21 @@ test("all text guidance and action help use the target-first grammar", () => {
 	for (const content of ["/wecom-aibot --help"]) {
 		message(content);
 		assert.match(prompt(), /\/wecom-aibot --session-id <[^>]+> send --prompt/);
-		assert.doesNotMatch(prompt(), /\/wecom-aibot (?:send|card|cancel)\s+--sessionid/);
+		assert.doesNotMatch(prompt(), /\/wecom-aibot (?:send|card|cancel)\s+--session-id/);
 	}
 	for (const action of ["send", "card", "cancel"]) {
 		message(`/wecom-aibot ${action} --help`);
 		assert.ok(prompt().includes(`/wecom-aibot --session-id <完整 session ID> ${action}`));
-		assert.doesNotMatch(prompt(), /\/wecom-aibot (?:send|card|cancel)\s+--sessionid/);
+		assert.doesNotMatch(prompt(), /\/wecom-aibot (?:send|card|cancel)\s+--session-id/);
 		for (const line of prompt().split("\n")) assert.equal(line.endsWith("。"), false);
 	}
 });
 
 test("an equals form is an unknown option, and the error lists what is supported", () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot --sessionid=${SESSION_A} send --prompt x`);
+	message(`/wecom-aibot --session-id=${SESSION_A} send --prompt x`);
 	assert.equal(a.peer.messages().length, 0);
-	assert.match(prompt(), /未知选项 --sessionid=/);
+	assert.match(prompt(), /未知选项 --session-id=/);
 	assert.match(prompt(), /可用选项：--session-id、--help/);
 	assert.match(prompt(), /不支持 =/);
 });
@@ -658,7 +658,7 @@ test("a positional argument is rejected; the prompt belongs after --prompt", () 
 
 test("a failed cancel request reports the pi's reason", () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot --sessionid ${SESSION_A} cancel`);
+	message(`/wecom-aibot --session-id ${SESSION_A} cancel`);
 	gateway.response("A", requests(a.peer)[0].id, { ok: false, error: "这一轮已结束" });
 	assert.match(prompt(), /中止请求未送达：这一轮已结束/);
 });
@@ -667,7 +667,7 @@ test("a request is only answered by the pi it was sent to", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const a = add("A", SESSION_A);
 	add("B", SESSION_B);
-	message(`/wecom-aibot --sessionid ${SESSION_A} cancel`);
+	message(`/wecom-aibot --session-id ${SESSION_A} cancel`);
 	const count = a.ws.sent.length;
 	gateway.response("B", requests(a.peer)[0].id, { ok: true });
 	assert.equal(a.ws.sent.length, count, "another pi's answer is ignored");
@@ -677,7 +677,7 @@ test("a request is only answered by the pi it was sent to", (t) => {
 
 test("cancel asks the named pi and says only that abort was requested", () => {
 	const a = add("A", SESSION_A);
-	message(`/wecom-aibot --sessionid ${SESSION_A} cancel`);
+	message(`/wecom-aibot --session-id ${SESSION_A} cancel`);
 	const request = requests(a.peer)[0];
 	assert.deepEqual(request.request, { action: "cancel", target: sessionTarget(a.value) });
 	gateway.response("A", request.id, { ok: true });
@@ -687,7 +687,7 @@ test("cancel asks the named pi and says only that abort was requested", () => {
 test("a request nobody answers times out with the timeout named", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	add("A", SESSION_A);
-	message(`/wecom-aibot --sessionid ${SESSION_A} cancel`);
+	message(`/wecom-aibot --session-id ${SESSION_A} cancel`);
 	t.mock.timers.tick(20_000);
 	assert.match(prompt(), /20 秒内响应/);
 });
@@ -1147,10 +1147,6 @@ function clicks(peer: Peer) {
 	);
 }
 
-function updates(ws: FakeWebSocket) {
-	return ws.sent.filter((frame) => frame.cmd === "aibot_respond_update_msg");
-}
-
 test("a click WeCom delivers twice is handled once; a group event without its chat goes nowhere", async () => {
 	const a = add("A", SESSION_A);
 	const card = await publish("A", a.ws, a.value.source);
@@ -1162,39 +1158,29 @@ test("a click WeCom delivers twice is handled once; a group event without its ch
 	assert.equal(clicks(a.peer).length, 1);
 });
 
-test("a card this gateway no longer draws says so in place: an old notification card, an old list, an unknown key", async () => {
+test("a card this gateway does not draw does nothing when pressed: an old card, an old list, an unknown key", async () => {
 	const a = add("A", SESSION_A);
-	a.ws.onSend = (frame) => {
-		if (frame.cmd === "aibot_respond_update_msg") a.ws.acknowledge(frame);
-	};
-	const pressed = [
-		click(`c@${SESSION_A}@0123456789ab`, "screen"),
-		click(`c@${SESSION_A}@0123456789ab`, "full-e-abc"),
-		click("p@0123456789ab", "select@session-A"),
-		click("p@0123456789ab", "clear"),
-		click("probe-button-1", "anything"),
+	const before = a.ws.sent.length;
+	const old = [
+		[`c@${SESSION_A}@0123456789ab`, "screen"],
+		[`c@${SESSION_A}@0123456789ab`, "full-e-abc"],
+		["p@0123456789ab", "select@session-A"],
+		["p@0123456789ab", "clear"],
+		["probe-button-1", "anything"],
+		[controlCardId(SESSION_A), "refresh"],
+		[controlCardId(SESSION_A), `pick@send@${sessionFingerprint(SESSION_A)}`],
 	];
+	for (const [cardId, key] of old) click(cardId, key);
 	assert.equal(clicks(a.peer).length, 0, "nothing reaches a pi");
-	assert.deepEqual(
-		updates(a.ws).map((frame) => frame.headers.req_id),
-		pressed,
+	assert.equal(a.ws.sent.length, before, "no card is updated and no message is pushed");
+	const logs = a.peer.frames
+		.filter((frame): frame is Extract<ServerFrame, { type: "log" }> => frame.type === "log")
+		.map((frame) => frame.message);
+	assert.equal(
+		logs.filter((line) => line.startsWith("已忽略无法识别的卡片按钮：")).length,
+		old.length,
+		"each is logged",
 	);
-	for (const update of updates(a.ws)) {
-		const card = update.body.template_card;
-		assert.equal(card.main_title.title, "这张卡已停用");
-		assert.deepEqual(
-			card.button_list.map((button: { text: string }) => button.text),
-			["已停用"],
-		);
-	}
-	assert.equal(a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "no message is pushed");
-	// Someone the bot does not serve gets silence.
-	gateway.unregister("A", a.peer);
-	add("B", SESSION_B, (value) => {
-		value.config.allowedUserIds = ["alice"];
-	});
-	click("probe-button-2", "anything");
-	assert.equal(updates(a.ws).length, pressed.length);
 });
 
 test("a click's follow-up is pushed to the card's chat as Markdown, within WeCom's byte limit", async () => {

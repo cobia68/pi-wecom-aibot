@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -111,24 +111,6 @@ test("one document per machine and bot, named after the machine, invite-only, on
 	const [entry] = Object.values(record) as any[];
 	assert.deepEqual(entry.viewers, ["alice", "bob"]);
 	assert.equal(JSON.stringify(record).includes("UNIQUE-BOT-ID"), false, "the BotID itself is not written");
-});
-
-test("a record an earlier version kept as screen-pages.json is adopted under the new name, with its pages", async () => {
-	const directory = await sandbox();
-	const first = fakeService();
-	await pages(first, directory).write(source("s1"), "# one");
-	await rename(join(directory, "session-doc.json"), join(directory, "screen-pages.json"));
-	const service = fakeService();
-	const store = pages(service, directory);
-	assert.equal(store.pageUrl("s1"), "https://doc.weixin.qq.com/smartpage/a1_doc1?p=p1");
-	assert.equal((await store.write(source("s1"), "# again")).created, false);
-	assert.equal(
-		service.calls.filter((call) => call.name === "smartpage_create" || call.args?.create_page).length,
-		0,
-		"no second document, no second page",
-	);
-	await access(join(directory, "session-doc.json"));
-	await assert.rejects(access(join(directory, "screen-pages.json")), { code: "ENOENT" });
 });
 
 test("a broken record leaves a card without its page link and icon, and says why in the log", async () => {

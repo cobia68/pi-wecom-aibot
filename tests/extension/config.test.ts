@@ -95,27 +95,18 @@ test("every stored field is validated with its name and file, groups as groups",
 	assert.throws(() => readLayer({ session: CHILD }), /allowedUserIds.*只能写在全局配置/);
 });
 
-test("fields of earlier versions are ignored, never migrated, and dropped by the next save", () => {
-	const old = {
-		sendMode: "image",
-		notifyEveryRun: true,
-		enabled: true,
-		welcome: "hi",
-		notificationMode: "screenshot",
-		screenshotTheme: "light",
-	};
-	writeFileSync(CONFIG_FILE, JSON.stringify({ ...bot, ...old, futureField: 1 }));
+test("fields the layer does not know are ignored by reads and kept by saves", () => {
+	writeFileSync(CONFIG_FILE, JSON.stringify({ ...bot, notificationMode: "screenshot", futureField: 1 }));
 	assert.deepEqual(readLayer("global"), bot);
 	const { values } = mergeLayers(readLayer("global"), undefined);
-	assert.equal(
-		Object.hasOwn(values, "notificationMode"),
-		false,
-		"notificationMode is gone: every notification is a card",
-	);
-	assert.equal(values.notificationScope, "wecom-tasks", "notifyEveryRun is not converted");
-	// Any save of the layer drops them; a field this version does not know is still kept.
+	assert.equal(Object.hasOwn(values, "notificationMode"), false, "an unknown field never reaches the settings");
 	patchLayer("global", { set: { notificationScope: "all-runs" } });
-	assert.deepEqual(readJson(), { ...bot, futureField: 1, notificationScope: "all-runs" });
+	assert.deepEqual(readJson(), {
+		...bot,
+		notificationMode: "screenshot",
+		futureField: 1,
+		notificationScope: "all-runs",
+	});
 });
 
 test("a missing file is no layer, while an unreadable one is an error naming it", () => {
@@ -410,10 +401,7 @@ test("unset takes field names and removes whole groups", () => {
 });
 
 test("whoami's 加入白名单 adds one userid to the global file and keeps everything else in it", () => {
-	writeFileSync(
-		CONFIG_FILE,
-		JSON.stringify({ ...bot, allowedUserIds: ["boss"], futureField: 1, notificationMode: "screenshot" }),
-	);
+	writeFileSync(CONFIG_FILE, JSON.stringify({ ...bot, allowedUserIds: ["boss"], futureField: 1 }));
 	addAllowedUser("alice");
 	addAllowedUser("alice");
 	assert.deepEqual(readJson(), { ...bot, allowedUserIds: ["boss", "alice"], futureField: 1 });

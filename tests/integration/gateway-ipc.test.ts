@@ -131,7 +131,7 @@ function inbound(content: string, extra: Record<string, unknown> = {}, sessionId
 			from: { userid: "user" },
 			chattype: "single",
 			msgtype: "text",
-			text: { content: `/wecom-aibot --sessionid ${sessionId} send --prompt ${content}` },
+			text: { content: `/wecom-aibot --session-id ${sessionId} send --prompt ${content}` },
 			...extra,
 		},
 	});
@@ -301,7 +301,7 @@ test("IPC carries a cancel request to the pi and returns its answer", async () =
 	const a = client("A", {}, { onRequest: (id, request) => requests.push({ id, request }) });
 	a.connection.start();
 	await until(() => a.connection.isReady(), "A ready");
-	messageFor("A", "/wecom-aibot --sessionid session-A cancel");
+	messageFor("A", "/wecom-aibot --session-id session-A cancel");
 	await until(() => requests.length === 1, "request delivered");
 	assert.equal(requests[0].request.action, "cancel");
 	a.connection.respond(requests[0].id, { ok: false, error: "这一轮已结束" });
@@ -344,7 +344,7 @@ test("IPC carries a target-only live-state query to just that pi and keeps no se
 	await until(() => a.connection.isReady() && b.connection.isReady(), "both ready");
 	const ws = FakeWebSocket.instances[0];
 	const replies = () => ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg");
-	messageFor("A", "/wecom-aibot --sessionid session-A");
+	messageFor("A", "/wecom-aibot --session-id session-A");
 	await until(() => replies().length === 1, "single-session busy reply");
 	assert.equal(
 		replies()[0].body.stream.content,
@@ -357,7 +357,7 @@ test("IPC carries a target-only live-state query to just that pi and keeps no se
 		].join("\n"),
 	);
 	busy = false;
-	messageFor("A", "/wecom-aibot --sessionid session-A");
+	messageFor("A", "/wecom-aibot --session-id session-A");
 	await until(() => replies().length === 2, "single-session idle reply");
 	assert.match(replies()[1].body.stream.content, /^· directory-A · provider-A · model-A · 空闲\n/);
 	messageFor("A", "/wecom-aibot cancel");
@@ -528,7 +528,7 @@ test("model metadata updates reach the session list", async () => {
 	assert.equal(list.button_selection.option_list[0].text, "new-direc… · on-A · 空闲");
 	assert.deepEqual(list.horizontal_content_list[0], { keyname: "空闲", value: "new-directory · on-A · new-model" });
 	// The list leaves the provider out; querying this ID still exposes its full metadata.
-	messageFor("A", "/wecom-aibot --sessionid session-A");
+	messageFor("A", "/wecom-aibot --session-id session-A");
 	const details = () => FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg");
 	await until(() => details().length > 0, "session details");
 	assert.match(details().at(-1).body.stream.content, /new-directory · new-provider · new-model · 空闲/);

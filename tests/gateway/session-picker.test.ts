@@ -124,20 +124,26 @@ test("no session online draws no list", () => {
 	assert.equal(sessionPicker([]), undefined);
 });
 
-test("only the list's keys are actions; every button of the lists before opens the control card", () => {
+test("only the list's own keys are actions: 打开会话 and 刷新列表 name their session, the pages their number", () => {
 	assert.deepEqual(pickerAction(`pick@show@${fingerprintOf(0)}`), { kind: "open", fingerprint: fingerprintOf(0) });
 	assert.deepEqual(pickerAction(`pick@refresh@${fingerprintOf(0)}`), {
 		kind: "refresh",
 		fingerprint: fingerprintOf(0),
 	});
-	for (const action of [CONTROL_KEYS.send, CONTROL_KEYS.model, CONTROL_KEYS.abort])
-		assert.deepEqual(pickerAction(`pick@${action}@${fingerprintOf(1)}`), {
-			kind: "open",
-			fingerprint: fingerprintOf(1),
-		});
-	assert.deepEqual(pickerAction("pick@abort"), { kind: "open" }, "the list before keys named no session");
 	assert.deepEqual(pickerAction("pick@next@12"), { kind: "page", page: 12 });
 	assert.deepEqual(pickerAction("pick@prev@0"), { kind: "page", page: 0 });
-	for (const key of ["pick@abort-confirm", "pick@page@1", "page@1", "card@session", "select@session", "send"])
+	for (const key of [
+		...[CONTROL_KEYS.send, CONTROL_KEYS.model, CONTROL_KEYS.abort].map(
+			(action) => `pick@${action}@${fingerprintOf(1)}`,
+		),
+		"pick@show",
+		"pick@abort",
+		"pick@abort-confirm",
+		"pick@page@1",
+		"page@1",
+		"card@session",
+		"select@session",
+		"send",
+	])
 		assert.equal(pickerAction(key), undefined, key);
 });
