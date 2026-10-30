@@ -15,46 +15,24 @@
 | 一台常开的电脑     | 关机、休眠或退出 pi 后机器人不再回复；同一个机器人同一时间只能在一台电脑、一个系统用户下连接         |
 | pi                 | 1.3.0 或更高                                                                                         |
 | Node.js            | 22.19.0 或更高，需要在 PATH 中                                                                       |
-| Git                | 从 Git 仓库或本地目录安装时需要                                                                      |
 | 企业微信智能机器人 | 已开启 API 模式、长连接，并取得 BotID 和 Secret；没有时按 [第 1 步](#第-1-步创建企业微信智能机器人) 创建 |
 
 ## 📦 安装
-
-三种方式都写入 pi 的全局设置（`~/.pi/agent/settings.json`），所有项目通用
-
-### 方式一：从 npm 安装（推荐）
 
 ```bash
 pi install npm:@cobia/pi-wecom-aibot
 ```
 
-pi 会从 npm 下载插件，并自动安装运行所需的依赖
+pi 会从 npm 下载插件并自动安装运行所需的依赖，写入 pi 的全局设置（`~/.pi/agent/settings.json`），所有项目通用
 
 > [!TIP]
 > 在末尾加 `@版本号` 可以固定版本，例如 `pi install npm:@cobia/pi-wecom-aibot@0.1.0`。固定后 `pi update` 和 `pi update <source>` 都不会改动它；换版本时用新版本号再执行一次 `pi install`
 
-### 方式二：从 Git 仓库安装
+以前从 Git 仓库或本地目录装过的，按下面的顺序换成 npm：
 
-```bash
-pi install git:github.com/cobia68/pi-wecom-aibot
-```
-
-pi 会把仓库克隆到 `~/.pi/agent/git/github.com/cobia68/pi-wecom-aibot`，并自动安装运行所需的依赖
-
-### 方式三：从本地目录安装
-
-适合先改代码再试用。pi 不会给本地目录安装依赖，需要自己装一次：
-
-```bash
-git clone https://github.com/cobia68/pi-wecom-aibot.git
-cd pi-wecom-aibot
-npm ci --omit=dev --legacy-peer-deps
-pi install .
-```
-
-- `npm ci` 这一步不能省：缺少依赖时 `/wecom-aibot` 命令照样出现，但后台网关启动不了，机器人连不上
-- pi 直接从这个目录加载插件，装好后不要移动或删除它
-- Windows 和 Linux 请各用一份克隆，不要共用同一个 `node_modules`
+1. 关闭所有使用这个机器人的 pi 窗口，共享网关会在最后一个窗口退出后约 1.5 秒自行结束
+2. 用 `pi list` 找到原来的来源，`pi remove <来源>` 删掉
+3. 执行上面的 `pi install`，再重新打开 pi，逐个执行 `/wecom-aibot connect`
 
 ### 检查安装
 
@@ -403,11 +381,9 @@ pi 主动推送的卡片都是控制卡（企业微信的 `button_interaction` �
 
 ### 升级
 
-| 安装方式 | 命令                                                                     |
-| :------- | :----------------------------------------------------------------------- |
-| npm      | `pi update npm:@cobia/pi-wecom-aibot`                                    |
-| Git 仓库 | `pi update git:github.com/cobia68/pi-wecom-aibot`                            |
-| 本地目录 | 在插件目录执行 `git pull`，再执行 `npm ci --omit=dev --legacy-peer-deps` |
+```bash
+pi update npm:@cobia/pi-wecom-aibot
+```
 
 `pi update <source>` 只更新这一个插件，等价于 `pi update --extension <source>`；`pi update --extensions` 更新所有已安装的插件；不带目标的 `pi update` 只更新 pi 本身。用 `@版本号` 固定过版本的，`pi update` 不会移动它，换版本要用新版本号再执行一次 `pi install`
 
@@ -424,9 +400,7 @@ pi 主动推送的卡片都是控制卡（企业微信的 `button_interaction` �
 ### 卸载
 
 1. 在 pi 中执行 `/wecom-aibot reset`，删除全局配置里的 BotID 和 Secret；在 session 覆盖里保存过凭据的，再删除 `~/.pi/agent/wecom-aibot/sessions/`
-2. 移除插件：
-   - Git 仓库：`pi remove git:github.com/cobia68/pi-wecom-aibot`，会一并删除克隆的仓库
-   - 本地目录：在插件目录执行 `pi remove .`，只取消登记，不删除目录
+2. 移除插件：`pi remove npm:@cobia/pi-wecom-aibot`，删除装好的插件，并从 pi 的设置里去掉
 3. 可选清理：各项目里的 `.pi-wecom-aibot-files/`，以及插件文件夹里的网关状态 `~/.pi/agent/wecom-aibot/gateway/` 和文档页记录 `session-doc.json`；在工作台撤销机器人的「文档」授权，按需在企业微信里删除「pi 会话文档」
 
 ## ❓ 常见问题
@@ -438,7 +412,7 @@ pi 主动推送的卡片都是控制卡（企业微信的 `button_interaction` �
 - 群聊中需要先 @机器人；没有引用的消息机器人会问发给哪个会话，只有发消息的人能选
 - 目标 pi 重新接入或网关重启后要重选，不会自动恢复上一次选择
 - 设置了白名单时，名单外的人发的消息会被直接忽略
-- 执行 `/wecom-aibot log` 查看运行记录。出现 `gateway process exited` 或 `gateway launch failed` 时，多半是本地目录安装漏了 `npm ci`，或 PATH 中找不到 Node.js
+- 执行 `/wecom-aibot log` 查看运行记录。出现 `gateway process exited` 或 `gateway launch failed` 时，多半是 PATH 中找不到 Node.js，或者安装没有完成；后一种重新执行一次 `pi install npm:@cobia/pi-wecom-aibot`
 
 </details>
 
@@ -510,7 +484,7 @@ pi 主动推送的卡片都是控制卡（企业微信的 `button_interaction` �
 
 扩展入口由 `package.json` 的 `pi.extensions` 声明为 `src/extension/index.ts`；如果原先直接指定根目录 `index.ts` 加载，请更新路径。按包安装的用户无需修改设置
 
-开发时需要安装完整依赖，不要使用 `--omit=dev`；Windows 和 Linux 各用独立的克隆及 `node_modules`：
+开发时需要安装完整依赖；Windows 和 Linux 各用独立的克隆及 `node_modules`：
 
 ```bash
 npm ci
