@@ -1,0 +1,267 @@
+name: 📦 发布到 npm
+
+# main 上 package.json 的 version 还不在 npm 上时：跑 npm run check，用 trusted publishing（OIDC）发布，
+# 给这个提交打 tag v<版本号>，再建 GitHub Release，列出上一个 tag 以来改了 npm 包内容的提交。
+# - 版本已经在 npm 上、但还没有 tag（例如第一版手动发布后）：只补 tag 和 Release，打在 npm 记录的提交上。
+# - 版本已经发布过，而 main 上 npm 包里的文件又改了：报错，要再提交一次改版本号。
+# - 包还不在 npm 上：只提示，不发布。trusted publishing 要在 npm 上包的设置页里配，包得先存在，所以第一版要手动发。
+# - 一次推送里有几个提交都改了版本号：只发 main 最新提交的版本，其他的在日志里列出来。
+"on":
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    name: 📦 发布到 npm
+    if: github.repository_owner == 'cobia68' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: 🧭 判断要不要发布
+        id: plan
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          name=$(node -p 'require("./package.json").name')
+          version=$(node -p 'require("./package.json").version')
+          tag="v$version"
+          echo "package.json: $name@$version"
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version 不是 SemVer：$version" >&2
+            exit 1
+          fi
+
+          url="https://registry.npmjs.org/$(node -p 'encodeURIComponent(process.argv[1]).replace(/^%40/, "@")' "$name")"
+          # 输出 "missing"，或 "<yes|no> <gitHead|-> <latest|->"
+          npm_info() {
+            local meta code
+            meta=$(mktemp)
+            if ! code=$(curl -sS --retry 3 -o "$meta" -w '%{http_code}' "$url"); then
+              echo "::error::查不了 npm：$url" >&2
+              return 1
+            fi
+            case "$code" in
+              200)
+                node -e '
+                  const meta = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+                  const v = (meta.versions || {})[process.argv[2]];
+                  console.log([v ? "yes" : "no", (v && v.gitHead) || "-", (meta["dist-tags"] || {}).latest || "-"].join(" "));
+                ' "$meta" "$version"
+                ;;
+              404) echo missing ;;
+              *)
+                echo "::error::查 npm 返回 HTTP $code：$url" >&2
+                return 1
+                ;;
+            esac
+            rm -f -- "$meta"
+          }
+
+          info=$(npm_info)
+          if [ "$info" = missing ]; then
+            echo "::notice::$name 还不在 npm 上，不发布。第一版要手动发：从 GitHub clone，npm ci、npm login、npm publish --access public；发完重跑这个 workflow 补 tag，再到 npmjs.com 给这个包配 trusted publisher。"
+            echo "action=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          read -r published git_head latest <<< "$info"
+          remote_tag=$(git ls-remote origin "refs/tags/$tag")
+          # tag 是发布成功后才打的；刚发布时 npm 可能还没显示新版本，等一会儿再查
+          for wait in 20 40; do
+            [ "$published" = yes ] || [ -z "$remote_tag" ] || { sleep "$wait"; read -r published git_head latest <<< "$(npm_info)"; }
+          done
+
+          if [ "$published" = yes ]; then
+            if [ -n "$remote_tag" ]; then
+              git fetch -q --force origin "refs/tags/$tag:refs/tags/$tag"
+              echo "$name@$version 已经发布，tag $tag 也在"
+              { echo "action=none"; echo "tag=$tag"; echo "version=$version"; echo "commit=$(git rev-parse "$tag^{commit}")"; } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            commit=$(git rev-parse HEAD)
+            if [ "$git_head" != - ] && git cat-file -e "$git_head^{commit}" 2>/dev/null && git merge-base --is-ancestor "$git_head" HEAD; then
+              commit=$git_head
+            else
+              echo "::warning::npm 上的 $name@$version 没有记录 main 上的提交（gitHead: $git_head），tag 打在 main 最新的提交上"
+            fi
+            echo "$name@$version 已经发布但没有 tag，补打 $tag → ${commit:0:7}"
+            { echo "action=tag"; echo "tag=$tag"; echo "version=$version"; echo "commit=$commit"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -n "$remote_tag" ]; then
+            echo "::error::tag $tag 已经存在，但 npm 上没有 $name@$version。tag 只应在发布成功后由这个 workflow 打，先查清楚是谁打的" >&2
+            exit 1
+          fi
+          if [ "$latest" != - ] && ! node -e '
+            const base = (v) => v.split("-")[0].split(".").map(Number);
+            const [a, b] = [base(process.argv[1]), base(process.argv[2])];
+            process.exit((a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) > 0 ? 0 : 1);
+          ' "$version" "$latest"; then
+            echo "::error::$version 不比 npm 上的 latest（$latest）大，按 AGENTS.md 的规则改版本号" >&2
+            exit 1
+          fi
+
+          if [ -n "${BEFORE:-}" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            versions=$(for c in "$BEFORE" $(git rev-list --reverse "$BEFORE..HEAD" -- package.json); do
+              git show "$c:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version'
+            done) || true
+            skipped=$(printf '%s\n' "$versions" | awk -v cur="$version" 'NR == 1 { first = $0; next } $0 != first && $0 != cur && !seen[$0]++' | tr '\n' ' ')
+            if [ -n "$skipped" ]; then
+              echo "::warning::这次推送里还有这些版本没有单独发布，它们的改动都在 $version 里：$skipped"
+            fi
+          fi
+
+          dist_tag=latest
+          case "$version" in *-*) dist_tag=next ;; esac
+          echo "发布 $name@$version（npm dist-tag: $dist_tag），然后打 tag $tag"
+          { echo "action=publish"; echo "tag=$tag"; echo "version=$version"; echo "commit=$(git rev-parse HEAD)"; echo "dist_tag=$dist_tag"; } >> "$GITHUB_OUTPUT"
+
+      - name: 🔎 检查
+        if: steps.plan.outputs.action == 'publish'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm run check
+
+      - name: 📦 发布
+        if: steps.plan.outputs.action == 'publish'
+        shell: bash
+        env:
+          DIST_TAG: ${{ steps.plan.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          npm_version=$(npm --version)
+          if [ "$(printf '%s\n' 11.5.1 "$npm_version" | sort -V | head -n 1)" != 11.5.1 ]; then
+            echo "::error::trusted publishing 要 npm >= 11.5.1，现在是 $npm_version" >&2
+            exit 1
+          fi
+          if ! npm publish --access public --tag "$DIST_TAG"; then
+            echo "::error::发布失败。如果是认证错误，检查 npmjs.com 上这个包的 trusted publisher：GitHub 用户 ${GITHUB_REPOSITORY%%/*}、仓库 ${GITHUB_REPOSITORY#*/}、workflow publish.yml，并允许 npm publish" >&2
+            exit 1
+          fi
+
+      - name: 🏷️ 打 tag
+        if: steps.plan.outputs.action == 'publish' || steps.plan.outputs.action == 'tag'
+        shell: bash
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          COMMIT: ${{ steps.plan.outputs.commit }}
+          GIT_COMMITTER_NAME: "github-actions[bot]"
+          GIT_COMMITTER_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com"
+        run: |
+          set -euo pipefail
+          git tag -a "$TAG" -m "$VERSION" "$COMMIT"
+          git push origin "refs/tags/$TAG"
+
+      - name: 📝 建 GitHub Release
+        if: steps.plan.outputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          COMMIT: ${{ steps.plan.outputs.commit }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已经有了"
+            exit 0
+          fi
+          # npm 包里会有的文件，按那个提交里的 package.json 算
+          pack_files() {
+            local dir
+            dir=$(mktemp -d)
+            git archive "$1" | tar -x -C "$dir"
+            (cd "$dir" && npm pack --dry-run --json --ignore-scripts 2>/dev/null) | node -e '
+              let j = JSON.parse(require("fs").readFileSync(0, "utf8"));
+              j = Array.isArray(j) ? j[0] : j.files ? j : Object.values(j)[0];
+              for (const f of j.files) console.log(f.path);'
+            rm -rf -- "$dir"
+          }
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$COMMIT^" 2>/dev/null || true)
+          mapfile -t files < <({ pack_files "$COMMIT"; [ -z "$prev" ] || pack_files "$prev"; } | sort -u)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::算不出 npm 包里有哪些文件" >&2
+            exit 1
+          fi
+          notes=$(git --literal-pathspecs log --format='- %s (%h)' "${prev:+$prev..}$COMMIT" -- "${files[@]}")
+          [ -n "$notes" ] || notes="- 没有改 npm 包内容的提交"
+          if [ -n "$prev" ]; then
+            notes="$notes"$'\n\n'"完整改动：$GITHUB_SERVER_URL/$GH_REPO/compare/$prev...$TAG"
+          fi
+          prerelease=()
+          case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$TAG" --verify-tag --title "$VERSION" --notes "$notes" "${prerelease[@]}"
+          echo "建了 Release $TAG"
+
+      - name: 🔍 核对 npm 包内容和版本号
+        if: steps.plan.outputs.action != 'publish' && steps.plan.outputs.commit != ''
+        shell: bash
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          COMMIT: ${{ steps.plan.outputs.commit }}
+        run: |
+          set -euo pipefail
+          if [ "$COMMIT" = "$(git rev-parse HEAD)" ]; then
+            echo "main 就是发布 $VERSION 的提交"
+            exit 0
+          fi
+          pack_files() {
+            local dir
+            dir=$(mktemp -d)
+            git archive "$1" | tar -x -C "$dir"
+            (cd "$dir" && npm pack --dry-run --json --ignore-scripts 2>/dev/null) | node -e '
+              let j = JSON.parse(require("fs").readFileSync(0, "utf8"));
+              j = Array.isArray(j) ? j[0] : j.files ? j : Object.values(j)[0];
+              for (const f of j.files) console.log(f.path);'
+            rm -rf -- "$dir"
+          }
+          # package.json 里 devDependencies 和 scripts 不影响装上的包
+          manifest() {
+            git show "$1:package.json" | node -e '
+              const m = JSON.parse(require("fs").readFileSync(0, "utf8"));
+              delete m.devDependencies;
+              delete m.scripts;
+              const sort = (v) => Array.isArray(v) ? v.map(sort) : v && typeof v === "object"
+                ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sort(v[k])])) : v;
+              console.log(JSON.stringify(sort(m)));'
+          }
+          mapfile -t files < <({ pack_files "$COMMIT"; pack_files HEAD; } | grep -v -x -F package.json | sort -u)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::算不出 npm 包里有哪些文件" >&2
+            exit 1
+          fi
+          changed=$(git --literal-pathspecs diff --name-only "$COMMIT" HEAD -- "${files[@]}")
+          if [ "$(manifest "$COMMIT")" != "$(manifest HEAD)" ]; then
+            changed=$(printf '%s\n%s\n' "$changed" package.json | sed '/^$/d')
+          fi
+          if [ -n "$changed" ]; then
+            echo "::error::$VERSION 发布以后，npm 包里的这些文件又改了，但版本号没改：$(echo "$changed" | tr '\n' ' ')。按 AGENTS.md 再提交一次改版本号" >&2
+            exit 1
+          fi
+          echo "$VERSION 发布以后，npm 包里的文件没改"
