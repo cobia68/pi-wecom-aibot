@@ -284,13 +284,13 @@ function mask(value: string): string {
 // ---------------------------------------------------------------------- main
 
 const options = parseArgs(process.argv.slice(2));
-const config = readConfig(options.configPath);
 
 if (options.dryRun) {
 	for (const kind of options.kinds) console.log(JSON.stringify(BUILDERS[kind](taskIdOf(kind)), null, 2));
 	process.exit(0);
 }
 
+const config = readConfig(options.configPath);
 if (!config.botId || !config.secret) throw new Error(`${options.configPath} 缺少 botId 或 secret`);
 if (!options.target)
 	throw new Error("没有推送目标：用 --target 指定，或先 /wecom-aibot config --scope global edit 设置默认推送目标");
