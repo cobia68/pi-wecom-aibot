@@ -15,14 +15,25 @@
 | 一台常开的电脑     | 关机、休眠或退出 pi 后机器人不再回复；同一个机器人同一时间只能在一台电脑、一个系统用户下连接         |
 | pi                 | 1.3.0 或更高                                                                                         |
 | Node.js            | 22.19.0 或更高，需要在 PATH 中                                                                       |
-| Git                | 用于克隆插件仓库                                                                                     |
+| Git                | 从 Git 仓库或本地目录安装时需要                                                                      |
 | 企业微信智能机器人 | 已开启 API 模式、长连接，并取得 BotID 和 Secret；没有时按 [第 1 步](#第-1-步创建企业微信智能机器人) 创建 |
 
 ## 📦 安装
 
-插件还没有发布到 npm，从 Git 仓库或本地目录安装。两种方式都写入 pi 的全局设置（`~/.pi/agent/settings.json`），所有项目通用
+三种方式都写入 pi 的全局设置（`~/.pi/agent/settings.json`），所有项目通用
 
-### 方式一：从 Git 仓库安装（推荐）
+### 方式一：从 npm 安装（推荐）
+
+```bash
+pi install npm:@cobia/pi-wecom-aibot
+```
+
+pi 会从 npm 下载插件，并自动安装运行所需的依赖
+
+> [!TIP]
+> 在末尾加 `@版本号` 可以固定版本，例如 `pi install npm:@cobia/pi-wecom-aibot@0.1.0`。固定后 `pi update` 和 `pi update <source>` 都不会改动它；换版本时用新版本号再执行一次 `pi install`
+
+### 方式二：从 Git 仓库安装
 
 ```bash
 pi install git:github.com/cobia68/pi-wecom-aibot
@@ -30,10 +41,7 @@ pi install git:github.com/cobia68/pi-wecom-aibot
 
 pi 会把仓库克隆到 `~/.pi/agent/git/github.com/cobia68/pi-wecom-aibot`，并自动安装运行所需的依赖
 
-> [!TIP]
-> 在末尾加 `@标签` 可以固定版本，例如 `pi install git:github.com/cobia68/pi-wecom-aibot@v0.1.0`。固定后 `pi update` 和 `pi update <source>` 都不会改动它；换版本时用新标签再执行一次 `pi install`。请用标签而不是缩写的 commit 号，否则之后的 `pi update` 会失败
-
-### 方式二：从本地目录安装
+### 方式三：从本地目录安装
 
 适合先改代码再试用。pi 不会给本地目录安装依赖，需要自己装一次：
 
@@ -397,10 +405,11 @@ pi 主动推送的卡片都是控制卡（企业微信的 `button_interaction` �
 
 | 安装方式 | 命令                                                                     |
 | :------- | :----------------------------------------------------------------------- |
+| npm      | `pi update npm:@cobia/pi-wecom-aibot`                                    |
 | Git 仓库 | `pi update git:github.com/cobia68/pi-wecom-aibot`                            |
 | 本地目录 | 在插件目录执行 `git pull`，再执行 `npm ci --omit=dev --legacy-peer-deps` |
 
-`pi update <source>` 只更新这一个插件，等价于 `pi update --extension <source>`；`pi update --extensions` 更新所有已安装的插件；不带目标的 `pi update` 只更新 pi 本身。用 `@标签` 固定过版本的，`pi update` 不会移动它，换版本要用新标签再执行一次 `pi install`
+`pi update <source>` 只更新这一个插件，等价于 `pi update --extension <source>`；`pi update --extensions` 更新所有已安装的插件；不带目标的 `pi update` 只更新 pi 本身。用 `@版本号` 固定过版本的，`pi update` 不会移动它，换版本要用新版本号再执行一次 `pi install`
 
 升级不迁移旧版本的配置、记录和卡片，一律以当前版本为准：
 
