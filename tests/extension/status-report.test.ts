@@ -28,7 +28,7 @@ const OVERRIDES = "/agent/wecom-aibot/sessions/01a16197-cae8-75c6-baef-042069d29
 
 function snapshot(overrides: Partial<StatusSnapshot> = {}): StatusSnapshot {
 	return {
-		resolved: mergeLayers(GLOBAL, undefined),
+		resolved: mergeLayers({ global: GLOBAL }),
 		pendingReconnect: false,
 		source: SOURCE,
 		overrideFile: OVERRIDES,
@@ -78,7 +78,7 @@ test("a session that has not connected reads as one headline and one aligned tab
 			"  模型      cline · deepseek",
 			"  工作目录  pi-wecom-aibot",
 			"",
-			"  通知范围  all-runs（global）",
+			"  通知范围  all-runs（全局）",
 			"  提示词    无（内置默认值）",
 			"  会话文档  未配置",
 			"",
@@ -92,7 +92,7 @@ test("a session that has not connected reads as one headline and one aligned tab
 test("a registration adds the gateway and task rows and shows what it uses, not what the files say", () => {
 	const text = statusReport(
 		snapshot({
-			resolved: mergeLayers({ ...GLOBAL, defaultChatId: "new-user" }, undefined),
+			resolved: mergeLayers({ global: { ...GLOBAL, defaultChatId: "new-user" } }),
 			pendingReconnect: true,
 			bridge: bridge({
 				state: "subscribed",
@@ -121,7 +121,7 @@ test("a registration adds the gateway and task rows and shows what it uses, not 
 });
 
 test("each connection state has its own icon, and the headline names the next step only when one is needed", () => {
-	const noTarget = mergeLayers({ botId: "bot-id-1234", secret: "s" }, undefined);
+	const noTarget = mergeLayers({ global: { botId: "bot-id-1234", secret: "s" } });
 	const cases: [string, Partial<StatusSnapshot>, string][] = [
 		["fresh session", {}, "💤 企业微信智能机器人：未接入，每个 session 需运行 /wecom-aibot connect"],
 		[
@@ -131,8 +131,8 @@ test("each connection state has its own icon, and the headline names the next st
 		],
 		[
 			"no credentials",
-			{ resolved: mergeLayers(undefined, undefined), stopReason: "reset" },
-			"💤 企业微信智能机器人：未接入（配置已删除），先运行 /wecom-aibot config --scope global edit 填写凭据",
+			{ resolved: mergeLayers({}), stopReason: "reset" },
+			"💤 企业微信智能机器人：未接入（配置已删除），先运行 /wecom-aibot config edit 填写凭据",
 		],
 		[
 			"no target",
@@ -217,11 +217,14 @@ test("files that cannot be used keep the session, the paths and no guessed setti
 });
 
 test("settings name the layer they come from, and the override row names the overridden fields", () => {
-	const resolved = mergeLayers(GLOBAL, { defaultChatId: "group-id", defaultChatType: 2, controlPrompts: ["继续"] });
+	const resolved = mergeLayers({
+		global: GLOBAL,
+		session: { defaultChatId: "group-id", defaultChatType: 2, controlPrompts: ["继续"] },
+	});
 	const lines = statusReport(snapshot({ resolved })).split("\n");
 	assert.ok(lines.includes("  默认推送  group-id（群聊）"));
 	assert.ok(lines.includes("  提示词    「继续」（session）"));
-	assert.ok(lines.includes("  通知范围  all-runs（global）"));
+	assert.ok(lines.includes("  通知范围  all-runs（全局）"));
 	assert.ok(lines.includes("  会话覆盖  defaultChatId、defaultChatType、controlPrompts"));
 });
 
@@ -250,4 +253,20 @@ test("an upstream diagnostic stays on the headline line without terminal control
 	assert.equal(text.split("\n")[0], "⏳ 企业微信智能机器人：正在重连（outage second line）");
 	assert.equal(stripVTControlCharacters(text), text);
 	assert.doesNotMatch(text, /\x1b|\t/);
+});
+
+test("the project row names the fields the working directory decides, like the session row", () => {
+	const projectFile = "/agent/wecom-aibot/projects/--home-me-repo--.json";
+	const resolved = mergeLayers({
+		global: GLOBAL,
+		project: { notificationScope: "wecom-tasks", controlPrompts: ["部署"] },
+		session: { controlPrompts: ["继续"] },
+	});
+	const lines = statusReport(snapshot({ resolved, projectFile })).split("\n");
+	assert.ok(lines.includes("  通知范围  wecom-tasks（项目级）"));
+	assert.ok(lines.includes("  项目级    notificationScope"), "a field the session overrides is the session's");
+	assert.ok(lines.includes("  会话覆盖  controlPrompts"));
+	const unreadable = statusReport(snapshot({ resolved: undefined, projectFile })).split("\n");
+	assert.ok(unreadable.includes(`  项目级    ${projectFile}`));
+	assert.ok(!statusReport(snapshot()).includes("项目级"), "no row before pi started a session");
 });

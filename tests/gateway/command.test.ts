@@ -161,12 +161,21 @@ test("unknown actions still list the available ones, with or without a target", 
 	}
 });
 
-test("the command prefix and actions remain case-insensitive", () => {
-	assert.deepEqual(parseWeComCommand(` /WECOM-AIBOT --session-id ${ID} SEND --prompt x`), {
+test("the command prefix, actions and options are case-sensitive, like pi's own command names", () => {
+	assert.deepEqual(parseWeComCommand(`/wecom-aibot --session-id ${ID} send --prompt x`), {
 		kind: "send",
 		sessionId: ID,
 		prompt: "x",
 	});
+	// Another case of the prefix is no command: the message is an ordinary one, handled like any other.
+	assert.deepEqual(parseWeComCommand(` /WECOM-AIBOT --session-id ${ID} send --prompt x`), { kind: "none" });
+	assert.deepEqual(parseWeComCommand("/Wecom-aibot sessions"), { kind: "none" });
+	assert.equal(
+		errorOf(`/wecom-aibot --session-id ${ID} SEND --prompt x`),
+		"未知子命令 SEND。可用子命令：sessions、send、card、cancel",
+	);
+	assert.equal(errorOf("/wecom-aibot Sessions"), "未知子命令 Sessions。可用子命令：sessions、send、card、cancel");
+	assert.match(errorOf(`/wecom-aibot --SESSION-ID ${ID} card`), /^未知选项 --SESSION-ID/);
 });
 
 test("a repeated target option before --prompt is refused", () => {

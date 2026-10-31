@@ -8,7 +8,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { WeComState } from "../shared/wecom-protocol.ts";
 import type { BridgeSession } from "./bridge-session.ts";
 import { table } from "./commands.ts";
-import { CONFIG_FILE, connectionOf, FIELDS, type Resolved } from "./config.ts";
+import { CONFIG_FILE, connectionOf, FIELDS, type Resolved, type Source } from "./config.ts";
 import { describe, display } from "./config-display.ts";
 
 export type ReportedBridge = Pick<
@@ -36,6 +36,8 @@ export interface StatusSnapshot {
 	pendingReconnect: boolean;
 	source: { sessionId: string; provider: string; modelName: string; directoryName: string };
 	/** This session's override file; undefined before pi started a session. */
+	/** This working directory's override file; undefined before pi started a session. */
+	projectFile?: string;
 	overrideFile?: string;
 }
 
@@ -121,7 +123,7 @@ function oneLine(text: string): string {
 function nextStep(resolved: Resolved | undefined): string | undefined {
 	if (!resolved) return undefined;
 	const connection = connectionOf(resolved);
-	if (!connection) return "先运行 /wecom-aibot config --scope global edit 填写凭据";
+	if (!connection) return "先运行 /wecom-aibot config edit 填写凭据";
 	if (!connection.target) return "先运行 /wecom-aibot config --scope global whoami 识别默认推送目标";
 	return "每个 session 需运行 /wecom-aibot connect";
 }
@@ -161,14 +163,16 @@ function settingRows({ resolved }: StatusSnapshot): [string, string][] {
 	];
 }
 
-function fileRows({ resolved, overrideFile }: StatusSnapshot): [string, string][] {
+/** An override layer's row: the fields it decides now, or its file when the configuration cannot be read. */
+function fileRows({ resolved, projectFile, overrideFile }: StatusSnapshot): [string, string][] {
 	const rows: [string, string][] = [["配置文件", CONFIG_FILE]];
-	if (overrideFile === undefined) return rows;
-	if (!resolved) rows.push(["会话覆盖", overrideFile]);
-	else {
-		const overridden = FIELDS.filter((spec) => resolved.sources[spec.name] === "session").map((spec) => spec.name);
-		rows.push(["会话覆盖", overridden.length ? overridden.join("、") : "无"]);
-	}
+	const layer = (label: string, file: string | undefined, source: Source) => {
+		if (file === undefined) return;
+		const decided = FIELDS.filter((spec) => resolved?.sources[spec.name] === source).map((spec) => spec.name);
+		rows.push([label, !resolved ? file : decided.length ? decided.join("、") : "无"]);
+	};
+	layer("项目级", projectFile, "project");
+	layer("会话覆盖", overrideFile, "session");
 	return rows;
 }
 

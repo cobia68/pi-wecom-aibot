@@ -231,7 +231,7 @@ test("the footer stays empty when unconfigured; connect explains that configurat
 	await h.command("connect");
 	assert.equal(h.clients.length, 0);
 	assert.deepEqual(h.changes, []);
-	assert.match(h.notices.at(-1)!, /尚未配置.*\/wecom-aibot config --scope global edit/);
+	assert.match(h.notices.at(-1)!, /尚未配置.*\/wecom-aibot config edit$/);
 });
 
 test("a saved connection change keeps the name green and adds a pending reconnection until connect", async () => {

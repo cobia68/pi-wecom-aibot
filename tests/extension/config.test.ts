@@ -20,6 +20,7 @@ const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = sandbox;
 const {
 	CONFIG_FILE,
+	PROJECTS_DIR,
 	SESSIONS_DIR,
 	SessionConfig,
 	clearConfig,
@@ -27,6 +28,7 @@ const {
 	connectionOf,
 	layerFile,
 	mergeLayers,
+	projectFileName,
 	parseAssignments,
 	applyPromptsEdit,
 	parseRemovals,
@@ -39,6 +41,7 @@ const readJson = (file = CONFIG_FILE) => JSON.parse(readFileSync(file, "utf8"));
 const bot = { botId: "bot", secret: "secret" };
 const PARENT = "11111111-2222-4333-8444-555555555555";
 const CHILD = "66666666-7777-4888-9999-aaaaaaaaaaaa";
+const PROJECT = join(sandbox, "repo");
 
 /** A pi session file whose header names `id`, as the parent of a fork. */
 function sessionFile(id: string): string {
@@ -47,9 +50,9 @@ function sessionFile(id: string): string {
 	return file;
 }
 
-function sessionConfig(id: string, parent?: string) {
+function sessionConfig(id: string, parent?: string, cwd = PROJECT) {
 	const reports: { message: string; type: string }[] = [];
-	const config = new SessionConfig(id, parent, (message, type) => reports.push({ message, type }));
+	const config = new SessionConfig(id, cwd, parent, (message, type) => reports.push({ message, type }));
 	return { config, reports };
 }
 
@@ -58,6 +61,7 @@ beforeEach(() => {
 	// Only the link itself when the file is a symlink.
 	rmSync(CONFIG_FILE, { force: true });
 	rmSync(SESSIONS_DIR, { recursive: true, force: true });
+	rmSync(PROJECTS_DIR, { recursive: true, force: true });
 });
 
 after(() => {
@@ -96,18 +100,33 @@ test("every stored field is validated with its name and file, groups as groups",
 	assert.throws(() => readLayer({ session: CHILD }), /allowedUserIds.*只能写在全局配置/);
 });
 
-test("fields the layer does not know are ignored by reads and kept by saves", () => {
-	writeFileSync(CONFIG_FILE, JSON.stringify({ ...bot, notificationMode: "screenshot", futureField: 1 }));
+test("a key the layer does not know makes the file unusable, like a value it cannot use; nothing is written", () => {
+	writeFileSync(
+		CONFIG_FILE,
+		JSON.stringify({ ...bot, notificationMode: "screenshot", NotificationScope: "all-runs" }),
+	);
+	assert.throws(
+		() => readLayer("global"),
+		(error: Error) =>
+			error.message ===
+			`配置文件 ${CONFIG_FILE} 有不认识的字段 notificationMode、NotificationScope；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、controlPrompts、docMcpUrl、allowedUserIds`,
+	);
+	const before = readFileSync(CONFIG_FILE, "utf8");
+	assert.throws(
+		() => patchLayer("global", { set: { notificationScope: "all-runs" } }),
+		/不认识的字段 notificationMode/,
+	);
+	assert.throws(() => addAllowedUser("alice"), /不认识的字段 notificationMode/);
+	assert.equal(readFileSync(CONFIG_FILE, "utf8"), before, "never written over");
+	// An override file lists the fields it may hold; the editor's $schema line is no field and is allowed anywhere.
+	mkdirSync(SESSIONS_DIR, { recursive: true });
+	writeFileSync(layerFile({ session: CHILD }), JSON.stringify({ colour: "red" }));
+	assert.throws(
+		() => readLayer({ session: CHILD }),
+		/有不认识的字段 colour；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、controlPrompts$/,
+	);
+	writeFileSync(CONFIG_FILE, JSON.stringify({ $schema: "schema-url", ...bot }));
 	assert.deepEqual(readLayer("global"), bot);
-	const { values } = mergeLayers(readLayer("global"), undefined);
-	assert.equal(Object.hasOwn(values, "notificationMode"), false, "an unknown field never reaches the settings");
-	patchLayer("global", { set: { notificationScope: "all-runs" } });
-	assert.deepEqual(readJson(), {
-		...bot,
-		notificationMode: "screenshot",
-		futureField: 1,
-		notificationScope: "all-runs",
-	});
 });
 
 test("a missing file is no layer, while an unreadable one is an error naming it", () => {
@@ -125,20 +144,20 @@ test("a missing file is no layer, while an unreadable one is an error naming it"
 	assert.equal(readFileSync(CONFIG_FILE, "utf8"), '{ "botId": "bot", ', "a corrupt file is never overwritten");
 });
 
-test("patchLayer merges into the file as it is now, keeping hand edits and unknown fields", () => {
-	writeFileSync(CONFIG_FILE, JSON.stringify({ ...bot, allowedUserIds: ["boss"], futureField: { kept: true } }));
+test("patchLayer merges into the file as it is now, keeping hand edits", () => {
+	writeFileSync(CONFIG_FILE, JSON.stringify({ $schema: "schema-url", ...bot, allowedUserIds: ["boss"] }));
 	const layer = patchLayer("global", { set: { defaultChatId: "boss", defaultChatType: 1 } });
 	assert.deepEqual(layer.allowedUserIds, ["boss"]);
-	assert.equal(Object.hasOwn(layer, "futureField"), false, "unknown fields never reach the configuration");
+	assert.equal(Object.hasOwn(layer, "$schema"), false, "the editor's line never reaches the configuration");
 	assert.deepEqual(readJson(), {
+		$schema: "schema-url",
 		...bot,
 		allowedUserIds: ["boss"],
-		futureField: { kept: true },
 		defaultChatId: "boss",
 		defaultChatType: 1,
 	});
 	patchLayer("global", { remove: ["defaultChatId", "defaultChatType"] });
-	assert.deepEqual(readJson(), { ...bot, allowedUserIds: ["boss"], futureField: { kept: true } });
+	assert.deepEqual(readJson(), { $schema: "schema-url", ...bot, allowedUserIds: ["boss"] });
 	assert.deepEqual(
 		readdirSync(dirname(CONFIG_FILE)).filter((name) => name.endsWith(".tmp")),
 		[],
@@ -185,7 +204,7 @@ test("built-in default < global < session, and a group comes whole from one laye
 		defaultChatType: 2 as const,
 		notificationScope: "all-runs" as const,
 	};
-	const merged = mergeLayers(global, { notificationScope: "wecom-tasks", defaultChatId: "boss" });
+	const merged = mergeLayers({ global, session: { notificationScope: "wecom-tasks", defaultChatId: "boss" } });
 	assert.deepEqual(merged.values, {
 		notificationScope: "wecom-tasks",
 		controlPrompts: [],
@@ -206,38 +225,38 @@ test("built-in default < global < session, and a group comes whole from one laye
 	writeFileSync(CONFIG_FILE, JSON.stringify({ ...bot, defaultChatId: "boss" }));
 	assert.deepEqual(readLayer("global"), { ...bot, defaultChatId: "boss" });
 	// A value equal to the default is still the global layer's.
-	assert.equal(mergeLayers({ notificationScope: "wecom-tasks" }, undefined).sources.notificationScope, "global");
-	assert.equal(mergeLayers(undefined, undefined).values.botId, undefined);
+	assert.equal(mergeLayers({ global: { notificationScope: "wecom-tasks" } }).sources.notificationScope, "global");
+	assert.equal(mergeLayers({}).values.botId, undefined);
 });
 
 test("the connection key covers credentials, target and allowlist, never the settings", () => {
 	const target = { defaultChatId: "boss", defaultChatType: 1 as const };
-	const base = mergeLayers({ ...bot, ...target, allowedUserIds: ["boss"] }, undefined);
+	const base = mergeLayers({ global: { ...bot, ...target, allowedUserIds: ["boss"] } });
 	const key = connectionKey(connectionOf(base));
 	assert.equal(
 		connectionKey(
 			connectionOf(
-				mergeLayers(
-					{ ...bot, ...target, allowedUserIds: ["boss"] },
-					{ notificationScope: "all-runs", controlPrompts: ["继续"] },
-				),
+				mergeLayers({
+					global: { ...bot, ...target, allowedUserIds: ["boss"] },
+					session: { notificationScope: "all-runs", controlPrompts: ["继续"] },
+				}),
 			),
 		),
 		key,
 	);
-	assert.notEqual(connectionKey(connectionOf(mergeLayers({ ...bot, ...target }, undefined))), key);
+	assert.notEqual(connectionKey(connectionOf(mergeLayers({ global: { ...bot, ...target } }))), key);
 	assert.notEqual(
 		connectionKey(
 			connectionOf(
-				mergeLayers(
-					{ ...bot, ...target, allowedUserIds: ["boss"] },
-					{ defaultChatId: "other", defaultChatType: 1 },
-				),
+				mergeLayers({
+					global: { ...bot, ...target, allowedUserIds: ["boss"] },
+					session: { defaultChatId: "other", defaultChatType: 1 },
+				}),
 			),
 		),
 		key,
 	);
-	assert.equal(connectionOf(mergeLayers(target, undefined)), undefined, "no credentials, no connection");
+	assert.equal(connectionOf(mergeLayers({ global: target })), undefined, "no credentials, no connection");
 	assert.equal(connectionKey(undefined), "");
 });
 
@@ -257,7 +276,7 @@ test("a session reads both layers fresh and keeps its own overrides out of the g
 	writeLayer("global", { ...bot, defaultChatId: "boss", notificationScope: "wecom-tasks" });
 	const { config } = sessionConfig(CHILD);
 	assert.equal(config.read().values.notificationScope, "wecom-tasks");
-	config.patch({ set: { notificationScope: "all-runs" } });
+	config.patch("session", { set: { notificationScope: "all-runs" } });
 	assert.deepEqual(readJson(layerFile({ session: CHILD })), { notificationScope: "all-runs" });
 	assert.equal(readJson().notificationScope, "wecom-tasks");
 	// Another window edits the global file: the next read sees it, the session override still wins.
@@ -311,7 +330,7 @@ test("a fork takes over its parent's overrides once, then the two sessions evolv
 	assert.equal(sessionConfig(CHILD, parent).config.read().values.notificationScope, "all-runs");
 	assert.equal(reports.length, 1);
 	// Removing every override keeps the (empty) file, so the parent is never copied again.
-	config.patch({ remove: ["defaultChatId", "defaultChatType", "notificationScope"] });
+	config.patch("session", { remove: ["defaultChatId", "defaultChatType", "notificationScope"] });
 	assert.deepEqual(readJson(layerFile({ session: CHILD })), {});
 	assert.equal(sessionConfig(CHILD, parent).config.read().values.defaultChatId, "team-group");
 });
@@ -339,7 +358,7 @@ test("a broken parent layer is an error, never a silent fall back to the global 
 		(error: Error) => error.message.includes(layerFile({ session: PARENT })),
 	);
 	assert.throws(
-		() => config.patch({ set: { notificationScope: "all-runs" } }),
+		() => config.patch("session", { set: { notificationScope: "all-runs" } }),
 		/JSON/,
 		"nor can its own layer be written",
 	);
@@ -353,8 +372,15 @@ test("a broken parent layer is an error, never a silent fall back to the global 
 });
 
 test("set tokens are checked together: every problem is reported and nothing is half-applied", () => {
-	assert.deepEqual(parseAssignments(["NotificationScope=ALL-RUNS", "controlprompts=继续"]), {
+	assert.deepEqual(parseAssignments(["notificationScope=all-runs", "controlPrompts=继续"]), {
 		set: { notificationScope: "all-runs", controlPrompts: ["继续"] },
+	});
+	// Field names and values are case-sensitive, as the file writes them.
+	assert.deepEqual(parseAssignments(["NotificationScope=all-runs", "notificationScope=ALL-RUNS"]), {
+		problems: [
+			"未知字段 NotificationScope；可用字段：defaultChatId、defaultChatType、notificationScope、controlPrompts",
+			"notificationScope 只能是 wecom-tasks、all-runs",
+		],
 	});
 	assert.deepEqual(parseAssignments(["defaultChatId=group_chat", "defaultChatType=2"]), {
 		set: { defaultChatId: "group_chat", defaultChatType: 2 },
@@ -390,7 +416,7 @@ test("set tokens are checked together: every problem is reported and nothing is 
 });
 
 test("unset takes field names and removes whole groups", () => {
-	assert.deepEqual(parseRemovals(["defaultChatType", "NOTIFICATIONSCOPE"]), {
+	assert.deepEqual(parseRemovals(["defaultChatType", "notificationScope"]), {
 		remove: ["defaultChatId", "defaultChatType", "notificationScope"],
 	});
 	assert.deepEqual(parseRemovals(["secret"]), { remove: ["botId", "secret"] });
@@ -402,10 +428,10 @@ test("unset takes field names and removes whole groups", () => {
 });
 
 test("whoami's 加入白名单 adds one userid to the global file and keeps everything else in it", () => {
-	writeFileSync(CONFIG_FILE, JSON.stringify({ ...bot, allowedUserIds: ["boss"], futureField: 1 }));
+	writeFileSync(CONFIG_FILE, JSON.stringify({ ...bot, allowedUserIds: ["boss"], notificationScope: "all-runs" }));
 	addAllowedUser("alice");
 	addAllowedUser("alice");
-	assert.deepEqual(readJson(), { ...bot, allowedUserIds: ["boss", "alice"], futureField: 1 });
+	assert.deepEqual(readJson(), { ...bot, allowedUserIds: ["boss", "alice"], notificationScope: "all-runs" });
 });
 
 test("clearConfig removes the global file only, and never hides a real deletion error", (t) => {
@@ -430,17 +456,17 @@ test("the document address is global only, never settable by command, and must b
 	const url = "https://qyapi.weixin.qq.com/mcp/v2/bot/doc?apikey=key-0123456789";
 	patchLayer("global", { set: { docMcpUrl: url } });
 	assert.equal(readLayer("global")?.docMcpUrl, url);
-	assert.equal(mergeLayers(readLayer("global"), undefined).values.docMcpUrl, url);
+	assert.equal(mergeLayers({ global: readLayer("global") }).values.docMcpUrl, url);
 	assert.throws(() => patchLayer({ session: CHILD }, { set: { docMcpUrl: url } }), /docMcpUrl.*只能写在全局配置/);
 	assert.throws(() => patchLayer("global", { set: { docMcpUrl: "http://qyapi.weixin.qq.com/mcp" } }), /https/);
 	assert.throws(() => patchLayer("global", { set: { docMcpUrl: "https://example.com/mcp" } }), /qq\.com/);
 	const result = parseAssignments([`docMcpUrl=${url}`]);
 	assert.ok("problems" in result);
-	assert.match(result.problems.join("\n"), /docMcpUrl 只能用 \/wecom-aibot config --scope global edit/);
-	assert.deepEqual(parseRemovals(["docmcpurl"]), { remove: ["docMcpUrl"] });
+	assert.match(result.problems.join("\n"), /docMcpUrl 只能用 \/wecom-aibot config edit 输入/);
+	assert.deepEqual(parseRemovals(["docMcpUrl"]), { remove: ["docMcpUrl"] });
 	assert.equal(
-		connectionKey(connectionOf(mergeLayers({ ...bot, docMcpUrl: url }, undefined))),
-		connectionKey(connectionOf(mergeLayers(bot, undefined))),
+		connectionKey(connectionOf(mergeLayers({ global: { ...bot, docMcpUrl: url } }))),
+		connectionKey(connectionOf(mergeLayers({ global: bot }))),
 		"the address is not part of a registration",
 	);
 });
@@ -450,7 +476,7 @@ test("controlPrompts+= and -= name the prompts to add or take out; only controlP
 		set: {},
 		prompts: { op: "add", prompts: ["部署", "提交"] },
 	});
-	assert.deepEqual(parseAssignments(["ControlPrompts-=运行测试", "notificationScope=all-runs"]), {
+	assert.deepEqual(parseAssignments(["controlPrompts-=运行测试", "notificationScope=all-runs"]), {
 		set: { notificationScope: "all-runs" },
 		prompts: { op: "remove", prompts: ["运行测试"] },
 	});
@@ -507,7 +533,7 @@ test("controlPrompts is a list: comma-separated in set, checked the same way in 
 	}
 	patchLayer("global", { set: { controlPrompts: ["继续", "运行测试"] } });
 	assert.deepEqual(readJson().controlPrompts, ["继续", "运行测试"], "a JSON array in the file");
-	const merged = mergeLayers(readLayer("global"), { controlPrompts: ["只在这个 session"] });
+	const merged = mergeLayers({ global: readLayer("global"), session: { controlPrompts: ["只在这个 session"] } });
 	assert.deepEqual(merged.values.controlPrompts, ["只在这个 session"]);
 	assert.equal(merged.sources.controlPrompts, "session");
 	// A hand edit is checked like a typed one, naming the field and the file.
@@ -515,10 +541,64 @@ test("controlPrompts is a list: comma-separated in set, checked the same way in 
 	assert.throws(() => readLayer("global"), /controlPrompts 无效：必须是提示词字符串组成的数组/);
 	writeFileSync(CONFIG_FILE, JSON.stringify({ controlPrompts: ["继续\n运行测试"] }));
 	assert.throws(() => readLayer("global"), /第 1 条含换行或控制字符/);
-	assert.deepEqual(parseRemovals(["controlprompts"]), { remove: ["controlPrompts"] });
+	assert.deepEqual(parseRemovals(["controlPrompts"]), { remove: ["controlPrompts"] });
+	assert.deepEqual(parseRemovals(["controlprompts"]), {
+		problems: [
+			"未知字段 controlprompts；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、controlPrompts、docMcpUrl",
+		],
+	});
 	// No built-in prompts; an empty list is a valid override, and the default is a fresh copy each time.
-	assert.deepEqual(mergeLayers({ controlPrompts: ["继续"] }, { controlPrompts: [] }).values.controlPrompts, []);
-	const first = mergeLayers(undefined, undefined).values.controlPrompts;
+	assert.deepEqual(
+		mergeLayers({ global: { controlPrompts: ["继续"] }, session: { controlPrompts: [] } }).values.controlPrompts,
+		[],
+	);
+	const first = mergeLayers({}).values.controlPrompts;
 	first.push("x");
-	assert.deepEqual(mergeLayers(undefined, undefined).values.controlPrompts, []);
+	assert.deepEqual(mergeLayers({}).values.controlPrompts, []);
+});
+
+test("a working directory's overrides sit between global and session; a group comes whole from one layer", () => {
+	writeLayer("global", { ...bot, defaultChatId: "me", notificationScope: "wecom-tasks", controlPrompts: ["继续"] });
+	writeLayer({ project: PROJECT }, { defaultChatId: "team", defaultChatType: 2, notificationScope: "all-runs" });
+	const { config } = sessionConfig(CHILD);
+	config.patch("session", { set: { notificationScope: "wecom-tasks" } });
+	const { values, sources } = config.read();
+	assert.deepEqual([values.defaultChatId, values.defaultChatType, sources.defaultChatType], ["team", 2, "project"]);
+	assert.deepEqual([values.notificationScope, sources.notificationScope], ["wecom-tasks", "session"]);
+	assert.deepEqual([values.controlPrompts, sources.controlPrompts, sources.botId], [["继续"], "global", "global"]);
+	// What a layer and the ones below resolve to, and what it inherits.
+	assert.equal(config.upTo("project").values.notificationScope, "all-runs");
+	assert.equal(config.below("project").values.defaultChatId, "me");
+	assert.equal(config.below("session").values.defaultChatId, "team");
+	// Another session in the same directory shares the layer; another directory has none.
+	assert.equal(sessionConfig(PARENT).config.read().values.defaultChatId, "team");
+	assert.equal(sessionConfig(PARENT, undefined, join(sandbox, "other")).config.read().values.defaultChatId, "me");
+});
+
+test("the project layer is named after the directory the way pi names its session folders, and is private", () => {
+	assert.equal(projectFileName("/home/me/repo"), "--home-me-repo--");
+	assert.equal(projectFileName("C:\\code\\repo"), "--C--code-repo--");
+	assert.equal(layerFile({ project: "/home/me/repo" }), join(PROJECTS_DIR, "--home-me-repo--.json"));
+	writeLayer({ project: PROJECT }, { notificationScope: "all-runs" });
+	if (process.platform !== "win32") {
+		assert.equal(statSync(PROJECTS_DIR).mode & 0o777, 0o700);
+		assert.equal(statSync(layerFile({ project: PROJECT })).mode & 0o777, 0o600);
+	}
+	assert.throws(
+		() => patchLayer({ project: PROJECT }, { set: { docMcpUrl: "https://qyapi.weixin.qq.com/mcp" } }),
+		/docMcpUrl.*只能写在全局配置/,
+	);
+	writeFileSync(layerFile({ project: PROJECT }), JSON.stringify({ allowedUserIds: ["x"] }));
+	assert.throws(() => readLayer({ project: PROJECT }), /allowedUserIds.*只能写在全局配置/);
+	clearConfig();
+	assert.ok(existsSync(layerFile({ project: PROJECT })), "reset keeps the directories' overrides");
+});
+
+test("a fork copies its parent's session overrides only: the directory's layer is already shared", () => {
+	writeLayer({ project: PROJECT }, { notificationScope: "all-runs" });
+	writeLayer({ session: PARENT }, { defaultChatId: "private-user" });
+	const { config } = sessionConfig(CHILD, sessionFile(PARENT));
+	config.read();
+	assert.deepEqual(readJson(layerFile({ session: CHILD })), { defaultChatId: "private-user" });
+	assert.equal(config.read().sources.notificationScope, "project");
 });

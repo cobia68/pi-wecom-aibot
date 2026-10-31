@@ -292,8 +292,7 @@ if (options.dryRun) {
 
 const config = readConfig(options.configPath);
 if (!config.botId || !config.secret) throw new Error(`${options.configPath} 缺少 botId 或 secret`);
-if (!options.target)
-	throw new Error("没有推送目标：用 --target 指定，或先 /wecom-aibot config --scope global edit 设置默认推送目标");
+if (!options.target) throw new Error("没有推送目标：用 --target 指定，或先 /wecom-aibot config edit 设置默认推送目标");
 
 const gateway = liveGateway();
 if (gateway && !options.force) {

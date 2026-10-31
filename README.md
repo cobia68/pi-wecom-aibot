@@ -28,15 +28,9 @@ pi 会从 npm 下载插件并自动安装运行所需的依赖，写入 pi 的�
 > [!TIP]
 > 在末尾加 `@版本号` 可以固定版本，例如 `pi install npm:@cobia/pi-wecom-aibot@0.1.0`。固定后 `pi update` 和 `pi update <source>` 都不会改动它；换版本时用新版本号再执行一次 `pi install`
 
-以前从 Git 仓库或本地目录装过的，按下面的顺序换成 npm：
-
-1. 关闭所有使用这个机器人的 pi 窗口，共享网关会在最后一个窗口退出后约 1.5 秒自行结束
-2. 用 `pi list` 找到原来的来源，`pi remove <来源>` 删掉
-3. 执行上面的 `pi install`，再重新打开 pi，逐个执行 `/wecom-aibot connect`
-
 ### 检查安装
 
-重新打开 pi，或在已打开的 pi 中输入 `/reload`，再输入 `/wecom-aibot status`：第一行显示「💤 企业微信智能机器人：未接入」说明插件已加载，还没有配置时会提示先运行 `/wecom-aibot config --scope global edit`
+重新打开 pi，或在已打开的 pi 中输入 `/reload`，再输入 `/wecom-aibot status`：第一行显示「💤 企业微信智能机器人：未接入」说明插件已加载，还没有配置时会提示先运行 `/wecom-aibot config edit`
 
 ## 🔌 连接机器人
 
@@ -52,7 +46,7 @@ pi 会从 npm 下载插件并自动安装运行所需的依赖，写入 pi 的�
 ### 第 2 步：在 pi 中配置
 
 ```text
-/wecom-aibot config --scope global edit
+/wecom-aibot config edit
 ```
 
 1. 按提示填入 BotID 和 Secret
@@ -86,11 +80,11 @@ pi 会从 npm 下载插件并自动安装运行所需的依赖，写入 pi 的�
 1. 收集 userid：你的 userid 在第 2 步识别时已显示（单聊时就是配置里的 `defaultChatId`）。同事的用 `/wecom-aibot config whoami` 识别：把 pi 显示的验证码发给同事，让他发给机器人；不写 `--scope` 时只显示，不保存
 2. 打开全局 [配置文件](#-配置文件) `config.json`，加上 `allowedUserIds`（记得给上一行末尾补英文逗号）。这一项不由 `config` 命令管理，只能写在全局配置里：
 
-   ```json
-     "defaultChatType": 1,
-     "allowedUserIds": ["你的 userid", "同事的 userid"]
-   }
-   ```
+    ```json
+      "defaultChatType": 1,
+      "allowedUserIds": ["你的 userid", "同事的 userid"]
+    }
+    ```
 
 3. 在每个正在使用的 pi 窗口执行 `/wecom-aibot connect`，新名单生效。网关按各窗口接入时的名单放行：收紧名单后，没有重新接入的窗口仍按旧名单放行，撤销权限时请逐个重新接入
 
@@ -98,36 +92,40 @@ pi 会从 npm 下载插件并自动安装运行所需的依赖，写入 pi 的�
 
 ## 📝 配置文件
 
-配置分两层，都用 `/wecom-aibot config` 查看和修改：
+配置分三层，都用 `/wecom-aibot config` 查看和修改：
 
 - **全局配置**：同一台电脑、同一系统用户下的所有 pi 窗口共用
+- **项目级配置**：属于启动 pi 的目录，这个目录里的所有 session 共用，`/new` 开新会话后仍在；只保存显式设置过的字段，例如这个仓库的通知发到项目群
 - **session 覆盖**：只属于一个 pi 会话，只保存这个会话里显式设置过的字段
 
 ```text
-/wecom-aibot config                                        # 列出全部写法供选择
+/wecom-aibot config                                        # 弹出菜单选写法
 /wecom-aibot config show                                   # 当前 session 合并后的配置，标明每项来源
-/wecom-aibot config --scope global edit                    # 交互编辑全局配置
+/wecom-aibot config edit                                   # 交互编辑全局配置
+/wecom-aibot config --scope project set defaultChatId=your-group-chatid defaultChatType=2   # 这个目录的通知发到项目群
 /wecom-aibot config --scope session set controlPrompts=继续,运行测试
-/wecom-aibot config --scope global set controlPrompts+=部署到测试环境   # 加一条提示词
-/wecom-aibot config --scope global set controlPrompts-=运行测试       # 删一条提示词
+/wecom-aibot config set controlPrompts+=部署到测试环境     # 全局加一条提示词
+/wecom-aibot config set controlPrompts-=运行测试           # 全局删一条提示词
 /wecom-aibot config --scope session unset controlPrompts   # 删除覆盖，重新继承全局值
 /wecom-aibot config --scope global whoami                  # 发验证码识别聊天，设为全局默认推送目标
 ```
 
-会话文档地址（`docMcpUrl`）也在 `config --scope global edit` 里填写，见[每个 session 的控制卡](#每个-session-的控制卡)
+会话文档地址（`docMcpUrl`）也在 `config edit` 里填写，见[每个 session 的控制卡](#每个-session-的控制卡)
 
 | 系统          | 位置                                         |
 | :------------ | :------------------------------------------- |
 | Linux / macOS | `~/.pi/agent/wecom-aibot/`                   |
 | Windows       | `C:\Users\你的用户名\.pi\agent\wecom-aibot\` |
 
-实际位置以 `/wecom-aibot status` 显示的为准。这个文件夹属于插件自己：`config.json` 是全局配置，`sessions/` 放各 session 的覆盖（按 session ID 命名），`gateway/` 放共享网关的 socket；`PI_CODING_AGENT_DIR` 改变时整个文件夹随之移动
+实际位置以 `/wecom-aibot status` 显示的为准。这个文件夹属于插件自己：`config.json` 是全局配置，`projects/` 放各目录的项目级配置（按目录命名，和 pi 给 session 文件夹起名的规则一样：`/home/me/repo` 是 `--home-me-repo--.json`），`sessions/` 放各 session 的覆盖（按 session ID 命名），`gateway/` 放共享网关的 socket；`PI_CODING_AGENT_DIR` 改变时整个文件夹随之移动
 
-优先级：内置默认值 < 全局配置 < session 覆盖。BotID 与 Secret、默认推送目标与类型各自成组，整组取自同一层，session 的 BotID 不会配上全局的 Secret
+项目级配置不放在项目目录里：它可能含 Secret，推送目标填的是个人的 userid，放进仓库会随提交发给每个打开它的人
 
-- 作用域是命令的目标，写在动作前：`config --scope <global|session> <动作>`，和企微侧 `--session-id <id> <动作>` 一样。`edit`、`set`、`unset` 必须写；`show`、`whoami` 不写时只读：`show` 显示合并结果，`whoami` 只识别不保存。写在动作后会报错并给出正确写法
-- 只输入 `config` 时不执行任何动作，而是列出全部写法供选择，`config --scope global` 只列全局的：`show`、`edit`、`whoami` 选中即执行；`set`、`unset` 把命令填进输入框，补上 `字段=值` 后回车。没有交互界面时只列出这些写法
-- `set` 写成 `字段=值`，字段名即 JSON 键名，大小写不敏感；一条命令可写多个字段，有任何错误时一项都不保存
+优先级：内置默认值 < 全局配置 < 项目级配置 < session 覆盖。BotID 与 Secret、默认推送目标与类型各自成组，整组取自同一层，session 的 BotID 不会配上全局的 Secret
+
+- 作用域是命令的目标，写在动作前：`config --scope <global|project|session> <动作>`，也可以写成 `--scope=session`，和企微侧 `--session-id <id> <动作>` 一样。`edit`、`set`、`unset` 不写时改全局，和 pi 的 `install`、`config` 不加 `--local` 时一样；`show`、`whoami` 不写时只读：`show` 显示合并结果，`whoami` 只识别不保存。写在动作后会报错并给出正确写法
+- 只输入 `config` 时不执行任何动作，而是弹出菜单：先是不写作用域的写法，再是每一层一项 `--scope <层> …`，选中后列出只看、只改这一层的写法；`config --scope global` 直接列全局的。`show`、`edit`、`whoami` 选中即执行；`set`、`unset` 把命令填进输入框，补上 `字段=值` 后回车。没有交互界面时只列出这些写法
+- `set` 写成 `字段=值`，字段名即 JSON 键名，区分大小写；一条命令可写多个字段，有任何错误时一项都不保存
 - BotID、Secret 和会话文档地址只能用 `edit` 输入：`set` 的命令文本会留在 pi 的输入历史里。`edit` 输入时它们显示在屏幕上，之后查看时只显示「已配置」
 - 没有交互界面时不能使用 `edit`，凭据请直接编辑 `config.json`
 
@@ -142,21 +140,24 @@ pi 会从 npm 下载插件并自动安装运行所需的依赖，写入 pi 的�
 }
 ```
 
-| 字段                | 作用                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| :------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `botId` / `secret`  | 机器人的 BotID 和 Secret                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `defaultChatId`     | 默认推送目标：单聊填 userid，群聊填群 chatid                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `defaultChatType`   | 默认推送目标类型：`1` 单聊（只给 `defaultChatId` 时即为单聊），`2` 群聊                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `notificationScope` | 自动结束通知范围：`wecom-tasks`（默认）只回传企微下发的任务；`all-runs` 时**本地终端里自己敲的提示词跑完也发通知**到默认目标（没有默认目标则不发），企微任务不重复发送                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `controlPrompts`    | 控制卡「发提示词」的候选，最多 10 条，按顺序显示；点「发提示词」后在下拉框里选一条，点「确认发送」把它原样作为本 session 的任务。下拉框只显示每条的前 10 个字，发出去的是整条。`set` 用英文逗号分隔（`controlPrompts=继续,运行测试`，中文逗号算在提示词里），整份替换；只加或只删几条写 `controlPrompts+=部署` 或 `controlPrompts-=运行测试`（多条同样用英文逗号分隔）：加的放在末尾，已有的跳过；删的要和原文一字不差，没有的跳过；加上后超过 10 条时报错，一项不改。session 还没有自己的提示词时，`+=`、`-=` 先把继承来的那份复制过来再改，之后与全局独立，`unset` 后重新跟随全局。`-=` 后按 Tab 列出这一层现有的提示词。含空格或英文逗号的用 `edit` 一行一条填写，清空编辑器即为没有提示词。全局和 session 都能设。不设置时没有提示词，控制卡不显示下拉框和「发提示词」 |
-| `docMcpUrl`         | 会话文档地址：智能机器人「文档」授权后的 streamableHTTP URL。只能写在全局配置里，只能用 `config --scope global edit` 填写；地址含 apikey，查看时只显示是否已配置。不配置时，控制卡「刷新卡片」只更新卡片上的三行                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `allowedUserIds`    | 允许使用机器人的 userid 名单；不写或留空表示所有人都能用。只能写在全局配置中，不由 `config` 管理；`config whoami` 识别出名单外的人时，会问要不要加入                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+手改 `config.json` 时，文件开头写上 `"$schema": "https://raw.githubusercontent.com/cobia68/pi-wecom-aibot/main/config.schema.json"`，VS Code 这类编辑器就能补全字段、检查取值，`config` 保存时会留着这一行。写法对、意思不对的（例如文档地址不是企业微信的），编辑器查不出来，以 `/wecom-aibot config show` 为准
+
+| 字段                | 作用                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| :------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `botId` / `secret`  | 机器人的 BotID 和 Secret                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `defaultChatId`     | 默认推送目标：单聊填 userid，群聊填群 chatid                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `defaultChatType`   | 默认推送目标类型：`1` 单聊（只给 `defaultChatId` 时即为单聊），`2` 群聊                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `notificationScope` | 自动结束通知范围：`wecom-tasks`（默认）只回传企微下发的任务；`all-runs` 时**本地终端里自己敲的提示词跑完也发通知**到默认目标（没有默认目标则不发），企微任务不重复发送                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `controlPrompts`    | 控制卡「发提示词」的候选，最多 10 条，按顺序显示；点「发提示词」后在下拉框里选一条，点「确认发送」把它原样作为本 session 的任务。下拉框只显示每条的前 10 个字，发出去的是整条。`set` 用英文逗号分隔（`controlPrompts=继续,运行测试`，中文逗号算在提示词里），整份替换；只加或只删几条写 `controlPrompts+=部署` 或 `controlPrompts-=运行测试`（多条同样用英文逗号分隔）：加的放在末尾，已有的跳过；删的要和原文一字不差，没有的跳过；加上后超过 10 条时报错，一项不改。项目级或 session 还没有自己的提示词时，`+=`、`-=` 先把继承来的那份复制过来再改，之后不再跟随继承来的列表，`unset` 后重新继承。`-=` 后按 Tab 列出这一层现有的提示词。含空格或英文逗号的用 `edit` 一行一条填写，清空编辑器即为没有提示词。全局、项目级和 session 都能设。不设置时没有提示词，控制卡不显示下拉框和「发提示词」 |
+| `docMcpUrl`         | 会话文档地址：智能机器人「文档」授权后的 streamableHTTP URL。只能写在全局配置里，只能用 `config edit` 填写；地址含 apikey，查看时只显示是否已配置。不配置时，控制卡「刷新卡片」只更新卡片上的三行                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `allowedUserIds`    | 允许使用机器人的 userid 名单；不写或留空表示所有人都能用。只能写在全局配置中，不由 `config` 管理；`config whoami` 识别出名单外的人时，会问要不要加入                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 - 保存配置从不断开或重连。`notificationScope`、`controlPrompts`、`docMcpUrl` 用到时现读，所有 pi 窗口下次使用时生效，无需 `connect`；已生成、等待发送的通知保持原快照
 - BotID、Secret、默认推送目标和 `allowedUserIds` 只在 `connect` 时采用。改变后，`status`、`config show` 和状态栏显示「待重新接入」，当前接入仍使用旧配置；运行 `/wecom-aibot connect` 确认后切换。切换会撤销旧注册，清除排队任务和待发通知，已开始的任务继续运行但结果不再回传。没有交互界面时，只有没有待处理工作才直接切换
-- `config --scope <global|session> whoami` 确认后把目标保存到那一层，不断开当前接入。识别用那一层生效的机器人；pi 正连着另一个机器人时，先 `disconnect` 再识别
-- 分叉出的 session（`/fork`、`/clone`、`--fork`）首次启动时复制一次父 session 的覆盖项并提示，之后两边各自独立。连接状态不复制，也不保存到配置文件
-- Secret 以明文保存，请勿提交到代码仓库或发给他人。删除 pi 会话不会删除它的覆盖文件，不需要时手动清理 `sessions/`
+- `config --scope <global|project|session> whoami` 确认后把目标保存到那一层，不断开当前接入。识别用那一层生效的机器人；pi 正连着另一个机器人时，先 `disconnect` 再识别
+- 分叉出的 session（`/fork`、`/clone`、`--fork`）首次启动时复制一次父 session 的覆盖项并提示，之后两边各自独立；同一目录的项目级配置本来就共用，不复制。连接状态不复制，也不保存到配置文件
+- Secret 以明文保存，请勿提交到代码仓库或发给他人。删除 pi 会话或项目目录不会删除它们的覆盖文件，不需要时手动清理 `sessions/`、`projects/`
+- 文件里有不认识的字段（包括大小写写错的字段名）或用不了的值时，这份配置不能用，提示里说出是哪个文件、哪个字段，不会悄悄忽略。已接入的 session 继续用上一次能用的配置，并提醒一次
 
 ## 💬 日常使用
 
@@ -269,7 +270,7 @@ pi 发到企业微信的卡片都是控制卡：connect、补发、任务完成�
 卡片只能显示三行，最近的回复和通知写在企业微信智能文档里：每台电脑、每个机器人一份文档「pi 会话文档（主机名）」，每个 session 一页，connect 时就建好，卡片一发出就带链接。点卡片的引用区直接打开本 session 那一页
 
 1. 在企业微信「工作台 → 智能机器人 → 找到这个机器人 → 编辑 → 可使用权限」授权「文档」，点「查看使用方式」，复制 **streamableHTTP URL**（不是 JSON Config）
-2. 在 pi 中运行 `/wecom-aibot config --scope global edit`，选「会话文档」，粘贴地址。地址必须是 `https://…qq.com/…`；它含 apikey，等同于密码，不要发到聊天里
+2. 在 pi 中运行 `/wecom-aibot config edit`，选「会话文档」，粘贴地址。地址必须是 `https://…qq.com/…`；它含 apikey，等同于密码，不要发到聊天里
 3. 运行 `/wecom-aibot connect`，新发的控制卡就带页面链接
 
 - **权限**：建文档时设为企业内的人需申请、企业外拒绝；默认推送目标是单聊时，那个人在建页时就加为只读成员，之后第一次点「刷新卡片」的人也会加入。群里其他人看得到链接，但要申请才能打开
@@ -359,23 +360,25 @@ pi 主动推送的卡片都是控制卡（企业微信的 `button_interaction` �
 
 ## 🧰 命令速查
 
-| 命令                      | 作用                                                                                                                                                          |
-| :------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/wecom-aibot`            | 弹出子命令菜单，标题显示当前接入状态                                                                                                                          |
-| `/wecom-aibot status`     | 查看连接状态、默认推送目标、通知设置和配置文件位置                                                                                                            |
-| `/wecom-aibot config`     | 查看或修改配置：`[--scope <global\|session>] <show\|edit\|set\|unset\|whoami>`；whoami 发验证码识别聊天；不带动作时列出全部写法供选择；只保存，不接入也不断开 |
-| `/wecom-aibot test`       | 发送一张部署测试用的控制卡，可点按钮验证回调                                                                                                                  |
-| `/wecom-aibot connect`    | 配置齐全后正式接入，在默认聊天发一张本 session 的新控制卡；接入配置改变后确认切换                                                                             |
-| `/wecom-aibot disconnect` | 仅注销当前 session；不修改配置，最后一个 pi 注销后网关退出                                                                                                    |
-| `/wecom-aibot log`        | 查看最近 20 条运行记录                                                                                                                                        |
-| `/wecom-aibot reset`      | 删除全局配置和本机登记的文档页，并停止当前 pi 的接收（需交互确认）                                                                                            |
-| `/wecom-aibot --help`     | 查看全部命令；配置字段说明见 `/wecom-aibot config --help`                                                                                                     |
+子命令、动作、选项、字段名和取值都区分大小写，和 pi 自己的命令名、配置文件一样：`/wecom-aibot CONFIG`、`config --scope GLOBAL`、`config set notificationscope=all-runs` 都会报错。企微侧也一样：`/WECOM-AIBOT sessions` 不算命令，按普通消息处理
+
+| 命令                      | 作用                                                                                                                                                                                              |
+| :------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/wecom-aibot`            | 弹出子命令菜单，标题显示当前接入状态                                                                                                                                                              |
+| `/wecom-aibot status`     | 查看连接状态、默认推送目标、通知设置和配置文件位置                                                                                                                                                |
+| `/wecom-aibot config`     | 查看或修改配置：`[--scope <global\|project\|session>] <show\|edit\|set\|unset\|whoami>`，改配置时不写 `--scope` 改全局；whoami 发验证码识别聊天；不带动作时弹出菜单选写法；只保存，不接入也不断开 |
+| `/wecom-aibot test`       | 发送一张部署测试用的控制卡，可点按钮验证回调                                                                                                                                                      |
+| `/wecom-aibot connect`    | 配置齐全后正式接入，在默认聊天发一张本 session 的新控制卡；接入配置改变后确认切换                                                                                                                 |
+| `/wecom-aibot disconnect` | 仅注销当前 session；不修改配置，最后一个 pi 注销后网关退出                                                                                                                                        |
+| `/wecom-aibot log`        | 查看最近 20 条运行记录                                                                                                                                                                            |
+| `/wecom-aibot reset`      | 删除全局配置和本机登记的文档页，并停止当前 pi 的接收（需交互确认）                                                                                                                                |
+| `/wecom-aibot --help`     | 查看全部命令；配置字段说明见 `/wecom-aibot config --help`                                                                                                                                         |
 
 `/wecom-aibot disconnect` 只取消当前 session 的排队消息和待发通知，已开始的任务在电脑上照常跑完，但结果不再发回企业微信；其他已接入的 pi 不受影响。它不会改写配置文件；之后需要在当前或新 session 中手动 `/wecom-aibot connect` 才会接入，最后一个 pi 断开后共享网关自动退出
 
 `config whoami` 等待或确认期间，如果机器人凭据被更换或配置被删除，旧识别结果不会写入配置，请重新识别。`reset` 若报告删除失败，当前 pi 已停止，但凭据可能仍在磁盘；请检查提示的文件权限后重试
 
-`reset` 删除全局配置文件：BotID、Secret、默认推送目标、通知设置、白名单和会话文档地址一起删除，各 session 的覆盖文件保留；删除前先删掉这台电脑登记的文档页（文档本身无法用接口删除）；之后需要重新 `/wecom-aibot config --scope global edit`。没有交互界面时 `reset` 不删除任何文件。它只停止当前 pi 的接入；其他已连接的 pi 仍会继续收发，直到它们各自 `disconnect` 或退出
+`reset` 删除全局配置文件：BotID、Secret、默认推送目标、通知设置、白名单和会话文档地址一起删除，各目录的项目级配置和各 session 的覆盖文件保留；删除前先删掉这台电脑登记的文档页（文档本身无法用接口删除）；之后需要重新 `/wecom-aibot config edit`。没有交互界面时 `reset` 不删除任何文件。它只停止当前 pi 的接入；其他已连接的 pi 仍会继续收发，直到它们各自 `disconnect` 或退出
 
 ## 🔄 升级与卸载
 
@@ -389,7 +392,7 @@ pi update npm:@cobia/pi-wecom-aibot
 
 升级不迁移旧版本的配置、记录和卡片，一律以当前版本为准：
 
-- 配置文件里当前版本不认识的字段不读取，也不删除；需要的设置按 `/wecom-aibot config --help` 重新设置
+- 配置文件里有当前版本不认识的字段时，这份配置不能用，提示里说出文件、字段和可用的字段；删掉它，需要的设置按 `/wecom-aibot config --help` 重新设置
 - 命令只认当前写法，旧写法按未知子命令、未知动作或未知选项报错；以 `/wecom-aibot --help` 和企微侧 `/wecom-aibot --help` 为准
 - 旧版本发出的卡片点了没有反应；connect 或企微侧 `/wecom-aibot sessions` 发新卡
 - 旧版本的文档页记录（`screen-pages.json`）不再读取，第一次用到会话文档时新建文档
@@ -399,7 +402,7 @@ pi update npm:@cobia/pi-wecom-aibot
 
 ### 卸载
 
-1. 在 pi 中执行 `/wecom-aibot reset`，删除全局配置里的 BotID 和 Secret；在 session 覆盖里保存过凭据的，再删除 `~/.pi/agent/wecom-aibot/sessions/`
+1. 在 pi 中执行 `/wecom-aibot reset`，删除全局配置里的 BotID 和 Secret；在项目级配置或 session 覆盖里保存过凭据的，再删除 `~/.pi/agent/wecom-aibot/projects/`、`sessions/`
 2. 移除插件：`pi remove npm:@cobia/pi-wecom-aibot`，删除装好的插件，并从 pi 的设置里去掉
 3. 可选清理：各项目里的 `.pi-wecom-aibot-files/`，以及插件文件夹里的网关状态 `~/.pi/agent/wecom-aibot/gateway/` 和文档页记录 `session-doc.json`；在工作台撤销机器人的「文档」授权，按需在企业微信里删除「pi 会话文档」
 
@@ -426,7 +429,7 @@ pi update npm:@cobia/pi-wecom-aibot
 <details>
 <summary><b>连接失败，提示核对 BotID/Secret</b></summary>
 
-- 执行 `/wecom-aibot config --scope global edit` 重新填写（凭据由 session 覆盖时用 `config --scope session edit`）
+- 执行 `/wecom-aibot config edit` 重新填写（凭据由项目级配置或 session 覆盖时用 `config --scope project edit` 或 `config --scope session edit`）
 - 在企业微信管理后台确认机器人仍是「API 模式」+「长连接」
 - 连续被拒绝几次后插件停止重试；改好后执行 `/wecom-aibot connect` 重新连接
 

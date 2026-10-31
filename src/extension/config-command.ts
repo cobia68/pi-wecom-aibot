@@ -1,7 +1,8 @@
 /**
- * `/wecom-aibot config`: show, edit, set and unset the global layer or the current session's overrides, and
- * identify a chat with config whoami. Saving never connects or disconnects: settings are read where they are
- * used, and a change to the credentials, the default target or the allowlist waits for `/wecom-aibot connect`.
+ * `/wecom-aibot config`: show, edit, set and unset the global layer, the working directory's or the current
+ * session's overrides, and identify a chat with config whoami. Saving never connects or disconnects: settings
+ * are read where they are used, and a change to the credentials, the default target or the allowlist waits for
+ * `/wecom-aibot connect`.
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MAX_PROMPTS } from "../shared/control-card.ts";
@@ -13,6 +14,7 @@ import {
 	columns,
 	configSubcommandLines,
 	configSubcommands,
+	SCOPE_SLOT,
 	subcommandUsage,
 	table,
 	WHOAMI_WAIT_SECONDS,
@@ -28,14 +30,13 @@ import {
 	FIELDS,
 	type FieldName,
 	fieldsWith,
+	LAYERS,
 	type Layer,
 	type LayerChange,
 	layerFile,
 	type ManagedFields,
-	mergeLayers,
 	type PromptsEdit,
 	type PromptsField,
-	patchLayer,
 	pendingReconnect,
 	promptsProblem,
 	type Resolved,
@@ -64,6 +65,67 @@ interface Edit {
 	change: LayerChange;
 	guard?: Guard;
 	note?: string;
+}
+
+/** How each layer is named in the reports; a name ending in a Latin word carries its space before 的. */
+const LAYER: Record<
+	ConfigScope,
+	{
+		name: string;
+		title: string;
+		heading: string;
+		empty: string;
+		saved: string;
+		removed: string;
+		lacks: string;
+		/** `target`: what the layer resolves to now; `none`: it has none. */
+		target: string;
+		none: string;
+		/** The layers it inherits from, as an override's 取消覆盖 says them. */
+		from: string;
+	}
+> = {
+	global: {
+		name: "全局",
+		title: "全局配置",
+		heading: "全局配置（显式保存的值）：",
+		empty: "（未设置任何字段）",
+		saved: "已保存全局配置",
+		removed: "已删除全局字段",
+		lacks: "全局配置没有",
+		target: "全局默认",
+		none: "当前没有全局默认推送目标",
+		from: "",
+	},
+	project: {
+		name: "当前目录",
+		title: "当前目录的项目级配置",
+		heading: "当前目录的项目级配置：",
+		empty: "（无覆盖项，全部继承全局配置或内置默认值）",
+		saved: "已保存项目级配置",
+		removed: "已删除项目级配置的字段",
+		lacks: "当前目录的项目级配置没有",
+		target: "当前目录使用的目标",
+		none: "当前目录还没有默认推送目标",
+		from: "全局",
+	},
+	session: {
+		name: "当前 session ",
+		title: "当前 session 的覆盖项",
+		heading: "当前 session 的覆盖项：",
+		empty: "（无覆盖项，全部继承项目级、全局配置或内置默认值）",
+		saved: "已保存 session 覆盖",
+		removed: "已删除 session 覆盖",
+		lacks: "当前 session 没有覆盖",
+		target: "当前 session 使用的目标",
+		none: "当前 session 还没有默认推送目标",
+		from: "项目级或全局",
+	},
+};
+
+/** The layers above `scope`: their values win over it. */
+function above(scope: ConfigScope): readonly ConfigScope[] {
+	return LAYERS.slice(LAYERS.indexOf(scope) + 1);
 }
 
 /** Every action reads the files first, so a file that cannot be used stops it before anything is written. */
@@ -112,7 +174,7 @@ class ConfigCommand {
 		}
 		const labels = columns(choices.map((item) => [subcommandUsage(item), item.description] as const));
 		const picked = await this.choose(
-			scope === "global" ? "全局配置" : scope === "session" ? "当前 session 的覆盖项" : "企业微信配置",
+			scope ? LAYER[scope].title : "企业微信配置",
 			choices.map((item, index) => [labels[index], item]),
 		);
 		if (!picked) return;
@@ -124,13 +186,13 @@ class ConfigCommand {
 		const resolved = this.config.read();
 		const rows: [string, string][] = FIELDS.map((spec) => [spec.name, describe(resolved, spec.name)]);
 		if (resolved.allowedUserIds?.length)
-			rows.push(["allowedUserIds", `${resolved.allowedUserIds.join("、")}（global）`]);
+			rows.push(["allowedUserIds", `${resolved.allowedUserIds.join("、")}（全局）`]);
 		const adopted = this.host.adopted();
 		const state =
 			adopted === undefined
 				? resolved.values.botId
 					? "当前 session 未接入；配置齐全后运行 /wecom-aibot connect"
-					: "未配置：运行 /wecom-aibot config --scope global edit 填写 BotID、Secret 和默认推送目标"
+					: "未配置：运行 /wecom-aibot config edit 填写 BotID、Secret 和默认推送目标"
 				: pendingReconnect(resolved, adopted)
 					? "待重新接入：当前接入仍使用旧配置，运行 /wecom-aibot connect 后生效"
 					: "当前接入与以上配置一致";
@@ -139,7 +201,7 @@ class ConfigCommand {
 				"当前 session 的企业微信配置（合并结果）：",
 				...table(rows),
 				state,
-				"修改：/wecom-aibot config --scope <global|session> set 字段=值 …，或 config --scope <global|session> edit",
+				`修改：/wecom-aibot config set 字段=值 …，或 config edit；不写 --scope 时改全局，只改一层时在动作前写 ${SCOPE_SLOT}`,
 			].join("\n"),
 		);
 	}
@@ -151,23 +213,22 @@ class ConfigCommand {
 			display(spec.name, layer?.[spec.name]),
 		]);
 		if (layer?.allowedUserIds?.length) rows.push(["allowedUserIds", layer.allowedUserIds.join("、")]);
-		const empty = scope === "global" ? "  （未设置任何字段）" : "  （无覆盖项，全部继承全局或内置默认值）";
 		this.notify(
 			[
-				scope === "global" ? "全局配置（显式保存的值）：" : "当前 session 的覆盖项：",
-				...(rows.length ? table(rows) : [empty]),
+				LAYER[scope].heading,
+				...(rows.length ? table(rows) : [`  ${LAYER[scope].empty}`]),
 				`文件：${this.file(scope)}`,
 			].join("\n"),
 		);
 	}
 
 	/**
-	 * controlPrompts+= / -=: the list this layer uses now, changed. A session without its own list starts from
-	 * the one it inherits and keeps the copy, independent of the global list from then on.
+	 * controlPrompts+= / -=: the list this layer uses now, changed. A project or session without its own list
+	 * starts from the one it inherits and keeps the copy, independent of the layers below from then on.
 	 */
 	private editPromptList(scope: ConfigScope, set: Partial<ManagedFields>, edit: PromptsEdit): void {
 		const own = this.layer(scope)?.controlPrompts;
-		const current = own ?? (scope === "global" ? [] : this.config.read().values.controlPrompts);
+		const current = own ?? this.config.below(scope).values.controlPrompts;
 		const applied = applyPromptsEdit(current, edit);
 		if ("problem" in applied) {
 			this.notify(sentences(applied.problem, "未做任何修改"), "warning");
@@ -181,18 +242,18 @@ class ConfigCommand {
 			this.notify(sentences(skipped, `controlPrompts 仍是 ${display("controlPrompts", current)}，无需修改`));
 			return;
 		}
-		// An emptied list: the global layer drops the field, a session overrides with none, as in config edit.
+		// An emptied list: the global layer drops the field, an override layer overrides with none, as in config edit.
 		const change: LayerChange =
 			changed && !applied.prompts.length && scope === "global"
 				? { set, remove: ["controlPrompts"] }
 				: { set: changed ? { ...set, controlPrompts: applied.prompts } : set };
 		const copied =
-			changed && scope === "session" && own === undefined
+			changed && scope !== "global" && own === undefined
 				? sentences(
 						current.length
-							? `已把继承的 ${current.length} 条提示词复制到本 session 再修改`
-							: "本 session 新建了自己的提示词列表",
-						"之后与全局独立，要重新跟随全局时运行 /wecom-aibot config --scope session unset controlPrompts",
+							? `已把继承的 ${current.length} 条提示词复制到${LAYER[scope].name}再修改`
+							: `${LAYER[scope].name}新建了自己的提示词列表`,
+						`之后不再跟随继承来的列表，要重新继承时运行 /wecom-aibot config --scope ${scope} unset controlPrompts`,
 					)
 				: undefined;
 		this.save(scope, change, undefined, [skipped, copied].filter(Boolean).join("\n") || undefined);
@@ -202,8 +263,7 @@ class ConfigCommand {
 		const layer = this.layer(scope);
 		const present = fields.filter((name) => layer?.[name] !== undefined);
 		if (present.length) this.save(scope, { remove: present });
-		else
-			this.notify(`${scope === "global" ? "全局配置没有" : "当前 session 没有覆盖"} ${fields.join("、")}，无需修改`);
+		else this.notify(`${LAYER[scope].lacks} ${fields.join("、")}，无需修改`);
 	}
 
 	/** One notice for the whole report: pi shows consecutive notices in place of each other. */
@@ -216,19 +276,10 @@ class ConfigCommand {
 		} catch {
 			before = undefined;
 		}
-		if (scope === "global")
-			patchLayer("global", change, guard && ((current) => guard(mergeLayers(current, undefined))));
-		else this.config.patch(change, guard && ((current) => guard(mergeLayers(readLayer("global"), current))));
+		this.config.patch(scope, change, guard && ((current) => guard(this.config.resolveWith(scope, current))));
 		const after = this.config.read();
 		this.host.changed(after);
-		const saved =
-			scope === "global"
-				? change.set
-					? "已保存全局配置"
-					: "已删除全局字段"
-				: change.set
-					? "已保存 session 覆盖"
-					: "已删除 session 覆盖";
+		const saved = change.set ? LAYER[scope].saved : LAYER[scope].removed;
 		this.notify([before ? this.report(saved, scope, change, before, after) : saved, note].filter(Boolean).join("\n"));
 	}
 
@@ -236,7 +287,7 @@ class ConfigCommand {
 		if (!this.ctx.hasUI) {
 			this.notify(
 				sentences(
-					`config edit 需要交互界面；请使用 /wecom-aibot config --scope ${scope} set 字段=值`,
+					`config edit 需要交互界面；请使用 /wecom-aibot config ${at(scope)}set 字段=值`,
 					`凭据只能在交互界面输入，或直接编辑 ${this.file(scope)}`,
 				),
 				"warning",
@@ -256,26 +307,28 @@ class ConfigCommand {
 		if (!bot) {
 			this.notify(
 				scope === "global"
-					? "全局配置还没有 BotID 和 Secret；先运行 /wecom-aibot config --scope global edit"
-					: "还没有配置 BotID 和 Secret；先运行 /wecom-aibot config --scope global edit",
+					? "全局配置还没有 BotID 和 Secret；先运行 /wecom-aibot config edit"
+					: "还没有配置 BotID 和 Secret；先运行 /wecom-aibot config edit",
 				"warning",
 			);
 			return;
 		}
 		const identity = await this.host.identify(this.ctx, bot, seconds);
 		if (!identity) return;
-		const command = (layer: string) =>
-			`/wecom-aibot config --scope ${layer} set defaultChatId=${identity.chatId} defaultChatType=${identity.chatType}`;
+		const command = (layer: ConfigScope) =>
+			`/wecom-aibot config ${at(layer)}set defaultChatId=${identity.chatId} defaultChatType=${identity.chatType}`;
 		const allowlist = await this.offerAllowlist(identity);
 		const report = (...lines: (string | false | undefined)[]) =>
 			this.notify([found(identity), ...lines, allowlist].filter(Boolean).join("\n"));
 		if (!scope) {
-			report(`设为默认推送目标：${command("<global|session>")}`);
+			report(
+				`设为全局默认推送目标：${command("global")}；只设给当前目录或当前 session 时在 set 前写 --scope project 或 --scope session`,
+			);
 			return;
 		}
 		const layer = this.layer(scope);
 		if (layer?.defaultChatId === identity.chatId && (layer.defaultChatType ?? 1) === identity.chatType) {
-			report(`这已经是${scope === "global" ? "全局" : "当前 session "}的默认推送目标，配置未改动`);
+			report(`这已经是${LAYER[scope].name}的默认推送目标，配置未改动`);
 			return;
 		}
 		if (!this.ctx.hasUI) {
@@ -283,22 +336,22 @@ class ConfigCommand {
 			return;
 		}
 		const resolved = this.config.read();
-		const current = scope === "global" ? globalOnly().values : resolved.values;
+		const current = this.config.upTo(scope).values;
 		const replaced = current.defaultChatId
-			? `将替换${scope === "global" ? "全局默认" : "当前 session 使用的目标"}：${current.defaultChatId}（${current.defaultChatType === 2 ? "群聊" : "单聊"}）`
-			: scope === "global"
-				? "当前没有全局默认推送目标"
-				: "当前 session 还没有默认推送目标";
+			? `将替换${LAYER[scope].target}：${current.defaultChatId}（${current.defaultChatType === 2 ? "群聊" : "单聊"}）`
+			: LAYER[scope].none;
+		const holder = resolved.sources.defaultChatId;
 		const shadowed =
-			scope === "global" &&
-			resolved.sources.defaultChatId === "session" &&
-			"当前 session 覆盖了默认推送目标，保存到全局后本 session 仍使用自己的目标";
+			holder !== undefined &&
+			holder !== "default" &&
+			above(scope).includes(holder) &&
+			`${LAYER[holder].name}覆盖了默认推送目标，保存到${LAYER[scope].name}后当前 session 仍使用${LAYER[holder].name}的目标`;
 		const consequence =
 			this.host.adopted() === undefined
 				? "保存后运行 /wecom-aibot connect 正式接入"
 				: "保存不会断开当前接入；运行 /wecom-aibot connect 后改用新目标（会确认并清除当前 session 的排队任务和待发通知）";
 		const ok = await this.ctx.ui.confirm(
-			scope === "global" ? "设为全局默认推送目标？" : "设为当前 session 的默认推送目标？",
+			`设为${LAYER[scope].name}的默认推送目标？`,
 			[
 				found(identity),
 				sentences(replaced, shadowed),
@@ -318,8 +371,9 @@ class ConfigCommand {
 		);
 	}
 
+	/** The bot a layer's whoami listens with: what the layers up to it resolve to. */
 	private bot(scope: ConfigScope | undefined): Connection | undefined {
-		return connectionOf(scope === "global" ? globalOnly() : this.config.read());
+		return connectionOf(scope === undefined || scope === "session" ? this.config.read() : this.config.upTo(scope));
 	}
 
 	/**
@@ -364,11 +418,11 @@ class ConfigCommand {
 	}
 
 	private layer(scope: ConfigScope): Layer | undefined {
-		return scope === "global" ? readLayer("global") : this.config.layer();
+		return this.config.layer(scope);
 	}
 
 	private file(scope: ConfigScope): string {
-		return layerFile(scope === "global" ? "global" : { session: this.config.sessionId });
+		return layerFile(this.config.scope(scope));
 	}
 
 	private async firstRun(scope: ConfigScope): Promise<Edit | undefined> {
@@ -384,44 +438,49 @@ class ConfigCommand {
 		resolved: Resolved,
 		layer: Layer | undefined,
 	): Promise<Edit | undefined> {
-		const overridden = (name: FieldName) => scope === "session" && layer?.[name] !== undefined;
+		const overridden = (name: FieldName) => scope !== "global" && layer?.[name] !== undefined;
 		const { botId, secret, defaultChatId } = resolved.values;
 		const plain = async (edit: Promise<LayerChange | undefined>): Promise<Edit | undefined> => {
 			const change = await edit;
 			return change && { change };
 		};
-		const edit = await this.choose<() => Promise<Edit | undefined>>(
-			scope === "global" ? "编辑全局配置" : "编辑当前 session 的覆盖项",
+		const edit = await this.choose<() => Promise<Edit | undefined>>(`编辑${LAYER[scope].title}`, [
 			[
-				[
-					`机器人凭据：BotID ${describe(resolved, "botId")}，Secret ${display("secret", secret)}`,
-					() => plain(this.editCredentials(botId, overridden("botId"))),
-				],
-				[
-					`默认推送目标：${defaultChatId ? `${defaultChatId}，${describe(resolved, "defaultChatType")}` : "未设置"}`,
-					() =>
-						this.askTarget(scope, defaultChatId, { inherit: overridden("defaultChatId"), bot: this.bot(scope) }),
-				],
-				...SETTING_FIELDS.map((spec): [string, () => Promise<Edit | undefined>] => [
-					`${spec.label}：${describe(resolved, spec.name)}`,
-					() =>
-						plain(
-							spec.name === "controlPrompts"
-								? this.editPrompts(spec, scope, resolved.values.controlPrompts, overridden(spec.name))
-								: this.editChoice(spec, resolved.values[spec.name], overridden(spec.name)),
-						),
-				]),
-				// The document belongs to the bot, not to a session: it is global only.
-				...(scope === "global"
-					? [
-							[
-								`会话文档：${display("docMcpUrl", resolved.values.docMcpUrl)}`,
-								() => plain(this.editDocument(resolved.values.docMcpUrl !== undefined)),
-							] as [string, () => Promise<Edit | undefined>],
-						]
-					: []),
+				`机器人凭据：BotID ${describe(resolved, "botId")}，Secret ${display("secret", secret)}`,
+				() => plain(this.editCredentials(botId, overridden("botId") && LAYER[scope].from)),
 			],
-		);
+			[
+				`默认推送目标：${defaultChatId ? `${defaultChatId}，${describe(resolved, "defaultChatType")}` : "未设置"}`,
+				() =>
+					this.askTarget(scope, defaultChatId, {
+						inherit: overridden("defaultChatId") && LAYER[scope].from,
+						bot: this.bot(scope),
+					}),
+			],
+			...SETTING_FIELDS.map((spec): [string, () => Promise<Edit | undefined>] => [
+				`${spec.label}：${describe(resolved, spec.name)}`,
+				() =>
+					plain(
+						spec.name === "controlPrompts"
+							? this.editPrompts(
+									spec,
+									scope,
+									resolved.values.controlPrompts,
+									overridden(spec.name) && LAYER[scope].from,
+								)
+							: this.editChoice(spec, resolved.values[spec.name], overridden(spec.name) && LAYER[scope].from),
+					),
+			]),
+			// The document belongs to the bot, not to a session: it is global only.
+			...(scope === "global"
+				? [
+						[
+							`会话文档：${display("docMcpUrl", resolved.values.docMcpUrl)}`,
+							() => plain(this.editDocument(resolved.values.docMcpUrl !== undefined)),
+						] as [string, () => Promise<Edit | undefined>],
+					]
+				: []),
+		]);
 		return edit?.();
 	}
 
@@ -449,11 +508,15 @@ class ConfigCommand {
 		return { set: { docMcpUrl: typed } };
 	}
 
-	private async editCredentials(current: string | undefined, inherit: boolean): Promise<LayerChange | undefined> {
+	/** `inherit`: this layer overrides the field; the layers it would inherit from, as 取消覆盖 says them. */
+	private async editCredentials(
+		current: string | undefined,
+		inherit: string | false,
+	): Promise<LayerChange | undefined> {
 		const action = inherit
 			? await this.choose<"enter" | LayerChange>("机器人凭据", [
 					["重新输入 BotID 和 Secret", "enter"],
-					["取消覆盖，继承全局凭据", { remove: fieldsWith("botId") }],
+					[`取消覆盖，继承${inherit}凭据`, { remove: fieldsWith("botId") }],
 				])
 			: "enter";
 		if (action !== "enter") return action;
@@ -481,7 +544,7 @@ class ConfigCommand {
 	private async askTarget(
 		scope: ConfigScope,
 		current: string | undefined,
-		allow: { skip?: boolean; inherit?: boolean; bot?: Connection; unsaved?: boolean },
+		allow: { skip?: boolean; inherit?: string | false; bot?: Connection; unsaved?: boolean },
 	): Promise<Edit | undefined> {
 		const options: [string, () => Promise<Edit | "again" | undefined>][] = [];
 		const { bot } = allow;
@@ -504,7 +567,7 @@ class ConfigCommand {
 		);
 		if (allow.inherit)
 			options.push([
-				"取消覆盖，继承全局默认目标",
+				`取消覆盖，继承${allow.inherit}默认目标`,
 				async () => ({ change: { remove: fieldsWith("defaultChatId") } }),
 			]);
 		if (allow.skip)
@@ -536,29 +599,29 @@ class ConfigCommand {
 		return { change: { set: { defaultChatId: chatId, defaultChatType: chatType } } };
 	}
 
-	private editChoice(spec: ChoiceField, current: unknown, inherit: boolean): Promise<LayerChange | undefined> {
+	private editChoice(spec: ChoiceField, current: unknown, inherit: string | false): Promise<LayerChange | undefined> {
 		const options = spec.choices.map((choice): [string, LayerChange] => [
 			`${choice.value}：${choice.description}${choice.value === current ? "（当前）" : ""}`,
 			{ set: { [spec.name]: choice.value } },
 		]);
-		if (inherit) options.push(["取消覆盖，重新继承全局值或内置默认值", { remove: [spec.name] }]);
+		if (inherit) options.push([`取消覆盖，重新继承${inherit}值或内置默认值`, { remove: [spec.name] }]);
 		return this.choose(spec.label, options);
 	}
 
 	/**
 	 * One prompt per line, in the dropdown's order. Esc saves nothing; an emptied editor means no prompts: the
-	 * global layer drops the field (there is no default to fall back on), a session overrides with none.
+	 * global layer drops the field (there is no default to fall back on), an override layer overrides with none.
 	 */
 	private async editPrompts(
 		spec: PromptsField,
 		scope: ConfigScope,
 		current: readonly string[],
-		inherit: boolean,
+		inherit: string | false,
 	): Promise<LayerChange | undefined> {
 		if (inherit) {
 			const action = await this.choose<"write" | LayerChange>(spec.label, [
 				["编辑提示词（一行一条）", "write"],
-				["取消覆盖，重新继承全局值", { remove: [spec.name] }],
+				[`取消覆盖，重新继承${inherit}值`, { remove: [spec.name] }],
 			]);
 			if (action !== "write") return action;
 		}
@@ -600,16 +663,15 @@ class ConfigCommand {
 			return `${spec.name}：${from} → ${to === from ? "已更新" : to}`;
 		});
 		const lines = [changes.length ? `${saved}：${changes.join("；")}` : saved];
-		const shadowed =
-			scope === "global"
-				? [...Object.keys(change.set ?? {}), ...(change.remove ?? [])].filter(
-						(name) => after.sources[name as FieldName] === "session",
-					)
-				: [];
-		if (shadowed.length)
-			lines.push(
-				`当前 session 覆盖了 ${shadowed.join("、")}，全局修改不影响本 session；需要跟随全局时运行 /wecom-aibot config --scope session unset ${shadowed[0]}`,
-			);
+		const touched = [...Object.keys(change.set ?? {}), ...(change.remove ?? [])] as FieldName[];
+		// A layer above this one still holds the field: the change does not reach this session.
+		for (const holder of above(scope)) {
+			const shadowed = touched.filter((name) => after.sources[name] === holder);
+			if (shadowed.length)
+				lines.push(
+					`${LAYER[holder].name}覆盖了 ${shadowed.join("、")}，${LAYER[scope].name}的修改不影响当前 session；需要跟随时运行 /wecom-aibot config --scope ${holder} unset ${shadowed.join(" ")}`,
+				);
+		}
 		lines.push(this.conclusion(before, after));
 		return lines.join("\n");
 	}
@@ -643,6 +705,11 @@ class ConfigCommand {
 	}
 }
 
+/** The target as a command writes it: none for the global layer, which a write without one changes. */
+function at(scope: ConfigScope): string {
+	return scope === "global" ? "" : `--scope ${scope} `;
+}
+
 /** Values read from two files: a list compares by its items, not by identity. */
 function same(a: unknown, b: unknown): boolean {
 	return a === b || (Array.isArray(a) && Array.isArray(b) && JSON.stringify(a) === JSON.stringify(b));
@@ -657,11 +724,6 @@ function sameBotGuard(bot: Pick<Connection, "botId" | "secret">): Guard {
 		if (resolved.values.botId !== bot.botId || resolved.values.secret !== bot.secret)
 			throw new Error("识别期间机器人配置已改变，默认推送目标未保存；请重新识别");
 	};
-}
-
-/** The global layer alone, as a session without overrides would resolve it. */
-function globalOnly(): Resolved {
-	return mergeLayers(readLayer("global"), undefined);
 }
 
 /** The global allowlist as its file holds it now; none at all is the empty list, both admit everyone. */

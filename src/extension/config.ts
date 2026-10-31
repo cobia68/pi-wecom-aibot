@@ -1,11 +1,16 @@
 /**
  * WeCom 智能机器人 configuration: one field table shared by validation, help, completion and the editor,
- * and the merge of a global file with per-session override files.
+ * and the merge of a global file with per-directory and per-session override files.
  *
- *   <agent-dir>/wecom-aibot/config.json              global defaults; allowedUserIds lives only here
- *   <agent-dir>/wecom-aibot/sessions/<session>.json  one session's explicit overrides
+ *   <agent-dir>/wecom-aibot/config.json                 global defaults; allowedUserIds lives only here
+ *   <agent-dir>/wecom-aibot/projects/--<directory>--.json  one working directory's explicit overrides
+ *   <agent-dir>/wecom-aibot/sessions/<session>.json     one session's explicit overrides
  *
- * A missing file means "no values here"; an unreadable one is an error, never an empty layer.
+ * The project layer lives in the plugin's own folder, not in the repository: it may hold a Secret and points
+ * at a userid, which a shared checkout must not hand to everyone who opens it.
+ *
+ * A missing file means "no values here"; an unreadable one is an error, never an empty layer. A key the layer
+ * does not know makes the file unreadable too, like a value it cannot use: a typo is said, never ignored.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -135,7 +140,7 @@ export const FIELDS: readonly FieldSpec[] = [
 	{
 		name: "controlPrompts",
 		label: "控制卡提示词",
-		description: `控制卡「提示词」下拉框的候选，最多 ${MAX_PROMPTS} 条；点「发提示词」时把选中的那条原样作为本 session 的任务。下拉框只显示前 10 个字。config set 用英文逗号分隔（controlPrompts=继续,运行测试），整份替换；controlPrompts+=新提示 加在末尾，controlPrompts-=旧提示 删掉一条，多条也用英文逗号分隔；session 还没有自己的提示词时，+= 和 -= 先复制继承来的那份再改，之后与全局独立。含空格或逗号的提示词用 config edit 一行一条填写，清空编辑器即为没有提示词。不设置时没有提示词，控制卡不显示下拉框和「发提示词」`,
+		description: `控制卡「提示词」下拉框的候选，最多 ${MAX_PROMPTS} 条；点「发提示词」时把选中的那条原样作为本 session 的任务。下拉框只显示前 10 个字。config set 用英文逗号分隔（controlPrompts=继续,运行测试），整份替换；controlPrompts+=新提示 加在末尾，controlPrompts-=旧提示 删掉一条，多条也用英文逗号分隔；project 或 session 还没有自己的提示词时，+= 和 -= 先复制继承来的那份再改，之后不再跟随继承来的列表。含空格或逗号的提示词用 config edit 一行一条填写，清空编辑器即为没有提示词。不设置时没有提示词，控制卡不显示下拉框和「发提示词」`,
 		default: [],
 		effect: "setting",
 	},
@@ -143,7 +148,7 @@ export const FIELDS: readonly FieldSpec[] = [
 		name: "docMcpUrl",
 		label: "会话文档",
 		description:
-			"智能机器人「文档」授权后的 streamableHTTP URL（工作台 → 智能机器人 → 可使用权限）。配置后，插件在企业微信里建一份文档，每个 session 一页，写最近的回复和通知，点控制卡的引用区打开。地址含 apikey：只能用 /wecom-aibot config --scope global edit 填写，查看时只显示是否已配置",
+			"智能机器人「文档」授权后的 streamableHTTP URL（工作台 → 智能机器人 → 可使用权限）。配置后，插件在企业微信里建一份文档，每个 session 一页，写最近的回复和通知，点控制卡的引用区打开。地址含 apikey：只能写在全局配置里，用 /wecom-aibot config edit 填写，查看时只显示是否已配置",
 		effect: "document",
 	},
 ];
@@ -160,9 +165,9 @@ export function fieldsWith(name: FieldName): readonly FieldName[] {
 	return PAIRED.find((group) => group.includes(name)) ?? [name];
 }
 
+/** Field names are case-sensitive: a command writes them as the file does. */
 export function fieldNamed(name: string): FieldSpec | undefined {
-	const wanted = name.toLowerCase();
-	return FIELDS.find((spec) => spec.name.toLowerCase() === wanted);
+	return FIELDS.find((spec) => spec.name === name);
 }
 
 const ALL = FIELDS.map((spec) => spec.name);
@@ -208,11 +213,24 @@ export function chatIdProblem(chatId: string): string | undefined {
 /** A file of its own: pi gives extensions no settings writer, and project settings cannot override credentials here. */
 export const CONFIG_FILE = join(pluginDirectory(), "config.json");
 export const SESSIONS_DIR = join(pluginDirectory(), "sessions");
+export const PROJECTS_DIR = join(pluginDirectory(), "projects");
 
-export type Scope = "global" | { session: string };
+/** The layers in merge order: a later one overrides an earlier one. */
+export const LAYERS = ["global", "project", "session"] as const;
+export type LayerName = (typeof LAYERS)[number];
+
+export type Scope = "global" | { project: string } | { session: string };
 
 export function layerFile(scope: Scope): string {
-	return scope === "global" ? CONFIG_FILE : join(SESSIONS_DIR, `${sessionFileName(scope.session)}.json`);
+	if (scope === "global") return CONFIG_FILE;
+	return "project" in scope
+		? join(PROJECTS_DIR, `${projectFileName(scope.project)}.json`)
+		: join(SESSIONS_DIR, `${sessionFileName(scope.session)}.json`);
+}
+
+/** The directory written into one name the way pi names its own session folders: `/a/b` is `--a-b--`. */
+export function projectFileName(cwd: string): string {
+	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 }
 
 /** pi's own (lowercase UUID) IDs name their file; any other ID is hashed, so no ID can form a path or a device name. */
@@ -222,9 +240,22 @@ function sessionFileName(sessionId: string): string {
 		: `id-${createHash("sha256").update(sessionId).digest("hex").slice(0, 32)}`;
 }
 
+/** Keys a file may hold: the fields, the global allowlist, and the editor's `$schema`. */
+const KNOWN_KEYS: ReadonlySet<string> = new Set(["$schema", ...FIELDS.map((spec) => spec.name), "allowedUserIds"]);
+
+/** The fields a layer's file may hold, as a message about an unknown key lists them. */
+function layerKeys(scope: Scope): readonly string[] {
+	return scope === "global" ? [...ALL, "allowedUserIds"] : ALL.filter((name) => name !== "docMcpUrl");
+}
+
 function parseLayer(raw: Record<string, unknown>, scope: Scope): Layer {
 	const file = layerFile(scope);
 	const invalid = (field: string, problem: string) => new Error(`配置文件 ${file} 的字段 ${field} 无效：${problem}`);
+	const unknown = Object.keys(raw).filter((key) => !KNOWN_KEYS.has(key));
+	if (unknown.length)
+		throw new Error(
+			`配置文件 ${file} 有不认识的字段 ${unknown.join("、")}；可用字段：${layerKeys(scope).join("、")}`,
+		);
 	const layer: Record<string, unknown> = {};
 	for (const spec of FIELDS) {
 		const value = raw[spec.name];
@@ -287,8 +318,8 @@ export function patchLayer(scope: Scope, change: LayerChange, guard?: (current: 
 }
 
 /**
- * The layer's file as it is on disk now, changed by `edit`, checked and written back; fields it does not know
- * are kept as they are. `edit` returning undefined leaves the file as it is.
+ * The layer's file as it is on disk now, changed by `edit`, checked and written back; a result that cannot be
+ * used, an unknown key included, is never written. `edit` returning undefined leaves the file as it is.
  */
 function rewriteLayer(
 	scope: Scope,
@@ -303,7 +334,7 @@ function rewriteLayer(
 	return layer;
 }
 
-/** Session override files are left alone: they belong to their sessions. */
+/** Project and session override files are left alone: they belong to their directories and sessions. */
 export function clearConfig(): void {
 	// force only tolerates a missing file; permissions, sharing violations, etc. must reach the caller.
 	rmSync(CONFIG_FILE, { force: true });
@@ -359,7 +390,7 @@ export function writeJson(file: string, value: object, privateDirectory: boolean
 
 // ---------------------------------------------------------------- merge
 
-export type Source = "session" | "global" | "default";
+export type Source = LayerName | "default";
 
 export interface Resolved {
 	values: Partial<ManagedFields> & Settings;
@@ -367,20 +398,18 @@ export interface Resolved {
 	allowedUserIds?: string[];
 }
 
-/** built-in default < global < session; a group comes whole from the highest layer that has it. */
-export function mergeLayers(global: Layer | undefined, session: Layer | undefined): Resolved {
+/** built-in default < global < project < session; a group comes whole from the highest layer that has it. */
+export function mergeLayers(layers: Partial<Record<LayerName, Layer>>): Resolved {
 	const values: Record<string, unknown> = {};
 	const sources: Partial<Record<FieldName, Source>> = {};
 	for (const spec of SETTING_FIELDS) {
 		values[spec.name] = Array.isArray(spec.default) ? [...spec.default] : spec.default;
 		sources[spec.name] = "default";
 	}
-	const owner = (name: FieldName): [Source, Layer] | undefined =>
-		session?.[name] !== undefined
-			? ["session", session]
-			: global?.[name] !== undefined
-				? ["global", global]
-				: undefined;
+	const owner = (name: FieldName): [Source, Layer] | undefined => {
+		const source = [...LAYERS].reverse().find((layer) => layers[layer]?.[name] !== undefined);
+		return source && [source, layers[source]!];
+	};
 	for (const group of GROUPS) {
 		const found = owner(group[0]);
 		if (!found) continue;
@@ -392,7 +421,7 @@ export function mergeLayers(global: Layer | undefined, session: Layer | undefine
 	}
 	// A target saved without its type is a single chat. Defaults apply here only, never to a layer.
 	if (values.defaultChatId !== undefined) values.defaultChatType ??= 1;
-	return { values: values as Resolved["values"], sources, allowedUserIds: global?.allowedUserIds };
+	return { values: values as Resolved["values"], sources, allowedUserIds: layers.global?.allowedUserIds };
 }
 
 /** What a registration is made of; any change to it needs /wecom-aibot connect. */
@@ -431,8 +460,9 @@ export function connectionKey(connection: Connection | undefined): string {
 // ---------------------------------------------------------------- the current session
 
 /**
- * Every read goes to disk, so other windows' and hand edits apply at the next use. A fork snapshots its
- * parent's overrides once (its file is written even when empty), then the two evolve independently.
+ * Every read goes to disk, so other windows' and hand edits apply at the next use. The project layer is the
+ * directory pi started in, shared by every session there. A fork snapshots its parent's session overrides once
+ * (its file is written even when empty), then the two evolve independently.
  */
 export class SessionConfig {
 	private lastGood: Resolved | undefined;
@@ -440,16 +470,40 @@ export class SessionConfig {
 
 	constructor(
 		readonly sessionId: string,
+		/** The directory pi started in: it names the project layer. */
+		readonly cwd: string,
 		/** The parent's session file from the session header (fork, clone, `--fork`). */
 		private readonly parentSessionFile: string | undefined,
 		private readonly report: (message: string, type: "info" | "warning") => void,
 	) {}
 
+	scope(layer: LayerName): Scope {
+		return layer === "global" ? "global" : layer === "project" ? { project: this.cwd } : { session: this.sessionId };
+	}
+
 	read(): Resolved {
-		const resolved = mergeLayers(readLayer("global"), this.ensure());
+		const resolved = this.upTo("session");
 		this.lastGood = resolved;
 		this.warned = false;
 		return resolved;
+	}
+
+	/** What the layers up to `top` resolve to, the layers above it left out. */
+	upTo(top: LayerName): Resolved {
+		return this.resolveWith(top, this.layer(top));
+	}
+
+	/** What `top` inherits: the layers below it, without its own file. */
+	below(top: LayerName): Resolved {
+		return this.resolveWith(top, undefined);
+	}
+
+	/** The layers below `top` as they are on disk, `own` standing for `top`'s file: what a guard checks before writing. */
+	resolveWith(top: LayerName, own: Layer | undefined): Resolved {
+		const layers: Partial<Record<LayerName, Layer>> = {};
+		for (const layer of LAYERS.slice(0, LAYERS.indexOf(top))) layers[layer] = this.layer(layer);
+		layers[top] = own;
+		return mergeLayers(layers);
 	}
 
 	get latest(): Resolved | undefined {
@@ -472,13 +526,13 @@ export class SessionConfig {
 		}
 	}
 
-	layer(): Layer | undefined {
-		return this.ensure();
+	layer(layer: LayerName): Layer | undefined {
+		return layer === "session" ? this.ensure() : readLayer(this.scope(layer));
 	}
 
-	patch(change: LayerChange, guard?: (current: Layer | undefined) => void): Layer {
-		this.ensure();
-		return patchLayer({ session: this.sessionId }, change, guard);
+	patch(layer: LayerName, change: LayerChange, guard?: (current: Layer | undefined) => void): Layer {
+		if (layer === "session") this.ensure();
+		return patchLayer(this.scope(layer), change, guard);
 	}
 
 	private ensure(): Layer | undefined {
@@ -528,8 +582,10 @@ export interface PromptsEdit {
 	prompts: string[];
 }
 
+/** `command` is the command up to the action, `/wecom-aibot config --scope session`: hints keep the target written. */
 export function parseAssignments(
 	tokens: readonly string[],
+	command = "/wecom-aibot config",
 ): { set: Partial<ManagedFields>; prompts?: PromptsEdit } | { problems: string[] } {
 	const problems: string[] = [];
 	const set: Record<string, unknown> = {};
@@ -553,8 +609,8 @@ export function parseAssignments(
 		if (!SETTABLE.includes(spec.name)) {
 			problems.push(
 				spec.name === "docMcpUrl"
-					? "docMcpUrl 只能用 /wecom-aibot config --scope global edit 输入：地址含 apikey，命令会留在输入历史中"
-					: `${spec.name} 只能用 /wecom-aibot config --scope <global|session> edit 输入：命令会留在输入历史中`,
+					? "docMcpUrl 只能用 /wecom-aibot config edit 输入：地址含 apikey，命令会留在输入历史中"
+					: `${spec.name} 只能用 ${command} edit 输入：命令会留在输入历史中`,
 			);
 			continue;
 		}
@@ -571,7 +627,7 @@ export function parseAssignments(
 			problems.push(
 				op
 					? `${spec.name}${sign}= 后面要写提示词`
-					: `${spec.name} 缺少值；删除字段请用 /wecom-aibot config --scope <global|session> unset ${spec.name}`,
+					: `${spec.name} 缺少值；删除字段请用 ${command} unset ${spec.name}`,
 			);
 			continue;
 		}
@@ -582,7 +638,7 @@ export function parseAssignments(
 			else set[spec.name] = parsed.prompts;
 			continue;
 		}
-		const choice = spec.choices?.find((item) => String(item.value).toLowerCase() === text.toLowerCase());
+		const choice = spec.choices?.find((item) => String(item.value) === text);
 		const problem = spec.choices
 			? choice
 				? undefined
@@ -636,8 +692,7 @@ export function parseRemovals(tokens: readonly string[]): { remove: FieldName[] 
 }
 
 function unknownField(typed: string, names: readonly FieldName[]): string {
-	if (typed.toLowerCase() === "allowedUserIds".toLowerCase())
-		return `allowedUserIds 不由 config 管理，请直接编辑全局配置文件 ${CONFIG_FILE}`;
+	if (typed === "allowedUserIds") return `allowedUserIds 不由 config 管理，请直接编辑全局配置文件 ${CONFIG_FILE}`;
 	return `未知字段 ${typed}；可用字段：${names.join("、")}`;
 }
 

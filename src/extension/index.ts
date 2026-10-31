@@ -11,17 +11,17 @@ import { errorMessage, sentences } from "../shared/text.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
 import { argumentTabCompletion } from "./autocomplete.ts";
 import { type BridgeHost, BridgeSession } from "./bridge-session.ts";
-import { commandMenu, completeArguments, helpText, parseInvocation } from "./commands.ts";
+import { commandMenu, completeArguments, helpText, parseInvocation, SCOPE_SLOT } from "./commands.ts";
 import {
 	CONFIG_FILE,
 	type Connection,
 	clearConfig,
 	connectionKey,
 	connectionOf,
+	type LayerName,
 	layerFile,
 	pendingReconnect,
 	type Resolved,
-	readLayer,
 	SessionConfig,
 	type Settings,
 } from "./config.ts";
@@ -156,11 +156,9 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 	 * controlPrompts-='s completions: the list the scope uses now, as config set would change it. A file that
 	 * cannot be read offers none; running the command reports why.
 	 */
-	function promptsIn(scope: "global" | "session"): readonly string[] {
+	function promptsIn(scope: LayerName): readonly string[] {
 		try {
-			return scope === "global"
-				? (readLayer("global")?.controlPrompts ?? [])
-				: sessionConfig().read().values.controlPrompts;
+			return sessionConfig().upTo(scope).values.controlPrompts;
 		} catch {
 			return [];
 		}
@@ -209,7 +207,8 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 			resolved,
 			pendingReconnect: pendingReconnect(resolved, adoptedKey()),
 			source: captureSessionSource(ctx),
-			overrideFile: config && layerFile({ session: config.sessionId }),
+			projectFile: config && layerFile(config.scope("project")),
+			overrideFile: config && layerFile(config.scope("session")),
 		});
 	}
 
@@ -311,6 +310,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 		ctx.ui.addAutocompleteProvider?.(argumentTabCompletion);
 		config = new SessionConfig(
 			ctx.sessionManager.getSessionId(),
+			ctx.cwd,
 			ctx.sessionManager.getHeader()?.parentSession,
 			(message, type) => sessionCtx?.ui.notify(message, type),
 		);
@@ -458,7 +458,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 					if (!resolved) return;
 					const connection = connectionOf(resolved);
 					if (!connection) {
-						ctx.ui.notify("尚未配置机器人凭据，请先运行 /wecom-aibot config --scope global edit", "warning");
+						ctx.ui.notify("尚未配置机器人凭据，请先运行 /wecom-aibot config edit", "warning");
 						return;
 					}
 					if (bridge?.identifyOnly) {
@@ -468,7 +468,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 					if (!connection.target) {
 						ctx.ui.notify(
 							sentences(
-								"默认推送目标未配置，请先运行 /wecom-aibot config --scope <global|session> whoami 识别保存，或用 /wecom-aibot config --scope <global|session> set defaultChatId=<ID> 填写",
+								`默认推送目标未配置，请先运行 /wecom-aibot config ${SCOPE_SLOT} whoami 识别保存，或用 /wecom-aibot config set defaultChatId=<ID> 填写`,
 								bridge ? "本次未更新当前接入" : "尚未接入",
 							),
 							"warning",

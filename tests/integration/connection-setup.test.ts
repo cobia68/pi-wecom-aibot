@@ -203,7 +203,7 @@ test("connect requires a default target but never requires having identified one
 	await h.emit("session_start");
 	await h.command("connect");
 	assert.equal(h.clients.length, 0);
-	assert.match(h.notices.at(-1)!, /默认推送目标.*config --scope <global\|session> whoami/);
+	assert.match(h.notices.at(-1)!, /默认推送目标.*config --scope <global\|project\|session> whoami/);
 	writeLayer("global", config);
 	await h.command("connect");
 	assert.equal(h.clients.length, 1, "a manually configured target is sufficient");

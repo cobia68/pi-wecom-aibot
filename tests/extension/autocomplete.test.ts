@@ -111,10 +111,9 @@ test("a chosen word that can be followed gets its space, so the next Tab goes a 
 	const deeper = await pressTab("/wecom-aibot conf", 2);
 	assert.equal(deeper.text, "/wecom-aibot config ");
 	assert.equal(deeper.listed, true);
-	assert.match(deeper.rendered, /→ --scope <global\|session> /);
+	assert.match(deeper.rendered, /→ --scope <global\|project\|session> /);
 	assert.match(deeper.rendered, /^ {2}show {2,}/m);
-	assert.match(deeper.rendered, /^ {2}whoami {2,}/m);
-	assert.doesNotMatch(deeper.rendered, /^ {2}(edit|set|unset) /m, "a write needs its target first");
+	assert.match(deeper.rendered, /^ {2}set {2,}/m, "a write without a target changes the global layer");
 	// Two matches: the first Tab lists them, the second applies the selected one with its space.
 	assert.equal((await pressTab("/wecom-aibot c", 2)).text, "/wecom-aibot config ");
 	assert.equal(

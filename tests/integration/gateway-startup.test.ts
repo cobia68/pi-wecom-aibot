@@ -15,7 +15,7 @@ test("startup timeout cannot close a gateway registered before socket permission
 	timeout: 5000,
 	skip: process.platform === "win32",
 }, async (t) => {
-	const config = { botId: `startup-${randomUUID()}`, secret: "offline-test-secret", enabled: true };
+	const config = { botId: `startup-${randomUUID()}`, secret: "offline-test-secret" };
 	const original = fs.chmod;
 	let release!: () => void;
 	let entered!: () => void;

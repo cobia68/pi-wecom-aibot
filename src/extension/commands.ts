@@ -1,4 +1,8 @@
-/** /wecom-aibot command table, argument parsing, help text and completion: pure functions without pi state. */
+/**
+ * /wecom-aibot command table, argument parsing, help text and completion: pure functions without pi state.
+ * Subcommands, actions, options, field names and values are case-sensitive, like pi's own command names and the
+ * configuration file.
+ */
 import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { sentences } from "../shared/text.ts";
@@ -9,7 +13,9 @@ import {
 	type FieldName,
 	type FieldSpec,
 	fieldNamed,
+	LAYERS,
 	type ManagedFields,
+	PROJECTS_DIR,
 	type PromptsEdit,
 	parseAssignments,
 	parseRemovals,
@@ -19,8 +25,11 @@ import {
 
 export const WHOAMI_WAIT_SECONDS = 300;
 
-const SCOPES = ["global", "session"] as const;
+const SCOPES = LAYERS;
 export type ConfigScope = (typeof SCOPES)[number];
+/** The target's values as usage lines write them: `<global|project|session>`. */
+const SCOPE_VALUES = `<${SCOPES.join("|")}>`;
+export const SCOPE_SLOT = `--scope ${SCOPE_VALUES}`;
 
 interface OptionSpec {
 	name: string;
@@ -44,16 +53,18 @@ export interface CommandSpec {
 /** `config` has a grammar of its own (--scope, action, 字段=值), parsed by parseConfigArgs. */
 const CONFIG_COMMAND: CommandSpec = {
 	name: "config",
-	usage: "config [--scope <global|session>] <动作> [字段=值 …]",
+	usage: `config [${SCOPE_SLOT}] <动作> [字段=值 …]`,
 	description: "查看或修改配置：机器人凭据、默认推送目标、通知与控制卡设置",
 	maxArgs: 0,
 	options: [
 		{
 			name: "scope",
-			value: "<global|session>",
-			description: "写在动作前：global 全局配置，session 当前 session 的覆盖；edit、set、unset 必填",
+			value: SCOPE_VALUES,
+			description:
+				"写在动作前：global 全局配置，project 当前目录的覆盖，session 当前 session 的覆盖；edit、set、unset 不写时改全局",
 			choices: [
 				["global", "全局配置"],
+				["project", "当前目录的覆盖"],
 				["session", "当前 session 的覆盖"],
 			],
 			example: "config --scope {} show",
@@ -66,8 +77,9 @@ const CONFIG_COMMAND: CommandSpec = {
 		},
 	],
 	details: [
-		"两层配置：global 是全局默认，session 是当前 pi 会话的显式覆盖。优先级：内置默认值 < global < session",
-		"作用域是命令的目标，写在动作前：config --scope <global|session> <动作>。edit、set、unset 必须写；不写作用域时只读：show 显示合并结果，whoami 只识别不保存",
+		"三层配置：global 是全局默认，project 是启动 pi 的目录的显式覆盖，同一目录的 session 共用，session 是当前 pi 会话的显式覆盖。优先级：内置默认值 < global < project < session",
+		"project 的文件在插件自己的文件夹里，不在项目目录：它可能含 Secret，指向的是个人的 userid",
+		`作用域是命令的目标，写在动作前：config ${SCOPE_SLOT} <动作>。edit、set、unset 不写时改全局；show、whoami 不写时只读：show 显示合并结果，whoami 只识别不保存`,
 		"set 写成 字段=值，可一次给多个：先全部校验再一次保存，有错误时一项都不写。controlPrompts 还能写 controlPrompts+=新提示、controlPrompts-=旧提示，只加或只删几条",
 		"botId 与 secret、defaultChatId 与 defaultChatType 各为一组，成组保存、成组删除。botId、secret 只能用 edit 输入（命令会留在输入历史中）；输入时屏幕上会显示 Secret",
 		"whoami：在要识别的聊天里把 pi 显示的 6 位验证码发给机器人（群聊需 @机器人）。识别不受白名单限制；没有接入时临时连接，不出现在在线会话列表，也不接收任务",
@@ -94,7 +106,7 @@ const COMMANDS: CommandSpec[] = [
 		options: [],
 		details: [
 			"重新读取配置，仅连接当前 session，不修改配置；接入配置不变时保留当前任务和待发通知",
-			"BotID、Secret 和默认推送目标必须齐全；目标可用 /wecom-aibot config --scope <global|session> whoami 识别保存，也可用 /wecom-aibot config --scope <global|session> set defaultChatId=<ID> 填写",
+			`BotID、Secret 和默认推送目标必须齐全；目标可用 /wecom-aibot config ${SCOPE_SLOT} whoami 识别保存，也可用 /wecom-aibot config set defaultChatId=<ID> 填写`,
 			"注册与企微订阅均成功后，为默认聊天创建或复用本 session 的控制卡；重复接入、恢复同一 session 或网络重连不重发，卡片失败不撤销连接",
 			"控制卡只在点击后刷新；找不到旧卡时，在企微发 /wecom-aibot sessions，选择会话后点「打开会话」补发",
 			"每个 session 都需手动 /wecom-aibot connect，包括新建、恢复、分叉和重载；退出或切换会话时自动断开",
@@ -144,7 +156,7 @@ const COMMANDS: CommandSpec[] = [
 		maxArgs: 0,
 		options: [],
 		details: [
-			"删除同一 pi 用户目录共用的全局配置文件：BotID、Secret、默认推送目标、通知设置和白名单一起删除。各 session 的覆盖文件保留",
+			"删除同一 pi 用户目录共用的全局配置文件：BotID、Secret、默认推送目标、通知设置和白名单一起删除。各目录、各 session 的覆盖文件保留",
 			"需要交互确认，没有界面时不删除。只停止当前 pi 的接入；其他 pi 若已连接，仍会继续接收，直到它们各自 disconnect 或退出",
 		],
 	},
@@ -161,113 +173,127 @@ export type ConfigInvocation =
 	| { action: "whoami"; scope?: ConfigScope; seconds: number };
 
 /** The forms of config in menu order; one with `args` is put in the editor to be completed, not run. */
-export type ConfigSubcommand = { usage: string; description: string; scope?: ConfigScope } & (
-	| { run: ConfigInvocation }
-	| { args: string }
-);
+export type ConfigSubcommand = { usage: string; description: string } & ({ run: ConfigInvocation } | { args: string });
 
-const CONFIG_SUBCOMMANDS: readonly ConfigSubcommand[] = [
+/** Without a target: show and whoami only read, the writes change the global layer. */
+const PLAIN_SUBCOMMANDS: readonly ConfigSubcommand[] = [
 	{
 		usage: "show",
-		description: "查看当前 session 合并后的配置，并标明每项来自 session、global 或内置默认值",
+		description: "查看当前 session 合并后的配置，并标明每项来自 session、全局或内置默认值",
 		run: { action: "show" },
 	},
 	{
-		usage: "--scope global show",
-		description: "查看全局显式保存的配置",
-		scope: "global",
-		run: { action: "show", scope: "global" },
-	},
-	{
-		usage: "--scope session show",
-		description: "查看当前 session 显式保存的覆盖项",
-		scope: "session",
-		run: { action: "show", scope: "session" },
-	},
-	{
-		usage: "--scope global edit",
+		usage: "edit",
 		description: "交互编辑全局配置；还没有凭据时引导填写 BotID、Secret 和默认推送目标",
-		scope: "global",
 		run: { action: "edit", scope: "global" },
 	},
-	{
-		usage: "--scope session edit",
-		description: "交互编辑当前 session 的覆盖项",
-		scope: "session",
-		run: { action: "edit", scope: "session" },
-	},
-	{ usage: "--scope global set", args: "字段=值 …", description: "修改全局字段", scope: "global" },
-	{ usage: "--scope session set", args: "字段=值 …", description: "修改当前 session 的覆盖项", scope: "session" },
-	{
-		usage: "--scope global unset",
-		args: "字段 …",
-		description: "删除全局字段，回到内置默认值",
-		scope: "global",
-	},
-	{
-		usage: "--scope session unset",
-		args: "字段 …",
-		description: "删除 session 覆盖，重新继承全局值或内置默认值",
-		scope: "session",
-	},
+	{ usage: "set", args: "字段=值 …", description: "修改全局字段" },
+	{ usage: "unset", args: "字段 …", description: "删除全局字段，回到内置默认值" },
 	{
 		usage: "whoami",
 		description: "发验证码识别聊天，只显示 chatid、chat_type 和 userid",
 		run: { action: "whoami", seconds: WHOAMI_WAIT_SECONDS },
 	},
-	{
-		usage: "--scope global whoami",
-		description: "识别聊天，设为全局默认推送目标",
-		scope: "global",
-		run: { action: "whoami", scope: "global", seconds: WHOAMI_WAIT_SECONDS },
-	},
-	{
-		usage: "--scope session whoami",
-		description: "识别聊天，设为当前 session 的默认推送目标",
-		scope: "session",
-		run: { action: "whoami", scope: "session", seconds: WHOAMI_WAIT_SECONDS },
-	},
 ];
+
+/** What each form says when it is written for one layer, and the menu item that opens that layer's forms. */
+const LAYER_TEXT: Record<
+	ConfigScope,
+	{ menu: string; show: string; edit: string; set: string; unset: string; whoami: string }
+> = {
+	global: {
+		menu: "只看、只改全局配置",
+		show: "查看全局显式保存的配置",
+		edit: "交互编辑全局配置；还没有凭据时引导填写 BotID、Secret 和默认推送目标",
+		set: "修改全局字段",
+		unset: "删除全局字段，回到内置默认值",
+		whoami: "识别聊天，设为全局默认推送目标",
+	},
+	project: {
+		menu: "只看、只改当前目录的项目级配置",
+		show: "查看当前目录显式保存的覆盖项",
+		edit: "交互编辑当前目录的覆盖项",
+		set: "修改当前目录的覆盖项",
+		unset: "删除当前目录的覆盖，重新继承全局值或内置默认值",
+		whoami: "识别聊天，设为当前目录的默认推送目标",
+	},
+	session: {
+		menu: "只看、只改当前 session 的覆盖项",
+		show: "查看当前 session 显式保存的覆盖项",
+		edit: "交互编辑当前 session 的覆盖项",
+		set: "修改当前 session 的覆盖项",
+		unset: "删除 session 覆盖，重新继承项目级、全局值或内置默认值",
+		whoami: "识别聊天，设为当前 session 的默认推送目标",
+	},
+};
+
+function layerSubcommands(scope: ConfigScope): ConfigSubcommand[] {
+	const text = LAYER_TEXT[scope];
+	const at = `--scope ${scope}`;
+	return [
+		{ usage: `${at} show`, description: text.show, run: { action: "show", scope } },
+		{ usage: `${at} edit`, description: text.edit, run: { action: "edit", scope } },
+		{ usage: `${at} set`, args: "字段=值 …", description: text.set },
+		{ usage: `${at} unset`, args: "字段 …", description: text.unset },
+		{
+			usage: `${at} whoami`,
+			description: text.whoami,
+			run: { action: "whoami", scope, seconds: WHOAMI_WAIT_SECONDS },
+		},
+	];
+}
 
 /** The config actions: their usage and help, and the short description completion shows. */
 const CONFIG_ACTION_TABLE = [
 	{
 		action: "show",
-		usage: "[--scope <global|session>] show",
+		usage: `[${SCOPE_SLOT}] show`,
 		help: "查看配置；不写作用域时显示合并结果并标明来源",
 		short: "查看配置",
 	},
 	{
 		action: "edit",
-		usage: "--scope <global|session> edit",
-		help: "交互编辑一层；还没有凭据时引导填写 BotID、Secret 和默认推送目标",
+		usage: `[${SCOPE_SLOT}] edit`,
+		help: "交互编辑一层，不写作用域时编辑全局；还没有凭据时引导填写 BotID、Secret 和默认推送目标",
 		short: "交互编辑一层",
 	},
 	{
 		action: "set",
-		usage: "--scope <global|session> set 字段=值 …",
-		help: "修改字段，未给出的字段保持不变；controlPrompts+= / -= 只加或只删几条",
+		usage: `[${SCOPE_SLOT}] set 字段=值 …`,
+		help: "修改字段，不写作用域时改全局，未给出的字段保持不变；controlPrompts+= / -= 只加或只删几条",
 		short: "修改字段：字段=值",
 	},
 	{
 		action: "unset",
-		usage: "--scope <global|session> unset 字段 …",
-		help: "删除字段，重新继承下一层；关联组整组删除",
+		usage: `[${SCOPE_SLOT}] unset 字段 …`,
+		help: "删除字段，不写作用域时删全局的，重新继承下一层；关联组整组删除",
 		short: "删除字段，重新继承",
 	},
 	{
 		action: "whoami",
-		usage: "[--scope <global|session>] whoami",
+		usage: `[${SCOPE_SLOT}] whoami`,
 		help: "发验证码识别聊天；写了作用域时确认后设为这一层的默认推送目标",
 		short: "发验证码识别聊天",
 	},
 ] as const;
 const CONFIG_ACTIONS: readonly string[] = CONFIG_ACTION_TABLE.map((item) => item.action);
-/** The writes: each needs a target, `config --scope <global|session> <动作>`. */
-const SCOPED_ACTIONS = ["edit", "set", "unset"];
 
+/**
+ * The menu of `config`: the forms without a target, then one item per layer that opens that layer's forms. With a
+ * scope: that layer's forms only.
+ */
 export function configSubcommands(scope?: ConfigScope): readonly ConfigSubcommand[] {
-	return CONFIG_SUBCOMMANDS.filter((item) => !scope || item.scope === scope);
+	if (scope) return layerSubcommands(scope);
+	return [
+		...PLAIN_SUBCOMMANDS,
+		...SCOPES.map(
+			(layer): ConfigSubcommand => ({
+				usage: `--scope ${layer} …`,
+				description: LAYER_TEXT[layer].menu,
+				run: { action: "choose", scope: layer },
+			}),
+		),
+	];
 }
 
 export function subcommandUsage(item: ConfigSubcommand): string {
@@ -320,8 +346,8 @@ function scanArgs(input: string): {
 			continue;
 		}
 		const option = /^--([^=]+)(?:=(.*))?$/.exec(token);
-		if (option && known.has(option[1].toLowerCase())) {
-			const name = option[1].toLowerCase();
+		if (option && known.has(option[1])) {
+			const name = option[1];
 			let value = option[2];
 			if (value === undefined && tokens[i + 1] !== undefined && !tokens[i + 1].startsWith("-")) value = tokens[++i];
 			if (!value) {
@@ -351,7 +377,7 @@ function scanArgs(input: string): {
 type Scan = ReturnType<typeof scanArgs>;
 
 function commandNamed(name: string | undefined): CommandSpec | undefined {
-	return name === undefined ? undefined : COMMANDS.find((command) => command.name === name.toLowerCase());
+	return name === undefined ? undefined : COMMANDS.find((command) => command.name === name);
 }
 
 export function parseInvocation(input: string): Invocation {
@@ -436,9 +462,8 @@ function bareInvocation(scan: Scan): Invocation {
 
 function configOptionProblem(token: string): string {
 	const name = token.replace(/^--?/, "").split("=")[0];
-	const lower = name.toLowerCase();
-	if (isScope(lower)) return `未知选项 ${token}。作用域写成 --scope ${lower}`;
-	if (CONFIG_ACTIONS.includes(lower)) return `${lower} 是动作，不带 --：/wecom-aibot config ${lower}`;
+	if (isScope(name)) return `未知选项 ${token}。作用域写成 --scope ${name}`;
+	if (CONFIG_ACTIONS.includes(name)) return `${name} 是动作，不带 --：/wecom-aibot config ${name}`;
 	const field = fieldNamed(name);
 	if (field) return `字段写成 ${field.name}=…，不用 --`;
 	return sentences(`未知选项 ${token}`, `${supportedOptions(CONFIG_COMMAND)}；字段写成 字段=值`);
@@ -449,7 +474,7 @@ function isScope(word: string | undefined): word is ConfigScope {
 }
 
 /**
- * `config [--scope <global|session>] <动作> …`: the scope is the command's target and goes before the action, like
+ * `config [--scope <global|project|session>] <动作> …`: the scope is the command's target and goes before the action, like
  * the WeCom side's `--session-id <id> <动作>`; whoami's --wait goes after it. `positionOf` counts the words after
  * `config` that came before each option.
  */
@@ -459,9 +484,8 @@ function parseConfigArgs(args: string[], options: Map<string, string>, positionO
 		message: sentences(message, "查看帮助：/wecom-aibot config --help"),
 	});
 	const rejected = (problems: string[]) => error(sentences(problems.join("；"), "未做任何修改"));
-	const words = args.map((arg) => arg.toLowerCase());
-	const given = options.get("scope")?.toLowerCase();
-	if (given !== undefined && !isScope(given)) return error("--scope 只能是 global 或 session");
+	const given = options.get("scope");
+	if (given !== undefined && !isScope(given)) return error(`--scope 只能是 ${orList(SCOPES)}`);
 	const scope = given as ConfigScope | undefined;
 	const wait = options.get("wait");
 	/** The command as it should be written: the target first, then the action and its words, then --wait. */
@@ -469,7 +493,7 @@ function parseConfigArgs(args: string[], options: Map<string, string>, positionO
 		["/wecom-aibot config", ...(target ? ["--scope", target] : []), ...rest, ...(wait ? ["--wait", wait] : [])].join(
 			" ",
 		);
-	const [action] = words;
+	const [action] = args;
 	const values = args.slice(1);
 	if (scope !== undefined && positionOf.get("scope") !== 0)
 		return error(`--scope 要写在动作前：${written(scope, args)}`);
@@ -481,36 +505,36 @@ function parseConfigArgs(args: string[], options: Map<string, string>, positionO
 	const scoped = scope ? { scope } : {};
 	if (action === undefined) return { kind: "config", config: { action: "choose", ...scoped } };
 	if (!CONFIG_ACTIONS.includes(action)) return error(`未知动作 ${args[0]}；可用 ${CONFIG_ACTIONS.join("、")}`);
-	const needsScope = (example: string) =>
-		error(`${action} 需要 --scope：/wecom-aibot config --scope session ${action}${example}，或 --scope global`);
+	/** The command as typed up to the action: an example keeps the target the user wrote. */
+	const typed = `/wecom-aibot config${scope ? ` --scope ${scope}` : ""}`;
+	// Writes without a target change the global layer, like pi's own `install` and `config` without `--local`.
+	const target = scope ?? "global";
 	switch (action) {
 		case "show":
 			return values.length ? error("config show 不接受参数") : { kind: "config", config: { action, ...scoped } };
 		case "edit":
-			if (values.length) return error("config edit 不接受参数");
-			return scope ? { kind: "config", config: { action, scope } } : needsScope("");
+			return values.length ? error("config edit 不接受参数") : { kind: "config", config: { action, scope: target } };
 		case "set": {
-			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " notificationScope=all-runs");
-			if (!values.length)
-				return error(
-					`set 需要至少一个 字段=值，例如 /wecom-aibot config --scope ${scope} set notificationScope=all-runs`,
-				);
-			const parsed = parseAssignments(values);
+			if (!values.length) return error(`set 需要至少一个 字段=值，例如 ${typed} set notificationScope=all-runs`);
+			const parsed = parseAssignments(values, typed);
 			return "problems" in parsed
 				? rejected(parsed.problems)
 				: {
 						kind: "config",
-						config: { action, scope, set: parsed.set, ...(parsed.prompts ? { prompts: parsed.prompts } : {}) },
+						config: {
+							action,
+							scope: target,
+							set: parsed.set,
+							...(parsed.prompts ? { prompts: parsed.prompts } : {}),
+						},
 					};
 		}
 		case "unset": {
-			if (!scope) return needsScope(values.length ? ` ${values.join(" ")}` : " notificationScope");
-			if (!values.length)
-				return error(`unset 需要字段名，例如 /wecom-aibot config --scope ${scope} unset notificationScope`);
+			if (!values.length) return error(`unset 需要字段名，例如 ${typed} unset notificationScope`);
 			const parsed = parseRemovals(values);
 			return "problems" in parsed
 				? rejected(parsed.problems)
-				: { kind: "config", config: { action, scope, remove: parsed.remove } };
+				: { kind: "config", config: { action, scope: target, remove: parsed.remove } };
 		}
 		default: {
 			if (values.length) return error("config whoami 不接受参数");
@@ -522,6 +546,11 @@ function parseConfigArgs(args: string[], options: Map<string, string>, positionO
 			};
 		}
 	}
+}
+
+/** `global 或 session`, `global、project 或 session`. */
+function orList(words: readonly string[]): string {
+	return words.length < 2 ? words.join("") : `${words.slice(0, -1).join("、")} 或 ${words.at(-1)}`;
 }
 
 function supportedOptions(command: CommandSpec): string {
@@ -582,6 +611,7 @@ function hasOptionsOrArgs(command: CommandSpec): boolean {
 function configPaths(): string[] {
 	return table([
 		["配置文件", CONFIG_FILE],
+		["项目级", join(PROJECTS_DIR, "--<工作目录>--.json")],
 		["会话覆盖", join(SESSIONS_DIR, "<session-id>.json")],
 	]);
 }
@@ -661,11 +691,11 @@ function configHelpText(): string {
 		...section("字段", table(FIELDS.map((spec) => [spec.name, fieldText(spec)]))),
 		...section("选项", optionRows(command)),
 		...section("示例", [
-			"  /wecom-aibot config --scope global edit",
-			"  /wecom-aibot config --scope global set notificationScope=all-runs",
+			"  /wecom-aibot config edit",
+			"  /wecom-aibot config set notificationScope=all-runs",
 			"  /wecom-aibot config --scope session set controlPrompts=继续,运行测试,总结进度",
-			"  /wecom-aibot config --scope global set controlPrompts+=部署到测试环境",
-			"  /wecom-aibot config --scope global set controlPrompts-=运行测试",
+			"  /wecom-aibot config set controlPrompts+=部署到测试环境",
+			"  /wecom-aibot config set controlPrompts-=运行测试",
 			"  /wecom-aibot config --scope session unset defaultChatId",
 			"  /wecom-aibot config --scope global whoami",
 		]),
@@ -700,14 +730,12 @@ export function completeArguments(
 	prompts: (scope: ConfigScope) => readonly string[] = () => [],
 ): { value: string; label: string }[] | null {
 	const tokens = prefix.trimStart().split(/\s+/);
-	const current = (tokens.pop() ?? "").toLowerCase();
+	const current = tokens.pop() ?? "";
 	const head = tokens.length ? `${tokens.join(" ")} ` : "";
 	const all = candidatesAt(tokens, current, prompts);
 	const labels = columns(all.map((item) => [item.name ?? item.value, item.description] as const));
-	const shown = all.flatMap((item, index) =>
-		item.value.toLowerCase().startsWith(current) ? [{ item, label: labels[index] }] : [],
-	);
-	if (!shown.length || shown.some(({ item }) => item.value.toLowerCase() === current)) return null;
+	const shown = all.flatMap((item, index) => (item.value.startsWith(current) ? [{ item, label: labels[index] }] : []));
+	if (!shown.length || shown.some(({ item }) => item.value === current)) return null;
 	const spaced = (item: Candidate) =>
 		item.takesValue || (!item.value.endsWith("=") && candidatesAt([...tokens, item.value], "", prompts).length > 0);
 	return shown.map(({ item, label }) => ({ value: `${head}${item.value}${spaced(item) ? " " : ""}`, label }));
@@ -721,7 +749,7 @@ function candidatesAt(
 ): Candidate[] {
 	if (!tokens.length) return topLevel();
 	const command = commandNamed(tokens[0]);
-	const rest = tokens.slice(1).map((token) => token.toLowerCase());
+	const rest = tokens.slice(1);
 	if (!command || rest.includes("--help")) return [];
 	const pending = command.options.find((option) => rest.at(-1) === `--${option.name}`);
 	// config's --scope takes a value only right after `config`; written later it is refused when run.
@@ -741,6 +769,8 @@ function candidatesAt(
 		if (!words.length) early.add(name);
 		if (command.options.some((option) => rest[i] === `--${option.name}`)) i++;
 	}
+	// An option the command does not have, or one in the wrong case, is refused when run: offer nothing.
+	if ([...used].some((name) => name && !command.options.some((option) => option.name === name))) return [];
 	const option = (item: OptionSpec): Candidate => ({
 		value: `--${item.name}`,
 		name: `--${item.name}${item.value ? ` ${item.value}` : ""}`,
@@ -754,27 +784,34 @@ function candidatesAt(
 	}
 	const [action] = words;
 	const scoped = used.has("scope");
-	const scopeIndex = rest.indexOf("--scope");
-	const scope = scopeIndex >= 0 ? rest[scopeIndex + 1] : undefined;
+	const scopeAt = rest.findIndex((token) => token === "--scope" || token.startsWith("--scope="));
+	const given =
+		scopeAt < 0 ? undefined : rest[scopeAt].startsWith("--scope=") ? rest[scopeAt].slice(8) : rest[scopeAt + 1];
+	// The layer a write without a target changes.
+	const scope = scoped ? given : "global";
 	const configOption = (name: string) => option(command.options.find((item) => item.name === name)!);
-	// The target goes before the action; until it is given, only the actions that may go without it are offered.
+	// The target goes before the action: offered until an action is written.
 	if (action === undefined)
-		return [
-			...(scoped ? [] : [configOption("scope")]),
-			...configCandidates(words, current, scope, prompts).filter(
-				(item) => scoped || !SCOPED_ACTIONS.includes(item.value),
-			),
-			help,
-		];
-	// A target after the action, a --wait before it, or a write without a target is refused when run: offer nothing.
+		return [...(scoped ? [] : [configOption("scope")]), ...configCandidates(words, current, scope, prompts), help];
+	// A target after the action or a --wait before it is refused when run: offer nothing.
 	if (!CONFIG_ACTIONS.includes(action) || (scoped && !early.has("scope")) || early.has("wait")) return [];
-	if (SCOPED_ACTIONS.includes(action) && !scoped) return [];
 	if (action !== "set" && action !== "unset" && words.length > 1) return [];
+	// A word that running the command would refuse, a field in the wrong case among them: offer nothing after it.
+	if (!words.slice(1).every((word) => fieldWord(action, word))) return [];
 	return [
 		...configCandidates(words, current, scope, prompts),
 		...(action === "whoami" && !used.has("wait") ? [configOption("wait")] : []),
 		help,
 	];
+}
+
+/** A word after set or unset that running the command takes: a settable field=value, or a field's name. */
+function fieldWord(action: string, word: string): boolean {
+	if (action === "unset") return fieldNamed(word) !== undefined;
+	const equals = word.indexOf("=");
+	const typed = word.slice(0, equals);
+	const spec = equals > 0 && equals < word.length - 1 ? fieldNamed(typed.replace(/[+-]$/, "")) : undefined;
+	return !!spec && SETTABLE.includes(spec.name) && (typed === spec.name || spec.name === "controlPrompts");
 }
 
 function topLevel(): Candidate[] {
@@ -796,7 +833,7 @@ function configCandidates(
 	scope: string | undefined,
 	prompts: (scope: ConfigScope) => readonly string[],
 ): Candidate[] {
-	const [action, ...rest] = words.map((word) => word.toLowerCase());
+	const [action, ...rest] = words;
 	const candidates = (items: [value: string, description: string][]): Candidate[] =>
 		items.map(([value, description]) => ({ value, description }));
 	if (action === undefined)
@@ -826,7 +863,7 @@ function configCandidates(
 			);
 		}
 		return candidates(
-			FIELDS.filter((item) => SETTABLE.includes(item.name) && !used.has(item.name.toLowerCase())).flatMap(
+			FIELDS.filter((item) => SETTABLE.includes(item.name) && !used.has(item.name)).flatMap(
 				(item): [string, string][] =>
 					item.name === "controlPrompts"
 						? [
@@ -842,7 +879,7 @@ function configCandidates(
 		return candidates(
 			FIELDS.filter(
 				// The document address lives only in the global layer: a session has none to remove.
-				(item) => !used.has(item.name.toLowerCase()) && (scope === "global" || item.effect !== "document"),
+				(item) => !used.has(item.name) && (scope === "global" || item.effect !== "document"),
 			).map((item): [string, string] => [item.name, item.label]),
 		);
 	return [];

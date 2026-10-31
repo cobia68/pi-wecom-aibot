@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/cobia68/pi-wecom-aibot/main/config.schema.json",
+  "title": "pi-wecom-aibot 全局配置",
+  "description": "~/.pi/agent/wecom-aibot/config.json。用 /wecom-aibot config 查看和修改；allowedUserIds 只能在这里手写",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "description": "这份 JSON Schema 的地址，给编辑器用",
+      "type": "string"
+    },
+    "botId": {
+      "description": "智能机器人 BotID",
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "secret": {
+      "description": "长连接专用 Secret；查看时只显示是否已配置",
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "defaultChatId": {
+      "description": "默认推送目标：单聊填 userid，群聊填群 chatid，原样保存",
+      "type": "string",
+      "pattern": "^[^\"'“”‘’`\\s]+$"
+    },
+    "defaultChatType": {
+      "description": "目标类型：与 defaultChatId 成组；只给 defaultChatId 时为 1。1：单聊；2：群聊",
+      "type": "integer",
+      "enum": [
+        1,
+        2
+      ]
+    },
+    "notificationScope": {
+      "description": "自动结束通知范围：哪些运行结束后自动通知；显式发送、部署测试和会话控制卡不受影响。wecom-tasks：仅自动回传企微发起的任务结果；all-runs：已接入会话的每轮完整运行结束后都通知；企微任务不重复发送",
+      "type": "string",
+      "enum": [
+        "wecom-tasks",
+        "all-runs"
+      ],
+      "default": "wecom-tasks"
+    },
+    "controlPrompts": {
+      "description": "控制卡提示词：控制卡「提示词」下拉框的候选，最多 10 条；点「发提示词」时把选中的那条原样作为本 session 的任务。下拉框只显示前 10 个字。config set 用英文逗号分隔（controlPrompts=继续,运行测试），整份替换；controlPrompts+=新提示 加在末尾，controlPrompts-=旧提示 删掉一条，多条也用英文逗号分隔；project 或 session 还没有自己的提示词时，+= 和 -= 先复制继承来的那份再改，之后不再跟随继承来的列表。含空格或逗号的提示词用 config edit 一行一条填写，清空编辑器即为没有提示词。不设置时没有提示词，控制卡不显示下拉框和「发提示词」",
+      "type": "array",
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500,
+        "pattern": "^(?!\\s)[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*(?<!\\s)$"
+      },
+      "default": []
+    },
+    "docMcpUrl": {
+      "description": "会话文档：智能机器人「文档」授权后的 streamableHTTP URL（工作台 → 智能机器人 → 可使用权限）。配置后，插件在企业微信里建一份文档，每个 session 一页，写最近的回复和通知，点控制卡的引用区打开。地址含 apikey：只能写在全局配置里，用 /wecom-aibot config edit 填写，查看时只显示是否已配置",
+      "type": "string",
+      "pattern": "^https://",
+      "maxLength": 2048
+    },
+    "allowedUserIds": {
+      "description": "允许给 pi 发任务的企微 userid；不写或留空时所有人都能用。只能写在全局配置里",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "\\S"
+      }
+    }
+  },
+  "dependentRequired": {
+    "botId": [
+      "secret"
+    ],
+    "secret": [
+      "botId"
+    ],
+    "defaultChatType": [
+      "defaultChatId"
+    ]
+  }
+}

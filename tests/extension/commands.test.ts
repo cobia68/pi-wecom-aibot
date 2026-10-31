@@ -59,7 +59,7 @@ test("the total help lists its sections in a fixed order and never leaves traili
 	assert.match(help, /^ {2}不带子命令时弹出子命令菜单$/m);
 	// The total help fits an 80-column terminal; the paths are this machine's and may be longer.
 	for (const line of help.split("\n"))
-		if (!/^ {2}(配置文件|会话覆盖) /.test(line)) assert.ok(visibleWidth(line) <= 80, line);
+		if (!/^ {2}(配置文件|项目级|会话覆盖) /.test(line)) assert.ok(visibleWidth(line) <= 80, line);
 	for (const input of [...ALL_HELP, ...ALL_TOPICS]) {
 		const text = input === "--help" ? help : topicHelp(input);
 		for (const line of text.split("\n")) {
@@ -89,6 +89,7 @@ test("every topic help has a usage line; only config and reset name the paths, a
 		assert.match(help, new RegExp(`^用法：/wecom-aibot ${name}`, "m"), name);
 		if (name === "config" || name === "reset") {
 			assert.match(help, /配置文件/, name);
+			assert.match(help, /项目级/, name);
 			assert.match(help, /会话覆盖/, name);
 		} else assert.doesNotMatch(help, /配置文件/, name);
 		assert.doesNotMatch(help, /\/wecom-aibot --help/, name);
@@ -124,11 +125,14 @@ test("config help documents scopes, every field with its default, and no retired
 		assert.match(help, new RegExp(`^ {2}${field} `, "m"), field);
 	assert.match(help, /wecom-tasks：.*（默认）/);
 	assert.doesNotMatch(help, /screenshotTheme|截图/);
-	assert.match(help, /^用法：\/wecom-aibot config \[--scope <global\|session>\] <动作> \[字段=值 …\]$/m);
-	assert.match(help, /作用域是命令的目标，写在动作前：config --scope <global\|session> <动作>/);
-	assert.match(help, /^ {2}--scope <global\|session> {2,}写在动作前/m);
-	assert.match(help, /^ {2}--scope <global\|session> unset 字段 … {2,}/m);
-	assert.match(help, /^ {2}\[--scope <global\|session>\] whoami {2,}/m);
+	assert.match(help, /^用法：\/wecom-aibot config \[--scope <global\|project\|session>\] <动作> \[字段=值 …\]$/m);
+	assert.match(
+		help,
+		/作用域是命令的目标，写在动作前：config --scope <global\|project\|session> <动作>。edit、set、unset 不写时改全局/,
+	);
+	assert.match(help, /^ {2}--scope <global\|project\|session> {2,}写在动作前/m);
+	assert.match(help, /^ {2}\[--scope <global\|project\|session>\] unset 字段 … {2,}/m);
+	assert.match(help, /^ {2}\[--scope <global\|project\|session>\] whoami {2,}/m);
 	assert.match(help, /6 位验证码.*不受白名单限制/);
 	assert.match(help, /只能用 edit 输入/);
 	assert.match(help, /allowedUserIds.*不由 config 管理/);
@@ -175,7 +179,7 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 		return invocation.kind === "config" ? invocation.config : undefined;
 	};
 	assert.deepEqual(config("config"), { action: "choose" });
-	assert.deepEqual(config("config --scope GLOBAL"), { action: "choose", scope: "global" });
+	assert.deepEqual(config("config --scope global"), { action: "choose", scope: "global" });
 	assert.deepEqual(config("config show"), { action: "show" });
 	assert.deepEqual(config("config --scope global show"), { action: "show", scope: "global" });
 	assert.deepEqual(config("config --scope session show"), { action: "show", scope: "session" });
@@ -207,6 +211,18 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 		scope: "global",
 		remove: ["notificationScope"],
 	});
+	// A write without a target changes the global layer, like pi's own install and config without --local.
+	assert.deepEqual(config("config edit"), { action: "edit", scope: "global" });
+	assert.deepEqual(config("config set notificationScope=all-runs"), {
+		action: "set",
+		scope: "global",
+		set: { notificationScope: "all-runs" },
+	});
+	assert.deepEqual(config("config unset defaultChatId"), {
+		action: "unset",
+		scope: "global",
+		remove: ["defaultChatId", "defaultChatType"],
+	});
 	assert.deepEqual(config("config whoami"), { action: "whoami", seconds: 300 });
 	assert.deepEqual(config("config --scope session whoami --wait 30"), {
 		action: "whoami",
@@ -214,16 +230,23 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 		seconds: 30,
 	});
 	const errors: [string, RegExp][] = [
+		["config --scope everyone set x=1", /--scope 只能是 global、project 或 session/],
+		// Case-sensitive like pi's own command names and the file: a word in the wrong case is not the word.
+		["config --scope GLOBAL show", /^--scope 只能是 global、project 或 session/],
+		["config SHOW", /^未知动作 SHOW；可用 show、edit、set、unset、whoami/],
+		["CONFIG show", /^未知子命令/],
+		["Status", /^未知子命令/],
+		["config --SCOPE global show", /^未知选项 --SCOPE。.*--scope、--wait、--help/],
 		[
-			"config set notificationScope=all-runs",
-			/^set 需要 --scope：\/wecom-aibot config --scope session set notificationScope=all-runs，或 --scope global/,
+			"config set notificationscope=all-runs",
+			/^未知字段 notificationscope；可用字段：defaultChatId、defaultChatType、notificationScope、/,
 		],
-		["config edit", /^edit 需要 --scope/],
-		["config unset defaultChatId", /^unset 需要 --scope：.*config --scope session unset defaultChatId/],
-		["config --scope everyone set x=1", /--scope 只能是 global 或 session/],
+		["config set notificationScope=ALL-RUNS", /^notificationScope 只能是 wecom-tasks、all-runs/],
+		["config unset NotificationScope", /^未知字段 NotificationScope；/],
+		["test x --CHAT-TYPE 2", /^未知选项 --CHAT-TYPE/],
 		["config --scope global set --scope session x=1", /--scope 重复给出/],
 		["config global set notificationScope=all-runs", /^未知动作 global；可用 show、edit、set、unset、whoami/],
-		["config set session notificationScope=all-runs", /^set 需要 --scope：/],
+		["config set session notificationScope=all-runs", /^「session」缺少 =/],
 		["config global", /^未知动作 global/],
 		["config session delete x", /^未知动作 session/],
 		["config --global set x=1", /^未知选项 --global。作用域写成 --scope global$/],
@@ -236,7 +259,13 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 		["config everything", /未知动作 everything；可用 show、edit、set、unset、whoami/],
 		["config show extra", /不接受参数/],
 		["config --scope global edit now", /不接受参数/],
-		["config --scope session set", /至少一个 字段=值/],
+		[
+			"config --scope session set",
+			/至少一个 字段=值，例如 \/wecom-aibot config --scope session set notificationScope=all-runs/,
+		],
+		["config set", /至少一个 字段=值，例如 \/wecom-aibot config set notificationScope=all-runs/],
+		["config --scope session set secret=s", /secret 只能用 \/wecom-aibot config --scope session edit 输入/],
+		["config set secret=s", /secret 只能用 \/wecom-aibot config edit 输入/],
 		["config --scope session set notificationScope=all-runs bogus=1", /未知字段 bogus.*未做任何修改/],
 		["config --scope global set secret=s", /只能用 .*edit/],
 		["config --scope session unset", /需要字段名/],
@@ -297,11 +326,28 @@ test("argument completion offers every word that may come next: subcommands, opt
 	assert.deepEqual(values("test x --"), ["test x --chat-type ", "test x --help"]);
 	assert.deepEqual(values("test x --chat-type "), ["test x --chat-type 1 ", "test x --chat-type 2 "]);
 	assert.deepEqual(values("test x --chat-type 2 "), ["test x --chat-type 2 --help"]);
-	// The target comes first: until it is given, only the actions that may go without it are offered.
-	assert.deepEqual(values("config "), ["config --scope ", "config show ", "config whoami ", "config --help"]);
-	assert.deepEqual(values("config s"), ["config show "]);
+	// The target comes first; every action may go without it, a write then changes the global layer.
+	assert.deepEqual(values("config "), [
+		"config --scope ",
+		"config show ",
+		"config edit ",
+		"config set ",
+		"config unset ",
+		"config whoami ",
+		"config --help",
+	]);
+	assert.deepEqual(values("config s"), ["config show ", "config set "]);
+	assert.deepEqual(values("config set ")?.slice(0, 2), ["config set defaultChatId=", "config set defaultChatType="]);
+	assert.ok(values("config unset ")?.includes("config unset docMcpUrl "), "without a target unset is global's");
+	assert.ok(!values("config --scope session unset ")?.includes("config --scope session unset docMcpUrl "));
+	assert.deepEqual(values("config edit "), ["config edit --help"]);
 	assert.deepEqual(values("config -"), ["config --scope ", "config --help"]);
-	assert.deepEqual(values("config --scope "), ["config --scope global ", "config --scope session "]);
+	assert.deepEqual(values("config --scope "), [
+		"config --scope global ",
+		"config --scope project ",
+		"config --scope session ",
+	]);
+	assert.deepEqual(values("config --scope p"), ["config --scope project "]);
 	assert.deepEqual(values("config --scope s"), ["config --scope session "]);
 	assert.deepEqual(values("config --scope global "), [
 		"config --scope global show ",
@@ -339,7 +385,7 @@ test("argument completion offers every word that may come next: subcommands, opt
 		"config --scope session set notificationScope=all-runs controlPrompts-=",
 	]);
 	assert.equal(values("config --scope session set controlPrompts+=a c"), null);
-	assert.deepEqual(values("config --scope session set notificationscope="), [
+	assert.deepEqual(values("config --scope session set notificationScope="), [
 		"config --scope session set notificationScope=wecom-tasks ",
 		"config --scope session set notificationScope=all-runs ",
 	]);
@@ -347,6 +393,20 @@ test("argument completion offers every word that may come next: subcommands, opt
 		"config --scope session unset defaultChatId ",
 		"config --scope session unset defaultChatType ",
 	]);
+	// Case-sensitive: a word in the wrong case gets nothing, nor does anything after it.
+	for (const wrong of [
+		"CON",
+		"config SH",
+		"config --scope GL",
+		"config set notificationscope=",
+		"config set NotificationScope=all-runs ",
+		"config unset NotificationScope ",
+		"config --SCOPE ",
+		"config set notificationScope+=x ",
+		"config set secret=x ",
+		"test x --CHAT-TYPE ",
+	])
+		assert.equal(completeArguments(wrong), null, wrong);
 	// A finished token, a free value or a word after --help shows no list: Enter must run the command.
 	for (const done of [
 		"config",
@@ -358,10 +418,7 @@ test("argument completion offers every word that may come next: subcommands, opt
 		"config show --help ",
 		"config show extra ",
 		"config bogus ",
-		// Refused when run: a write without a target, the target after the action, --wait before whoami.
-		"config set ",
-		"config edit ",
-		"config unset d",
+		// Refused when run: the target after the action, --wait before whoami.
 		"config set --scope global ",
 		"config show --scope ",
 		"config --wait 30 whoami ",
@@ -376,7 +433,7 @@ test("argument completion offers every word that may come next: subcommands, opt
 });
 
 test("controlPrompts-= completes the prompts of the scope it is written for; = and += take new text", () => {
-	const lists = { global: ["继续", "运行测试", "has space", "a,b"], session: ["只在 session"] };
+	const lists = { global: ["继续", "运行测试", "has space", "a,b"], project: ["只在目录"], session: ["只在 session"] };
 	const asked: string[] = [];
 	const complete = (prefix: string) =>
 		completeArguments(prefix, (scope) => {
@@ -394,6 +451,13 @@ test("controlPrompts-= completes the prompts of the scope it is written for; = a
 	);
 	assert.equal(complete("config --scope session set controlPrompts-="), null, "no word of the session's list");
 	assert.deepEqual(asked, ["global", "global", "session"]);
+	assert.deepEqual(
+		complete("config set controlPrompts-=继"),
+		["config set controlPrompts-=继续 "],
+		"no target: global's",
+	);
+	assert.deepEqual(complete("config --scope=session set controlPrompts-="), null);
+	assert.deepEqual(asked.slice(3), ["global", "session"]);
 	for (const free of ["config --scope global set controlPrompts=", "config --scope global set controlPrompts+="])
 		assert.equal(complete(free), null, free);
 });

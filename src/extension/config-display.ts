@@ -1,7 +1,7 @@
 /** How configuration values are shown, the same in config show, status and every prompt: no credential in clear. */
 import type { FieldName, Resolved, Source } from "./config.ts";
 
-const SOURCE: Record<Source, string> = { session: "session", global: "global", default: "内置默认值" };
+const SOURCE: Record<Source, string> = { session: "session", project: "项目级", global: "全局", default: "内置默认值" };
 
 /** A value as shown anywhere: a Secret only says whether it is set, a BotID is masked. */
 export function display(name: FieldName, value: unknown): string {

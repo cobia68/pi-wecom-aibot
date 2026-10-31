@@ -615,7 +615,7 @@ test("config whoami identifies the chat that sends the code, saves it after conf
 	assert.match(ui.confirms[0], /chatid=group_chat　chat_type=2　userid=user_one/);
 	assert.equal(readLayer("global")?.defaultChatId, "group_chat");
 	assert.equal(readLayer("global")?.defaultChatType, 2);
-	assert.match(ui.notices.at(-1)!, /^已保存全局配置：defaultChatId：.* → group_chat（global）/);
+	assert.match(ui.notices.at(-1)!, /^已保存全局配置：defaultChatId：.* → group_chat（全局）/);
 	assert.match(ui.notices.at(-1)!, /当前接入仍使用旧配置/);
 	assert.match(
 		ui.notices.at(-1)!,

@@ -1638,11 +1638,11 @@ test("actions written as options, unknown options and extra positional arguments
 		"setup",
 		"setup --bot-id a --secret b",
 		"notify on",
-		"config set notificationScope=all-runs",
+		"config set",
 		"config --scope session set",
 		"config --scope session set notificationScope=sometimes",
 		"config --scope global set secret=leaked",
-		"config unset notificationScope",
+		"config unset",
 		"config --scope session set --mode text",
 		"config --scope session set defaultChatId='x'",
 		'test "user"',
@@ -1709,7 +1709,7 @@ test("config merges into the file as it is now, keeps the connection, and connec
 	);
 	// Saving never disconnects: the registration keeps its old target and allowlist until connect.
 	assert.equal(ws.readyState, 1);
-	assert.match(notices.at(-1)!, /defaultChatId：default-user（global） → boss（global）[\s\S]*待重新接入/);
+	assert.match(notices.at(-1)!, /defaultChatId：default-user（全局） → boss（全局）[\s\S]*待重新接入/);
 	await command("status", ctx);
 	assert.match(
 		notices.at(-1)!,
@@ -1789,7 +1789,6 @@ for (const change of ["bot while waiting", "bot during confirmation", "Secret du
 		const replacement = {
 			botId: change.startsWith("Secret") ? "test-bot" : "replacement-bot",
 			secret: "replacement-secret",
-			enabled: true,
 		};
 		const replace = () => writeFile(CONFIG_FILE, JSON.stringify(replacement));
 		const notices = identityDialogs(t, async () => {
@@ -1827,6 +1826,51 @@ test("config whoami shows the code, saves the identified chat into the chosen la
 	assert.ok(notices.some((line) => /已保存 session 覆盖/.test(line)));
 });
 
+test("config --scope project writes the working directory's layer, between global and session", async (t) => {
+	const notices: string[] = [];
+	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
+	const project = layerFile({ project: ctx.cwd });
+	const session = layerFile({ session: sessionId });
+	const global = await readFile(CONFIG_FILE, "utf8");
+	try {
+		await command("config --scope project set notificationScope=all-runs", ctx);
+		assert.deepEqual(JSON.parse(await readFile(project, "utf8")), { notificationScope: "all-runs" });
+		assert.equal(await readFile(CONFIG_FILE, "utf8"), global, "global unchanged");
+		assert.match(
+			notices.at(-1)!,
+			/^已保存项目级配置：notificationScope：wecom-tasks（内置默认值） → all-runs（项目级）/,
+		);
+		await command("config show", ctx);
+		assert.match(notices.at(-1)!, /notificationScope +all-runs（项目级）/);
+		await command("config --scope project show", ctx);
+		assert.match(
+			notices.at(-1)!,
+			/^当前目录的项目级配置：\n {2}notificationScope {2}all-runs\n文件：.*projects\/--.*--\.json$/,
+		);
+		// A change below a layer that holds the field does not reach this session: the report says which one does.
+		await command("config set notificationScope=wecom-tasks", ctx);
+		assert.match(
+			notices.at(-1)!,
+			/当前目录覆盖了 notificationScope，全局的修改不影响当前 session；需要跟随时运行 \/wecom-aibot config --scope project unset notificationScope/,
+		);
+		await command("config --scope project set controlPrompts=部署", ctx);
+		await command("config set notificationScope=all-runs controlPrompts=继续", ctx);
+		assert.match(
+			notices.at(-1)!,
+			/当前目录覆盖了 notificationScope、controlPrompts，.*unset notificationScope controlPrompts$/m,
+		);
+		await command("config --scope project unset controlPrompts", ctx);
+		await command("config --scope session set notificationScope=wecom-tasks", ctx);
+		await command("config --scope project unset notificationScope", ctx);
+		assert.match(notices.at(-1)!, /当前 session 覆盖了 notificationScope，当前目录的修改不影响当前 session/);
+		assert.deepEqual(JSON.parse(await readFile(project, "utf8")), {});
+	} finally {
+		await rm(project, { force: true });
+		await rm(session, { force: true });
+		await writeFile(CONFIG_FILE, global);
+	}
+});
+
 test("config whoami without a scope only reports the chat and the command that would save it", async (t) => {
 	const notices = identityDialogs(t, async () => assert.fail("nothing to confirm without a scope"));
 	const before = await readFile(CONFIG_FILE, "utf8");
@@ -1839,7 +1883,7 @@ test("config whoami without a scope only reports the chat and the command that w
 	assert.match(report, /^已识别单聊：chatid=colleague　chat_type=1　userid=colleague$/m);
 	assert.match(
 		report,
-		/设为默认推送目标：\/wecom-aibot config --scope <global\|session> set defaultChatId=colleague defaultChatType=1/,
+		/设为全局默认推送目标：\/wecom-aibot config set defaultChatId=colleague defaultChatType=1；只设给当前目录或当前 session 时在 set 前写 --scope project 或 --scope session/,
 	);
 	assert.match(report, /未配置 allowedUserIds/);
 });
@@ -1920,7 +1964,7 @@ test("config whoami validates its wait and its preconditions before waiting for 
 	clearConfig();
 	await emit("session_start");
 	await command("config whoami", ctx);
-	assert.match(notices.at(-1)!.message, /\/wecom-aibot config --scope global edit/);
+	assert.match(notices.at(-1)!.message, /\/wecom-aibot config edit/);
 	assert.equal(ws.sent.length, frameCount, "none of these may send or reply upstream");
 });
 
@@ -1928,7 +1972,7 @@ test("config help explains whoami's code, the group mention and the wait", async
 	const notices: string[] = [];
 	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
 	await command("config whoami --help", ctx);
-	assert.match(notices[0], /^ {2}\[--scope <global\|session>\] whoami/m);
+	assert.match(notices[0], /^ {2}\[--scope <global\|project\|session>\] whoami/m);
 	assert.match(notices[0], /6 位验证码/);
 	assert.match(notices[0], /群聊需 @机器人/);
 	assert.match(notices[0], /默认 300/);
@@ -1997,7 +2041,7 @@ test("config edit guides a first configuration, then edits one item of the chose
 	// Without an interactive UI there is nothing to edit with.
 	Object.assign(ctx, { hasUI: false });
 	await command("config --scope global edit", ctx);
-	assert.match(notices.at(-1)!, /需要交互界面.*config --scope global set/);
+	assert.match(notices.at(-1)!, /需要交互界面；请使用 \/wecom-aibot config set 字段=值/);
 	assert.equal(await readFile(CONFIG_FILE, "utf8"), before);
 });
 
@@ -2009,8 +2053,8 @@ test("config show and config <layer> show say where each value comes from, never
 	const merged = notices.at(-1)!;
 	assert.match(merged, /controlPrompts +「继续」（session）/);
 	assert.match(merged, /notificationScope +wecom-tasks（内置默认值）/);
-	assert.match(merged, /defaultChatId +default-user（global）/);
-	assert.match(merged, /secret +已配置（global）/);
+	assert.match(merged, /defaultChatId +default-user（全局）/);
+	assert.match(merged, /secret +已配置（全局）/);
 	assert.match(merged, /当前接入与以上配置一致/);
 	await command("config --scope session show", ctx);
 	assert.match(notices.at(-1)!, /当前 session 的覆盖项：\n {2}controlPrompts {2}「继续」\n文件：/);
@@ -2021,7 +2065,7 @@ test("config show and config <layer> show say where each value comes from, never
 	await command("disconnect", ctx);
 	clearConfig();
 	await command("config show", ctx);
-	assert.match(notices.at(-1)!, /未配置：运行 \/wecom-aibot config --scope global edit/);
+	assert.match(notices.at(-1)!, /未配置：运行 \/wecom-aibot config edit/);
 });
 
 test("config without an action lists the subcommands and runs only the one chosen", async (t) => {
@@ -2041,8 +2085,26 @@ test("config without an action lists the subcommands and runs only the one chose
 	const before = await readFile(CONFIG_FILE, "utf8");
 	// Esc: nothing runs and nothing is said.
 	await command("config", ctx);
-	assert.equal(menus.at(-1)?.options.length, 12);
+	assert.deepEqual(
+		menus.at(-1)?.options.map((option) => option.split(/ {2,}/)[0]),
+		[
+			"show",
+			"edit",
+			"set 字段=值 …",
+			"unset 字段 …",
+			"whoami",
+			"--scope global …",
+			"--scope project …",
+			"--scope session …",
+		],
+	);
 	assert.equal(notices.length, 0);
+	// A layer's item opens that layer's forms; Esc there changes nothing either.
+	choice = /^--scope session … /;
+	await command("config", ctx);
+	assert.equal(menus.at(-1)?.title, "当前 session 的覆盖项");
+	assert.equal(notices.length, 0);
+	choice = undefined;
 	// A form without values runs at once.
 	choice = /^show {2,}/;
 	await command("config", ctx);
@@ -2124,9 +2186,25 @@ test("argument completion through pi offers subcommands, options and config's gr
 	]);
 	assert.deepEqual(values("test x --"), ["test x --chat-type ", "test x --help"]);
 	assert.deepEqual(values("config whoami --w"), ["config whoami --wait "]);
-	assert.deepEqual(values("config --scope "), ["config --scope global ", "config --scope session "]);
-	assert.equal(values("config edit "), null, "a write needs its target before the action");
-	assert.deepEqual(values("config "), ["config --scope ", "config show ", "config whoami ", "config --help"]);
+	assert.deepEqual(values("config --scope "), [
+		"config --scope global ",
+		"config --scope project ",
+		"config --scope session ",
+	]);
+	assert.deepEqual(
+		values("config edit "),
+		["config edit --help"],
+		"a write without a target changes the global layer",
+	);
+	assert.deepEqual(values("config "), [
+		"config --scope ",
+		"config show ",
+		"config edit ",
+		"config set ",
+		"config unset ",
+		"config whoami ",
+		"config --help",
+	]);
 	assert.deepEqual(values("config show "), ["config show --help"]);
 	// A bare action still offers --help, so the list is complete at every position.
 	assert.deepEqual(values("connect -"), ["connect --help"]);
@@ -3040,11 +3118,11 @@ test("controlPrompts fills the dropdown; 发送 sends the whole prompt, and an o
 	);
 	assert.equal(sent.length, 0);
 	await command("config --scope global set controlPrompts=继续", ctx);
-	assert.match(notices.at(-1)!, /controlPrompts：无（内置默认值） → 「继续」（global）/);
+	assert.match(notices.at(-1)!, /controlPrompts：无（内置默认值） → 「继续」（全局）/);
 	await command("config --scope session set controlPrompts=继续,总结进度", ctx);
 	assert.match(
 		notices.at(-1)!,
-		/controlPrompts：「继续」（global） → 「继续」、「总结进度」（session）[\s\S]*设置已热更新/,
+		/controlPrompts：「继续」（全局） → 「继续」、「总结进度」（session）[\s\S]*设置已热更新/,
 	);
 	Object.assign(ctx, { hasUI: true });
 	let choices = [/^控制卡提示词：/, /^编辑提示词/];
@@ -3119,7 +3197,7 @@ test("controlPrompts+= and -= change one layer's list in place; a session withou
 	assert.deepEqual(await global(), ["继续", "运行测试", "部署"]);
 	assert.match(
 		notices.at(-1)!,
-		/controlPrompts：「继续」、「运行测试」（global） → 「继续」、「运行测试」、「部署」（global）[\s\S]*\n「继续」已经在列表里，跳过/,
+		/controlPrompts：「继续」、「运行测试」（全局） → 「继续」、「运行测试」、「部署」（全局）[\s\S]*\n「继续」已经在列表里，跳过/,
 	);
 	// Nothing to do is said so, and nothing is written.
 	await command("config --scope global set controlPrompts-=没有这条", ctx);
@@ -3133,7 +3211,7 @@ test("controlPrompts+= and -= change one layer's list in place; a session withou
 	assert.deepEqual(await global(), ["继续", "运行测试", "部署"], "the global list is untouched");
 	assert.match(
 		notices.at(-1)!,
-		/已把继承的 3 条提示词复制到本 session 再修改。之后与全局独立，要重新跟随全局时运行 \/wecom-aibot config --scope session unset controlPrompts/,
+		/已把继承的 3 条提示词复制到当前 session 再修改。之后不再跟随继承来的列表，要重新继承时运行 \/wecom-aibot config --scope session unset controlPrompts/,
 	);
 	await command("config --scope global set controlPrompts+=总结", ctx);
 	assert.deepEqual(await session(), ["继续", "部署"], "the copy does not follow the global list");

@@ -26,7 +26,8 @@
 | 只改测试、CI、开发工具（如 `biome.json`、`scripts/`、devDependencies）或仓库说明 | 不改 | 不改 |
 
 - 公开接口指下面这些，内部模块、测试和日志措辞不算：
-  - 全局配置 `config.json` 和各 session 覆盖文件的位置、字段、取值和默认值
+  - 全局配置 `config.json`、各目录的项目级配置和各 session 覆盖文件的位置、字段、取值和默认值
+  - `config.schema.json` 的地址和它允许的写法
   - `/wecom-aibot` 的子命令和参数
   - `wecom_send` 工具的参数和行为
   - 用户在企业微信里能发的命令、能点的按钮和能填的字段

@@ -1,6 +1,6 @@
 {
   "name": "@cobia/pi-wecom-aibot",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "WeCom (Enterprise WeChat) smart robot for pi over a long connection: BotID + Secret, no public callback URL; task status, result notifications, images, files and proactive push.",
   "keywords": [
     "pi",
@@ -24,7 +24,8 @@
     ]
   },
   "files": [
-    "src/"
+    "src/",
+    "config.schema.json"
   ],
   "scripts": {
     "test": "node scripts/run-tests.mjs",
@@ -35,6 +36,7 @@
     "lint": "node scripts/biome-check.mjs --lint",
     "format": "node scripts/biome-check.mjs --write",
     "check:biome": "node scripts/biome-check.mjs",
+    "gen:schema": "node --import tsx scripts/generate-schema.ts",
     "probe:cards": "node --import tsx scripts/card-probe.ts"
   },
   "dependencies": {

@@ -1,7 +1,8 @@
 /**
  * The WeCom side's /wecom-aibot commands: parsing, and the help they print. Pure; the gateway routes what this
  * returns. The target is an option before the action (--session-id <id> send), spelled as pi's own command
- * line and the cards spell it. --prompt ends parsing.
+ * line and the cards spell it. --prompt ends parsing. The prefix, subcommands and options are case-sensitive, like
+ * pi's own command names: /WECOM-AIBOT is no command, so it is an ordinary message.
  */
 import { sentences } from "../shared/text.ts";
 
@@ -25,7 +26,7 @@ export type SessionAction = Exclude<Subcommand, "sessions">;
 /** The target is a command option before the action; --prompt ends parsing unconditionally. */
 export function parseWeComCommand(text: string): WeComCommand {
 	const trimmed = text.trimStart();
-	if (!new RegExp(`^${COMMAND_PREFIX}(?:\\s|$)`, "i").test(trimmed)) return { kind: "none" };
+	if (!new RegExp(`^${COMMAND_PREFIX}(?:\\s|$)`).test(trimmed)) return { kind: "none" };
 	const rest = trimmed.slice(COMMAND_PREFIX.length);
 	const tokens = /\S+/g;
 	let sessionId: string | undefined;
@@ -44,7 +45,7 @@ export function parseWeComCommand(text: string): WeComCommand {
 		}
 		if (!sub) {
 			if (token.startsWith("-")) return unknownOption(token);
-			sub = SUBCOMMANDS.find((item) => item === token.toLowerCase());
+			sub = SUBCOMMANDS.find((item) => item === token);
 			if (!sub) return { kind: "error", message: `未知子命令 ${token}。可用子命令：${SUBCOMMANDS.join("、")}` };
 			continue;
 		}
