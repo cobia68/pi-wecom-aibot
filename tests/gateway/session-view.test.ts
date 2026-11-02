@@ -39,7 +39,7 @@ test("the session dropdown keeps the shown session selected and, beyond ten, lis
 		],
 		"the shown one, then the nine most recently used, in the order they connected",
 	);
-	assert.match(card.subtitle!, /；另有 2 个会话，发 \/wecom-aibot sessions 查看$/);
+	assert.match(card.subtitle!, /；另有 2 个会话，发 \/wa s 查看$/);
 	// Every session shows the end of its ID, so two in one folder differ; one gone offline stays shown, first.
 	const twins = [listed(2, "pi-wecom-aibot"), listed(3, "pi-wecom-aibot")];
 	const offline = withSessions(sessionControlCard(online[0].source, { status: "idle" }), twins);

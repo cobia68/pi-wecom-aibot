@@ -2682,9 +2682,12 @@ test("a scheduled notice is drawn once, when its run settles, and survives a rec
 	);
 });
 
-test("help stays text while sessions sends one selection card", async () => {
+test("full and short WeCom commands share help and the session picker without starting a task", async () => {
 	await tuiStart();
-	for (const content of ["/wecom-aibot --help", "/wecom-aibot sessions"]) {
+	const help = ["/wecom-aibot --help", "/wecom-aibot -h", "/wa --help", "/wa -h"];
+	const bare = ["/wecom-aibot", "/wa"];
+	const lists = ["/wecom-aibot sessions", "/wecom-aibot s", "/wa sessions", "/wa s", "/boom"];
+	for (const content of [...help, ...bare, ...lists]) {
 		ws.receive({
 			cmd: "aibot_msg_callback",
 			headers: { req_id: content },
@@ -2698,11 +2701,18 @@ test("help stays text while sessions sends one selection card", async () => {
 		});
 	}
 	const replies = ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg");
-	assert.equal(replies.length, 1);
+	assert.equal(replies.length, help.length + bare.length);
 	assert.ok(replies.every((frame) => frame.body.msgtype === "stream" && frame.body.stream.finish === true));
+	const helpReplies = replies.filter((frame) => help.includes(frame.headers.req_id));
+	assert.equal(helpReplies.length, help.length);
+	assert.ok(helpReplies.every((frame) => frame.body.stream.content === helpReplies[0].body.stream.content));
+	const errors = replies.filter((frame) => bare.includes(frame.headers.req_id));
+	assert.equal(errors.length, bare.length);
+	for (const error of errors) assert.match(error.body.stream.content, /缺少子命令或帮助选项/);
 	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(pushes.length, 1);
-	assert.equal(pushes[0].body.template_card.button_selection.question_key, "pick", "the session list");
+	assert.equal(pushes.length, lists.length);
+	assert.ok(pushes.every((frame) => frame.body.template_card.button_selection.question_key === "pick"));
+	assert.equal(sent.length, 0, "neither help nor session listing reaches the model");
 });
 
 test("the WeCom session list asks this pi whether it is busy right now", async () => {

@@ -728,7 +728,7 @@ export class BridgeSession {
 			this.host.log(`control card failed (${outcome}): ${errorMessage(error)}`);
 			if (outcome !== "not_sent")
 				this.host.notify(
-					`控制卡${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errorMessage(error)}；可发 /wecom-aibot sessions 后点「打开会话」补发`,
+					`控制卡${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errorMessage(error)}；可发 /wa s 后点「打开会话」补发`,
 					"warning",
 				);
 		});

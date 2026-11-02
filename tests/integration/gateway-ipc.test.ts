@@ -369,13 +369,16 @@ test("IPC session lists poll the live state of every session without selecting a
 	await until(() => lists().length === 1, "busy session list");
 	assert.equal(lists()[0].body.template_card.horizontal_content_list[0].keyname, "执行中");
 	busy = false;
-	messageFor("A", "/wecom-aibot sessions");
-	await until(() => lists().length === 2, "idle session list");
+	messageFor("A", "/wa s");
+	await until(() => lists().length === 2, "idle session list through the alias");
 	assert.equal(lists()[1].body.template_card.horizontal_content_list[0].keyname, "空闲");
-	messageFor("A", "/wecom-aibot cancel");
-	await until(() => ws.sent.some((frame) => frame.cmd === "aibot_respond_msg"), "retired command refused");
-	const error = ws.sent.find((frame) => frame.cmd === "aibot_respond_msg");
-	assert.match(error.body.stream.content, /仅支持 \/wecom-aibot sessions 和 \/wecom-aibot --help/);
+	const replies = () => ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg");
+	for (const command of ["/wa cancel", "/wecom-aibot sessions --help", "/wa s -h"]) {
+		const before = replies().length;
+		messageFor("A", command);
+		await until(() => replies().length === before + 1, "invalid command refused");
+		assert.match(replies().at(-1).body.stream.content, /\/wa s.*\/wa -h/);
+	}
 	assert.equal(askedA, 2);
 	assert.equal(askedB, 2);
 	assert.equal(a.tasks.length + b.tasks.length, 0);

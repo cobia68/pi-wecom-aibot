@@ -237,7 +237,7 @@ test("retired commands are rejected while quoted tasks still reach only their ow
 	const b = add("B");
 	await ready();
 	message("/wecom-aibot --session-id session-A send --prompt named");
-	assert.match(reply(), /仅支持/);
+	assert.match(reply(), /未知选项 --session-id.*\/wa s.*\/wa -h/);
 	message("quoted", { quote: quoted("B") });
 	await ready();
 	assert.equal(a.tasks().length, 0);
@@ -440,7 +440,7 @@ test("打开会话 asks the session the dropdown names for a new control card; t
 test("a list of more than five sessions turns its pages in place; in a group only the clicker's copy turns", async () => {
 	const peers = ["A", "B", "C", "D", "E", "F", "G"].map((id) => add(id));
 	await ready();
-	message("@bot /wecom-aibot sessions", group);
+	message("@bot /wa s", group);
 	await ready();
 	const list = cardFrame().body.template_card;
 	assert.equal(list.main_title.desc.startsWith("第 1/2 页"), true);
@@ -477,7 +477,7 @@ test("more than ten sessions remain reachable by opening their control through s
 	const first = question();
 	const ids = (card: any) => card.button_selection.option_list.map((option: { id: string }) => option.id);
 	assert.equal(ids(first).includes(sessionFingerprint("session-0")), false, "only ten recent sessions fit");
-	assert.match(first.sub_title_text, /sessions.*控制卡后重发/);
+	assert.match(first.sub_title_text, /\/wa s.*控制卡后重发/);
 
 	message("/wecom-aibot sessions");
 	await ready();
@@ -540,7 +540,7 @@ test("a refused question leaves the message unsent and points to retry or pi, ne
 	const answer = repliesTo(sent).at(-1);
 	assert.match(answer.body.stream.content, /这条消息没有发出：会话选择卡不可用/);
 	assert.match(answer.body.stream.content, /回到 pi 终端操作/);
-	assert.match(answer.body.stream.content, /\/wecom-aibot sessions/);
+	assert.match(answer.body.stream.content, /\/wa s/);
 	assert.doesNotMatch(answer.body.stream.content, /--session-id|--prompt|\/wecom-aibot (?:send|card|cancel)/);
 });
 

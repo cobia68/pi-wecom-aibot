@@ -284,7 +284,7 @@ test("temporary identity registrations are hidden and cannot be targeted or publ
 	message("must not run either", { quote: quote("identity-session") });
 	message("/wecom-aibot --session-id identity-session cancel");
 	message("/wecom-aibot --session-id identity-session");
-	assert.match(prompt(), /仅支持 \/wecom-aibot sessions 和 \/wecom-aibot --help/);
+	assert.match(prompt(), /\/wa s.*\/wa -h/);
 	assert.doesNotMatch(prompt(), /project-I/);
 	assert.equal(identifying.peer.messages().length, 0);
 	assert.equal(requests(identifying.peer).length, 0);
@@ -433,17 +433,23 @@ test("a re-registered pi cannot inherit an in-flight session-list query", (t) =>
 	assert.deepEqual(listed(), [`project-A · ${SESSION_B.slice(-4)} · 空闲`]);
 });
 
-test("session-list queries reveal and poll only sessions the sender can access", () => {
+test("full and short session-list commands only poll sessions the sender can access", () => {
 	const a = add("A", SESSION_A, (value) => {
 		value.config.allowedUserIds = ["alice"];
 	});
 	const b = add("B", SESSION_B, (value) => {
 		value.config.allowedUserIds = ["bob"];
 	});
-	message("/wecom-aibot sessions", { from: { userid: "alice" } });
-	assert.deepEqual(listed(), [`project-A · ${SESSION_A.slice(-4)} · 空闲`]);
-	assert.doesNotMatch(JSON.stringify(picker()), /project-B/);
+	for (const command of ["/wecom-aibot sessions", "/wecom-aibot s", "/wa sessions", "/wa s", "/boom"]) {
+		message(command, { from: { userid: "alice" }, quote: quote(SESSION_B) });
+		assert.deepEqual(listed(), [`project-A · ${SESSION_A.slice(-4)} · 空闲`]);
+		assert.doesNotMatch(JSON.stringify(picker()), /project-B/);
+	}
+	const before = a.ws.sent.length;
+	for (const command of ["/wa s", "/wa -h", "/wa s -h", "/boom", "/boom -h"]) message(command);
+	assert.equal(a.ws.sent.length, before, "aliases never bypass the sender's allowlist");
 	assert.equal(b.peer.frames.filter((frame) => frame.type === "request").length, 0);
+	assert.equal(requests(a.peer).length, 0, "listing never controls a session");
 	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
 });
 
@@ -500,20 +506,22 @@ test("retired commands cannot route through quotes, start tasks or operate on an
 		quote(SESSION_B),
 		{ msgtype: "image", image: { url: "https://example.invalid/q" } },
 	])
-		for (const command of [
-			"send --prompt task",
-			"card",
-			"cancel",
-			`--session-id ${SESSION_A}`,
-			`--session-id ${SESSION_A} send --prompt task`,
-			`--session-id ${SESSION_A} card`,
-			`--session-id ${SESSION_A} cancel`,
-			"send --help",
-			`--session-id ${SESSION_A} --help`,
-		]) {
-			message(`/wecom-aibot ${command}`, quoteBody ? { quote: quoteBody } : {});
-			assert.match(prompt(), /仅支持 \/wecom-aibot sessions 和 \/wecom-aibot --help/);
-		}
+		for (const prefix of ["/wecom-aibot", "/wa"])
+			for (const command of [
+				"send --prompt task",
+				"card",
+				"cancel",
+				`--session-id ${SESSION_A}`,
+				`--session-id ${SESSION_A} send --prompt task`,
+				`--session-id ${SESSION_A} card`,
+				`--session-id ${SESSION_A} cancel`,
+				"send --help",
+				"cancel -h",
+				`--session-id ${SESSION_A} --help`,
+			]) {
+				message(`${prefix} ${command}`, quoteBody ? { quote: quoteBody } : {});
+				assert.match(prompt(), /\/wa s.*\/wa -h/);
+			}
 	assert.equal(a.peer.messages().length + b.peer.messages().length, 0);
 	assert.equal(a.peer.frames.filter((frame) => frame.type === "request").length, 0);
 	assert.equal(b.peer.frames.filter((frame) => frame.type === "request").length, 0);
@@ -530,26 +538,47 @@ test("ordinary message text keeps spaces, dashes, newlines and command-looking w
 	assert.equal(a.peer.messages()[0].task.message.text, text);
 });
 
-test("help is read-only even when quoted to a live session, and describes only the supported interaction", () => {
+test("bare prefixes are rejected, while explicit full and short help remains read-only", () => {
 	const a = add("A", SESSION_A);
-	for (const content of ["/wecom-aibot", "/wecom-aibot --help", "/wecom-aibot sessions --help"]) {
+	for (const content of ["/wecom-aibot", " /wa\t\n"]) {
 		message(content, { quote: quote(SESSION_A) });
+		assert.match(prompt(), /缺少子命令或帮助选项/);
+		assert.doesNotMatch(prompt(), /企业微信侧命令/, "a bare prefix does not return the full help");
+	}
+	let first: string | undefined;
+	for (const content of ["/wecom-aibot --help", "/wecom-aibot -h", "/wa --help", "/wa -h"]) {
+		message(content, { quote: quote(SESSION_A) });
+		first ??= prompt();
+		assert.equal(prompt(), first, "every spelling returns the same help");
 		assert.match(prompt(), /\/wecom-aibot sessions/);
+		assert.match(prompt(), /\/wa s/);
 		assert.match(prompt(), /控制卡/);
-		assert.doesNotMatch(prompt(), /--session-id|--prompt|\/wecom-aibot (?:send|card|cancel)/);
+		assert.doesNotMatch(prompt(), /--session-id|--prompt|sessions --help|\/wecom-aibot (?:send|card|cancel)/);
 		for (const line of prompt().split("\n")) assert.equal(line.endsWith("。"), false);
 	}
 	assert.equal(a.peer.messages().length, 0);
 	assert.equal(a.peer.frames.filter((frame) => frame.type === "request").length, 0);
 });
 
-test("extra arguments do not execute sessions, even through --help", () => {
+test("extra arguments and scoped help never list sessions or become quoted tasks", () => {
 	const a = add("A", SESSION_A);
-	for (const args of ["sessions extra", "sessions --prompt task", "sessions --help extra", "--help sessions"])
-		message(`/wecom-aibot ${args}`);
-	assert.match(prompt(), /不接受参数/);
+	for (const prefix of ["/wecom-aibot", "/wa", "/boom"])
+		for (const args of [
+			"sessions extra",
+			"s extra",
+			"sessions --prompt task",
+			"sessions --help",
+			"s -h",
+			"sessions --help extra",
+			"--help sessions",
+			"-h s",
+		]) {
+			message(`${prefix} ${args}`, { quote: quote(SESSION_A) });
+			assert.match(prompt(), /不接受参数/);
+		}
 	assert.equal(a.peer.messages().length, 0);
 	assert.equal(a.peer.frames.filter((frame) => frame.type === "request").length, 0);
+	assert.equal(a.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0, "no session card was sent");
 });
 
 test("group participants each name their own target; nothing is shared between senders", () => {

@@ -679,7 +679,7 @@ export class WeComGateway {
 	): void {
 		switch (command.kind) {
 			case "help":
-				this.reply(reqId, helpText(command.topic));
+				this.reply(reqId, helpText());
 				return;
 			case "error":
 				this.reply(reqId, command.message);
@@ -822,7 +822,7 @@ export class WeComGateway {
 				? "选的会话已离线，请选另一个"
 				: this.cards.has(copy)
 					? "会话已离线，可在下拉框选其他会话"
-					: "此控制卡所属会话已离线，可用 /wecom-aibot sessions 查找在线会话";
+					: "此控制卡所属会话已离线，可用 /wa s 查找在线会话";
 			this.redraw(eventReqId, cardId, undefined, identity, note, {
 				key: copy,
 				offline: !this.online(parsed.fingerprint),
@@ -1081,7 +1081,7 @@ export class WeComGateway {
 const ASK_FALLBACK = [
 	"这条消息没有发出：会话选择卡不可用",
 	"请稍后重新发送任务；仍失败请回到 pi 终端操作",
-	"可发 /wecom-aibot sessions 重试查看在线会话",
+	"可发 /wa s 重试查看在线会话",
 ].join("\n");
 const TARGET_GONE = "目标会话已离线";
 const QUOTED_GONE = "引用的会话已离线";

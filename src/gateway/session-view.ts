@@ -47,7 +47,7 @@ export function sessionsText(sessions: readonly SessionState[], prefix?: string)
 		}
 		lines.push(entry);
 	}
-	lines.push("可发 /wecom-aibot sessions 重试打开会话卡；卡片仍不可用请回到 pi 终端操作");
+	lines.push("可发 /wa s 重试打开会话卡；卡片仍不可用请回到 pi 终端操作");
 	return lines.join("\n\n");
 }
 
@@ -93,10 +93,7 @@ export function withSessions(model: CardModel, online: readonly ListedSession[])
 		selection: { ...selection, options, selected: shown },
 		...(hidden > 0
 			? {
-					subtitle: clamp(
-						`${model.subtitle ?? ""}；另有 ${hidden} 个会话，发 /wecom-aibot sessions 查看`,
-						TEXT_LIMIT,
-					),
+					subtitle: clamp(`${model.subtitle ?? ""}；另有 ${hidden} 个会话，发 /wa s 查看`, TEXT_LIMIT),
 				}
 			: {}),
 	};

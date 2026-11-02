@@ -67,12 +67,12 @@ test("a message without a session asks which pi takes it: a dropdown of sessions
 	const group = askCard(message("x", 2, 1), sessions(ASK_CHOICES + 2), "引用的是卡片");
 	assert.match(
 		group.subtitle!,
-		/^引用的是卡片；另有 2 个会话未列出；发 \/wecom-aibot sessions 打开所需会话的控制卡后重发；.*只有发送者能选；正文列前 5 个，下拉框列前 10 个$/,
+		/^引用的是卡片；另有 2 个会话未列出；发 \/wa s 打开所需会话的控制卡后重发；.*只有发送者能选；正文列前 5 个，下拉框列前 10 个$/,
 	);
 	assert.equal(group.selection!.options.length, 10, "WeCom's dropdown takes ten");
 	assert.equal(group.facts.length, 5, "six rows at most, the sixth a click's note");
 	assert.match(group.quote!, /［1 个附件］/);
-	assert.match(String(renderCard(group, askCardId()).sub_title_text), /sessions 打开所需会话的控制卡后重发/);
+	assert.match(String(renderCard(group, askCardId()).sub_title_text), /\/wa s 打开所需会话的控制卡后重发/);
 	assert.doesNotMatch(group.subtitle!, /--session-id/);
 });
 

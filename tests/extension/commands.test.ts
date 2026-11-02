@@ -503,7 +503,8 @@ test("every completion level and the menu put the descriptions in one column, wh
 	for (const item of menu) assert.ok(item.label.startsWith(`${item.input} `), item.label);
 });
 
-test("-h is an unknown option like any other: only --help shows help", () => {
+test("WeCom aliases do not change pi terminal commands: -h and s remain unknown", () => {
+	for (const input of ["s", "s -h", "sessions", "wa s"]) assert.match(errorOf(input), /^未知子命令/, input);
 	assert.match(errorOf("-h"), /^未知选项 -h。查看用法：\/wecom-aibot --help/);
 	assert.match(errorOf("connect -h"), /^未知选项 -h。\/wecom-aibot connect 不接受选项/);
 	assert.match(errorOf("test -h"), /支持的选项：--chat-type、--help/);
