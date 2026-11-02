@@ -34,6 +34,8 @@ import type { ChatRef } from "../shared/wecom-protocol.ts";
 import { docUrlProblem } from "./doc-mcp.ts";
 
 export type NotificationScope = "wecom-tasks" | "all-runs";
+/** How task results and notification bodies are presented: inside the card or through a document link. */
+export type ContentDisplay = "inline" | "linked";
 
 export interface ManagedFields {
 	botId: string;
@@ -41,6 +43,7 @@ export interface ManagedFields {
 	defaultChatId: string;
 	defaultChatType: 1 | 2;
 	notificationScope: NotificationScope;
+	contentDisplay: ContentDisplay;
 	/** The smart robot's document MCP address (streamableHTTP URL); it carries an apikey. */
 	docMcpUrl: string;
 	/** The control card's 提示词 dropdown: each one is sent as typed when 发送 is pressed. */
@@ -48,7 +51,7 @@ export interface ManagedFields {
 }
 export type FieldName = keyof ManagedFields;
 /** Read where they are used, so a change applies without a new registration. */
-export type Settings = Pick<ManagedFields, "notificationScope" | "controlPrompts"> &
+export type Settings = Pick<ManagedFields, "notificationScope" | "contentDisplay" | "controlPrompts"> &
 	Partial<Pick<ManagedFields, "docMcpUrl">>;
 export type Layer = Partial<ManagedFields> & { allowedUserIds?: string[] };
 export interface LayerChange {
@@ -74,12 +77,14 @@ export interface ConnectionField extends FieldBase {
 	default?: undefined;
 }
 
-export interface ChoiceField extends FieldBase {
-	effect: "setting";
-	name: "notificationScope";
-	choices: readonly Choice<NotificationScope>[];
-	default: NotificationScope;
-}
+export type ChoiceField = {
+	[Name in "notificationScope" | "contentDisplay"]: FieldBase & {
+		effect: "setting";
+		name: Name;
+		choices: readonly Choice<ManagedFields[Name]>[];
+		default: ManagedFields[Name];
+	};
+}["notificationScope" | "contentDisplay"];
 
 /** A list typed one item per line in `config edit`, or comma-separated in `config set` when no item has a comma or space; none by default. */
 export interface PromptsField extends FieldBase {
@@ -138,6 +143,20 @@ export const FIELDS: readonly FieldSpec[] = [
 		effect: "setting",
 	},
 	{
+		name: "contentDisplay",
+		label: "正文展示方式",
+		description: "任务结果和通知正文如何呈现；全局、项目级和 session 都能设，下次使用时生效",
+		choices: [
+			{
+				value: "inline",
+				description: "卡片内展示（仅三行）；正文开头放文字引用区，不使用文档，Markdown 转为纯文本",
+			},
+			{ value: "linked", description: "文档链接展示；需配置 docMcpUrl，未配置、写入失败或超时回退到卡片内展示" },
+		],
+		default: "inline",
+		effect: "setting",
+	},
+	{
 		name: "controlPrompts",
 		label: "控制卡提示词",
 		description: `控制卡「提示词」下拉框的候选，最多 ${MAX_PROMPTS} 条；点「发提示词」时把选中的那条原样作为本 session 的任务。下拉框只显示前 10 个字。config set 用英文逗号分隔（controlPrompts=继续,运行测试），整份替换；controlPrompts+=新提示 加在末尾，controlPrompts-=旧提示 删掉一条，多条也用英文逗号分隔；project 或 session 还没有自己的提示词时，+= 和 -= 先复制继承来的那份再改，之后不再跟随继承来的列表。含空格或逗号的提示词用 config edit 一行一条填写，清空编辑器即为没有提示词。不设置时没有提示词，控制卡不显示下拉框和「发提示词」`,
@@ -148,7 +167,7 @@ export const FIELDS: readonly FieldSpec[] = [
 		name: "docMcpUrl",
 		label: "会话文档",
 		description:
-			"智能机器人「文档」授权后的 streamableHTTP URL（工作台 → 智能机器人 → 可使用权限）。配置后，插件在企业微信里建一份文档，每个 session 一页，写最近的回复和通知，点控制卡的引用区打开。地址含 apikey：只能写在全局配置里，用 /wecom-aibot config edit 填写，查看时只显示是否已配置",
+			"智能机器人「文档」授权后的 streamableHTTP URL（工作台 → 智能机器人 → 可使用权限）。配置且 contentDisplay=linked 时，插件在企业微信里建一份文档，每个 session 一页，写最近的回复和通知，点控制卡的引用区打开。地址含 apikey：只能写在全局配置里，用 /wecom-aibot config edit 填写，查看时只显示是否已配置",
 		effect: "document",
 	},
 ];

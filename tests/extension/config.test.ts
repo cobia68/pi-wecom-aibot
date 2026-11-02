@@ -82,6 +82,10 @@ test("every stored field is validated with its name and file, groups as groups",
 		[{ defaultChatId: "boss with space" }, /defaultChatId.*含引号或空格/],
 		[{ defaultChatType: 2 }, /defaultChatType.*defaultChatId/],
 		[{ notificationScope: true }, /notificationScope/],
+		[{ contentDisplay: "text" }, /contentDisplay.*inline.*linked/],
+		[{ contentDisplay: "quote" }, /contentDisplay.*inline.*linked/],
+		[{ contentDisplay: "document" }, /contentDisplay.*inline.*linked/],
+		[{ contentDisplay: true }, /contentDisplay/],
 		[{ defaultChatId: "" }, /defaultChatId.*非空字符串/],
 		[{ botId: 42, secret: "secret" }, /botId/],
 		[{ botId: "bot" }, /secret.*成组/],
@@ -109,7 +113,7 @@ test("a key the layer does not know makes the file unusable, like a value it can
 		() => readLayer("global"),
 		(error: Error) =>
 			error.message ===
-			`配置文件 ${CONFIG_FILE} 有不认识的字段 notificationMode、NotificationScope；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、controlPrompts、docMcpUrl、allowedUserIds`,
+			`配置文件 ${CONFIG_FILE} 有不认识的字段 notificationMode、NotificationScope；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、contentDisplay、controlPrompts、docMcpUrl、allowedUserIds`,
 	);
 	const before = readFileSync(CONFIG_FILE, "utf8");
 	assert.throws(
@@ -123,7 +127,7 @@ test("a key the layer does not know makes the file unusable, like a value it can
 	writeFileSync(layerFile({ session: CHILD }), JSON.stringify({ colour: "red" }));
 	assert.throws(
 		() => readLayer({ session: CHILD }),
-		/有不认识的字段 colour；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、controlPrompts$/,
+		/有不认识的字段 colour；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、contentDisplay、controlPrompts$/,
 	);
 	writeFileSync(CONFIG_FILE, JSON.stringify({ $schema: "schema-url", ...bot }));
 	assert.deepEqual(readLayer("global"), bot);
@@ -207,6 +211,7 @@ test("built-in default < global < session, and a group comes whole from one laye
 	const merged = mergeLayers({ global, session: { notificationScope: "wecom-tasks", defaultChatId: "boss" } });
 	assert.deepEqual(merged.values, {
 		notificationScope: "wecom-tasks",
+		contentDisplay: "inline",
 		controlPrompts: [],
 		...bot,
 		defaultChatId: "boss",
@@ -215,6 +220,7 @@ test("built-in default < global < session, and a group comes whole from one laye
 	});
 	assert.deepEqual(merged.sources, {
 		notificationScope: "session",
+		contentDisplay: "default",
 		controlPrompts: "default",
 		botId: "global",
 		secret: "global",
@@ -238,7 +244,7 @@ test("the connection key covers credentials, target and allowlist, never the set
 			connectionOf(
 				mergeLayers({
 					global: { ...bot, ...target, allowedUserIds: ["boss"] },
-					session: { notificationScope: "all-runs", controlPrompts: ["继续"] },
+					session: { notificationScope: "all-runs", contentDisplay: "linked", controlPrompts: ["继续"] },
 				}),
 			),
 		),
@@ -378,7 +384,7 @@ test("set tokens are checked together: every problem is reported and nothing is 
 	// Field names and values are case-sensitive, as the file writes them.
 	assert.deepEqual(parseAssignments(["NotificationScope=all-runs", "notificationScope=ALL-RUNS"]), {
 		problems: [
-			"未知字段 NotificationScope；可用字段：defaultChatId、defaultChatType、notificationScope、controlPrompts",
+			"未知字段 NotificationScope；可用字段：defaultChatId、defaultChatType、notificationScope、contentDisplay、controlPrompts",
 			"notificationScope 只能是 wecom-tasks、all-runs",
 		],
 	});
@@ -450,6 +456,34 @@ test("clearConfig removes the global file only, and never hides a real deletion 
 	t.after(() => rmSync(CONFIG_FILE, { recursive: true, force: true }));
 	assert.throws(() => clearConfig());
 	assert.equal(readFileSync(join(CONFIG_FILE, "kept"), "utf8"), "must not be removed recursively");
+});
+
+test("contentDisplay is a hot setting inherited across all three layers, with exact inline and linked values", () => {
+	const { config } = sessionConfig(CHILD);
+	assert.equal(config.read().values.contentDisplay, "inline");
+	assert.equal(config.read().sources.contentDisplay, "default");
+	config.patch("global", { set: { contentDisplay: "linked" } });
+	assert.equal(config.read().values.contentDisplay, "linked");
+	config.patch("project", { set: { contentDisplay: "inline" } });
+	assert.equal(config.read().sources.contentDisplay, "project");
+	assert.equal(config.read().values.contentDisplay, "inline");
+	config.patch("session", { set: { contentDisplay: "linked" } });
+	assert.equal(config.read().sources.contentDisplay, "session");
+	assert.equal(config.read().values.contentDisplay, "linked");
+	config.patch("session", { remove: ["contentDisplay"] });
+	assert.equal(config.read().values.contentDisplay, "inline");
+	config.patch("project", { remove: ["contentDisplay"] });
+	assert.equal(config.read().values.contentDisplay, "linked");
+	config.patch("global", { remove: ["contentDisplay"] });
+	assert.equal(config.read().sources.contentDisplay, "default");
+	assert.equal(config.read().values.contentDisplay, "inline");
+	for (const value of ["inline", "linked"])
+		assert.deepEqual(parseAssignments([`contentDisplay=${value}`]), { set: { contentDisplay: value } });
+	for (const value of ["text", "markdown", "auto", "quote", "document", "INLINE", "LINKED", "true"])
+		assert.deepEqual(parseAssignments([`contentDisplay=${value}`]), {
+			problems: ["contentDisplay 只能是 inline、linked"],
+		});
+	assert.deepEqual(parseRemovals(["contentDisplay"]), { remove: ["contentDisplay"] });
 });
 
 test("the document address is global only, never settable by command, and must be a bare qq.com https URL", () => {
@@ -544,7 +578,7 @@ test("controlPrompts is a list: comma-separated in set, checked the same way in 
 	assert.deepEqual(parseRemovals(["controlPrompts"]), { remove: ["controlPrompts"] });
 	assert.deepEqual(parseRemovals(["controlprompts"]), {
 		problems: [
-			"未知字段 controlprompts；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、controlPrompts、docMcpUrl",
+			"未知字段 controlprompts；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、contentDisplay、controlPrompts、docMcpUrl",
 		],
 	});
 	// No built-in prompts; an empty list is a valid override, and the default is a fresh copy each time.

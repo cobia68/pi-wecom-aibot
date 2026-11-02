@@ -344,7 +344,11 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 		if (!current || current.sessionId !== ctx.sessionManager.getSessionId()) return;
 		const origin = current.promptStarted(event.prompt, event.images?.length ?? 0);
 		if (!origin) wecomSourceChat = undefined;
-		const guidance = turnGuidance(origin ?? (current.reportsLocalRuns() ? "local" : undefined));
+		const display = settings();
+		const guidance = turnGuidance(
+			origin ?? (current.reportsLocalRuns() ? "local" : undefined),
+			display.docMcpUrl ? display.contentDisplay : "inline",
+		);
 		if (guidance) event.systemPromptOptions.sections[WECOM_SECTION] = guidance;
 	});
 	pi.on("agent_start", (_event, ctx) => {

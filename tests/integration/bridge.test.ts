@@ -759,7 +759,7 @@ test("a completed result survives reconnect and ignores unrelated local output",
 	assert.doesNotMatch(JSON.stringify(cards[0].body), /UNRELATED|Model B/);
 });
 
-test("a finished run's result is a new control card: the window's last lines, its outcome, then the live state on a click", async () => {
+test("without a document a finished run's card quotes its answer, keeps the outcome, then shows live state on clicks", async () => {
 	await writeFile(
 		CONFIG_FILE,
 		JSON.stringify({ ...JSON.parse(await readFile(CONFIG_FILE, "utf8")), notificationScope: "all-runs" }),
@@ -774,11 +774,7 @@ test("a finished run's result is a new control card: the window's last lines, it
 	await drain();
 	const result = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
 	assertResultCard(result, "✅ 本轮完成");
-	assert.equal(
-		result.body.template_card.quote_area.quote_text,
-		"● 运行检查\n✔ 542 passed\n检查全部通过，改动未提交",
-		"the window as the run left it",
-	);
+	assert.equal(result.body.template_card.quote_area.quote_text, "THE REPLY", "the answer, not the terminal tail");
 	assert.equal(notified.at(-1)!.text, "THE REPLY");
 	// It is a control card: 刷新卡片 asks this pi and redraws it in the live state.
 	clickCard(result, "refresh");
@@ -786,6 +782,7 @@ test("a finished run's result is a new control card: the window's last lines, it
 	const update = lastUpdate();
 	assert.equal(update.body.template_card.task_id, result.body.template_card.task_id);
 	assert.equal(update.body.template_card.source.desc, "空闲");
+	assert.equal(update.body.template_card.quote_area.quote_text, "THE REPLY", "refresh keeps this card's answer");
 	assert.match(update.body.template_card.horizontal_content_list.at(-1).value, /已刷新/);
 	// An aborted run is red, and says so.
 	ws.sent.length = 0;
@@ -963,7 +960,7 @@ test("long Chinese and emoji answers reach the result card whole and valid", asy
 	await emit("agent_settled", { aborted: false });
 	await drain();
 	const [card] = resultCards();
-	assert.equal(bodyOf(card), answer, "the page shows it whole");
+	assert.equal(bodyOf(card), answer, "the whole body remains available to a refused card's Markdown fallback");
 	assert.equal(JSON.stringify(card.body).includes("\ufffd"), false);
 });
 
@@ -1080,6 +1077,7 @@ test("notifications include the actual session, provider, model name and last di
 		session_id: "pi-session-1",
 		content: "实际结果",
 	});
+	await drain();
 	const frame = ws.sent.at(-1);
 	assertCard(frame);
 	assert.match(shown(frame), /实际结果/);
@@ -1102,6 +1100,7 @@ test("an excerpt uses its original provider and model while custom content uses 
 	});
 	ctx.model = { ...ctx.model!, ...modelB };
 	const excerpt = sendNotification({ chatid: "test-user" });
+	await drain();
 	const first = ws.sent.at(-1);
 	assertCard(first, "Model A");
 	ws.acknowledge(first);
@@ -1109,6 +1108,7 @@ test("an excerpt uses its original provider and model while custom content uses 
 	assert.equal(excerptDetails.model_name, "Model A");
 	assert.equal(excerptDetails.provider, "test-provider");
 	const custom = sendNotification({ chatid: "test-user", content: "NEW-CONTENT" });
+	await drain();
 	const second = ws.sent.at(-1);
 	assertCard(second, "Model B", "another-provider");
 	ws.acknowledge(second);
@@ -1117,7 +1117,7 @@ test("an excerpt uses its original provider and model while custom content uses 
 	assert.equal(customDetails.provider, "another-provider");
 });
 
-test("an extracted reply goes with its card, which shows the session's window, never the reply's private parts", async () => {
+test("an extracted reply's first three lines are quoted, never its thinking or tool results", async () => {
 	await emit("message_end", {
 		message: {
 			role: "assistant",
@@ -1138,10 +1138,11 @@ test("an extracted reply goes with its card, which shows the session's window, n
 	assertCard(frame);
 	assert.equal(noteOf(frame), "📣 会话通知");
 	assert.equal(notified.at(-1)!.text, "第一段\n\n第二段\n\n第三段\n\n第四段", "the reply goes with it");
+	assert.equal(frame.body.template_card.quote_area.quote_text, "第一段\n第二段\n第三段");
 	assert.doesNotMatch(JSON.stringify(frame.body), /PRIVATE-/);
 	ws.acknowledge(frame);
 	await pending;
-	// The reply is read on the session's page, which the quote opens: nothing is pushed into the chat.
+	// The controls remain available; no second message is pushed into the chat.
 	assert.deepEqual(buttons(frame), ["refresh", "send", "model", "abort"]);
 });
 
@@ -1182,6 +1183,7 @@ test("a completion notification waits for the real final reply", async () => {
 	const settlement = emit("agent_settled", { aborted: false }).then(() => {
 		settled = true;
 	});
+	await drain();
 	const frame = ws.sent.at(-1);
 	try {
 		await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1349,6 +1351,7 @@ test("a completion whose ACK was lost is not automatically pushed again after re
 	await sendNotification({ chatid: "test-user", after_settle: true, content: "UNKNOWN-DELIVERY-RESULT" });
 	idle = true;
 	const pending = emit("agent_settled", { aborted: false });
+	await drain();
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
 	ws.close();
 	await pending;
@@ -1443,6 +1446,7 @@ test("an offline completion notification retains its snapshot until reconnect", 
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
+	await drain();
 	const frame = ws.sent.at(-1);
 	assert.equal(frame.cmd, "aibot_send_msg");
 	assertCard(frame);
@@ -1499,13 +1503,17 @@ test("notifications use the configured target without changing an explicit targe
 	ws.open();
 	ws.acknowledge();
 	const defaultSend = sendNotification({ content: "default target" });
-	const defaultFrame = ws.sent.at(-1);
+	await drain();
+	const defaultFrame = ws.sent
+		.filter((frame) => frame.cmd === "aibot_send_msg" && /default target/.test(shown(frame)))
+		.at(-1);
 	assert.equal(defaultFrame.cmd, "aibot_send_msg");
 	assert.equal(defaultFrame.body.chatid, "configured-group");
 	assert.equal(defaultFrame.body.chat_type, 2);
 	ws.acknowledge(defaultFrame);
 	await defaultSend;
 	const explicitSend = sendNotification({ chatid: "explicit-user", content: "explicit target" });
+	await drain();
 	const explicitFrame = ws.sent.at(-1);
 	assert.equal(explicitFrame.body.chatid, "explicit-user");
 	assert.equal(explicitFrame.body.chat_type, 1);
@@ -1514,15 +1522,17 @@ test("notifications use the configured target without changing an explicit targe
 });
 
 test("the deployment test command sends a labelled test to the default target and waits for confirmation", async () => {
-	autoAcknowledge = false;
 	writeLayer("global", { botId: "test-bot", secret: "test-secret", defaultChatId: "test-user", defaultChatType: 1 });
 	await emit("session_start");
 	await command("connect", ctx);
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
+	await drain();
+	autoAcknowledge = false;
 	const pending = command("test", ctx);
 	void pending.catch(() => {});
+	await drain();
 	const frame = ws.sent.at(-1);
 	assert.equal(frame.cmd, "aibot_send_msg");
 	assert.equal(frame.body.chatid, "test-user");
@@ -2394,7 +2404,10 @@ test("an earlier control card still refreshes the owning pi's live state after g
 	assert.equal(update.body.template_card.source.desc, "执行中");
 	assert.equal(update.body.template_card.quote_area.quote_text, "initial screen");
 	assert.equal(update.body.template_card.quote_area.type, undefined, "no document, so no link");
-	assert.match(update.body.template_card.horizontal_content_list.at(-1).value, /已刷新；未配置文档，只更新卡片$/);
+	assert.match(
+		update.body.template_card.horizontal_content_list.at(-1).value,
+		/已刷新；正文保留在文字引用区，不写文档$/,
+	);
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
 	assert.equal(sent.length, 0, "refresh does not start an agent turn");
 	idle = true;
@@ -2542,7 +2555,7 @@ test("the test card is the control card; its abort acts on the live session", as
 	assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort"]);
 });
 
-test("an automatic result is the task's card: its page carries the answer, its quote the terminal", async () => {
+test("an automatic task result quotes its final answer when no document is configured", async () => {
 	const fixture = await tuiStart();
 	fixture.state.lines = ["SCREEN-ANSWER", "tool output"];
 	inbound("result-task");
@@ -2555,10 +2568,38 @@ test("an automatic result is the task's card: its page carries the answer, its q
 	const [card] = resultCards();
 	assertResultCard(card, "✅ 完成：result-task");
 	assert.equal(bodyOf(card), "FINAL-ANSWER");
+	assert.equal(card.body.template_card.quote_area.quote_text, "FINAL-ANSWER");
+	assert.equal(card.body.template_card.quote_area.url, undefined);
 });
 
-test("wecom_send sends one card quoting the terminal as it is, never the notice's own content", async () => {
+test("without a document a notification quotes its body, and button redraws keep that card's body", async () => {
 	const fixture = await tuiStart();
+	fixture.state.lines = ["LIVE-TERMINAL"];
+	await sendNotification({
+		chatid: "test-user",
+		content: '**部署完成**\n\n- 检查通过\n- 待发布\n<!-- wecom_next ["验证部署"] -->',
+	});
+	const card = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)!;
+	const quote = card.body.template_card.quote_area;
+	assert.match(quote.quote_text, /^部署完成\n/);
+	assert.equal(quote.type ?? 0, 0);
+	assert.equal(quote.url, undefined);
+	assert.match(quote.quote_text, /检查通过/);
+	assert.doesNotMatch(quote.quote_text, /LIVE-TERMINAL|\*\*|wecom_next/);
+
+	fixture.state.lines = ["A-NEW-SCREEN"];
+	for (const action of ["send", "send-cancel", "refresh", "model", "model-cancel", "abort"]) {
+		clickCard(card, action);
+		await drain();
+		assert.equal(lastUpdate().body.template_card.quote_area.quote_text, quote.quote_text, action);
+		assert.equal(lastUpdate().body.template_card.quote_area.url, undefined, action);
+	}
+	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1, "no extra Markdown message");
+});
+
+test("with a usable document wecom_send links the freshly written body and quotes the terminal", async (t) => {
+	const doc = docService(t);
+	const { fixture } = await documentStart(doc);
 	fixture.state.lines = ["LIVE-TERMINAL"];
 	await sendNotification({ chatid: "test-user", content: "EXPLICIT-CONTENT" });
 	await drain();
@@ -2567,10 +2608,19 @@ test("wecom_send sends one card quoting the terminal as it is, never the notice'
 	assertCard(pushes[0]);
 	assert.equal(noteOf(pushes[0]), "📣 EXPLICIT-CONTENT");
 	assert.equal(pushes[0].body.template_card.quote_area.quote_text, "LIVE-TERMINAL", "the card shows the window");
+	assert.equal(pushes[0].body.template_card.quote_area.url, PAGE_URL);
+	assert.match(doc.written().at(-1)!, /EXPLICIT-CONTENT/);
+	assert.equal(
+		doc.calls.some(
+			(call) => call.name === "doc_members_update" && call.arguments.add_member_list.items[0].userid === "test-user",
+		),
+		false,
+		"an explicit notice must not silently invite its recipient into the whole session document",
+	);
 });
 
-test("a scheduled notice is drawn once, when its run settles, and survives a reconnect frozen", async () => {
-	const fixture = await tuiStart();
+test("a scheduled notice is drawn once, when its run settles, and survives a reconnect frozen", async (t) => {
+	const { fixture } = await documentStart(docService(t));
 	idle = false;
 	await sendNotification({ content: "AFTER-SETTLE", after_settle: true });
 	// An automatic reconnect before the run ends sends nothing.
@@ -2696,10 +2746,13 @@ const ICON_URL = "https://wdcdn.qpic.cn/MTY4ODg1/pi-logo-test";
 /** The document MCP, answering over fetch like the live service (probed 2026-10). */
 function docService(t: TestContext, fail: Record<string, number> = {}, hold?: Promise<void>) {
 	const calls: { name: string; arguments: any }[] = [];
+	const requests: string[] = [];
+	const paused = new Map<string, Promise<void>>();
 	const original = globalThis.fetch;
 	t.mock.method(globalThis, "fetch", async (input: any, init?: any) => {
 		if (String(input) !== DOC_URL) return original(input, init);
 		const message = JSON.parse(init.body);
+		requests.push(message.method);
 		const reply = (result: unknown, headers: Record<string, string> = {}) =>
 			new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), {
 				status: 200,
@@ -2711,6 +2764,7 @@ function docService(t: TestContext, fail: Record<string, number> = {}, hold?: Pr
 		calls.push({ name, arguments: args });
 		// A slow document service: making the document waits until the test lets it go.
 		if (hold && name === "smartpage_create") await hold;
+		await paused.get(name);
 		const text = (body: Record<string, unknown>) =>
 			reply({ content: [{ type: "text", text: JSON.stringify(body) }] });
 		if (fail[name])
@@ -2729,12 +2783,12 @@ function docService(t: TestContext, fail: Record<string, number> = {}, hold?: Pr
 		calls
 			.filter((call) => call.name === "media_upload" && call.arguments.type === "file")
 			.map((call) => Buffer.from(call.arguments.base64_content, "base64").toString("utf8"));
-	return { calls, names, written };
+	return { calls, names, written, paused, requests };
 }
 
 /**
- * connect with a document: the session's page is made (with the icon, rendered with WebAssembly on the real
- * clock) before its card goes out, then written. Waits for both; `connected` is that card.
+ * connect with a document: the session's page is made and written before its card goes out.
+ * `connected` is that card.
  */
 async function documentStart(
 	doc: ReturnType<typeof docService>,
@@ -2744,6 +2798,7 @@ async function documentStart(
 		secret: "test-secret",
 		defaultChatId: "default-user",
 		docMcpUrl: DOC_URL,
+		contentDisplay: "linked",
 	});
 	const fixture = installTuiFixture(ctx);
 	await emit("session_start");
@@ -2910,6 +2965,7 @@ test("a page not made within six seconds leaves connect's card without a link; t
 		secret: "test-secret",
 		defaultChatId: "default-user",
 		docMcpUrl: DOC_URL,
+		contentDisplay: "linked",
 	});
 	installTuiFixture(ctx);
 	await emit("session_start");
@@ -2947,6 +3003,285 @@ test("a document that refuses the write turns the card red with the reason; the 
 	assert.equal(card.quote_area.quote_text, "token *********** here\ndeploy step two");
 	assert.doesNotMatch(JSON.stringify(ws.sent), /test-secret|test-api-key/);
 	assert.doesNotMatch(doc.written().join("\n"), /test-secret/);
+});
+
+test("the first notification after a document write fails quotes its body, never the stale page", async (t) => {
+	const failures: Record<string, number> = {};
+	const doc = docService(t, failures);
+	const { fixture } = await documentStart(doc);
+	fixture.state.lines = ["LIVE-TERMINAL"];
+	failures.smartpage_pages_overwrite = 850003;
+	await sendNotification({ chatid: "test-user", content: "NEW-ANSWER\nDetails unavailable on the old page" });
+	const [card] = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.ok(card);
+	assert.equal(card.body.template_card.quote_area.url, undefined, "this write failed: the old URL must not be linked");
+	assert.equal(card.body.template_card.quote_area.type ?? 0, 0);
+	assert.match(card.body.template_card.quote_area.quote_text, /^NEW-ANSWER\n/);
+	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1, "fallback stays in the card");
+	delete failures.smartpage_pages_overwrite;
+	await sendNotification({ chatid: "test-user", content: "AFTER-RENEWAL" });
+	const recovered = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)!;
+	assert.equal(recovered.body.template_card.quote_area.url, PAGE_URL, "the first successful write links immediately");
+	assert.equal(recovered.body.template_card.quote_area.quote_text, "LIVE-TERMINAL");
+	clickCard(card, "model");
+	await drain();
+	assert.match(lastUpdate().body.template_card.quote_area.quote_text, /^NEW-ANSWER\n/);
+	assert.equal(lastUpdate().body.template_card.quote_area.url, undefined, "an older fallback card keeps its own body");
+});
+
+test("contentDisplay is editable in every scope without reconnecting, and session overrides can be removed", async (t) => {
+	Object.assign(ctx, { hasUI: true });
+	let choices: RegExp[] = [];
+	Object.assign(ctx.ui, {
+		async select(_title: string, options: string[]) {
+			const wanted = choices.shift();
+			const picked = wanted && options.find((option) => wanted.test(option));
+			assert.ok(picked, `missing choice ${wanted}: ${options.join(" | ")}`);
+			return picked;
+		},
+	});
+	const notices: string[] = [];
+	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
+	const project = layerFile({ project: sandbox });
+	const socket = ws;
+	try {
+		for (const scope of ["global", "project", "session"] as const) {
+			choices = [/^正文展示方式：/, /^inline：卡片内展示（仅三行）/];
+			await command(`config --scope ${scope} edit`, ctx);
+			const file =
+				scope === "global" ? CONFIG_FILE : scope === "project" ? project : layerFile({ session: sessionId });
+			assert.equal(JSON.parse(await readFile(file, "utf8")).contentDisplay, "inline", scope);
+		}
+		choices = [/^正文展示方式：/, /^linked：文档链接展示/];
+		await command("config --scope session edit", ctx);
+		assert.match(notices.at(-1)!, /设置已热更新/);
+		choices = [/^正文展示方式：/, /^取消覆盖/];
+		await command("config --scope session edit", ctx);
+		assert.equal(JSON.parse(await readFile(layerFile({ session: sessionId }), "utf8")).contentDisplay, undefined);
+		assert.equal(ws, socket, "display choices do not replace the registration");
+	} finally {
+		await rm(project, { force: true });
+	}
+});
+
+test("inline is the default even with docMcpUrl: connect, refresh, automatic writes and notifications never call the document service", async (t) => {
+	const doc = docService(t);
+	writeLayer("global", {
+		botId: "test-bot",
+		secret: "test-secret",
+		defaultChatId: "default-user",
+		docMcpUrl: DOC_URL,
+	});
+	installTuiFixture(ctx);
+	await emit("session_start");
+	await command("connect", ctx);
+	ws = FakeWebSocket.instances.at(-1)!;
+	ws.open();
+	ws.acknowledge();
+	await drain();
+	await sendNotification({ content: `安全摘要\n凭据 test-secret\n文档 ${DOC_URL}` });
+	const card = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)!;
+	assert.match(card.body.template_card.quote_area.quote_text, /^安全摘要\n/);
+	assert.equal(card.body.template_card.quote_area.url, undefined);
+	assert.doesNotMatch(JSON.stringify(card), /test-secret|test-api-key/);
+	clickCard(card, "refresh", "default-user");
+	await answered();
+	assert.match(noteOf(lastUpdate()), /正文保留在文字引用区/);
+	clock.tick(30_000);
+	await emit("agent_settled", { aborted: false });
+	assert.deepEqual(doc.requests, [], "even MCP initialization is skipped");
+});
+
+test("changing contentDisplay while connected affects the next card and the next turn's guidance", async (t) => {
+	const doc = docService(t);
+	await documentStart(doc);
+	await command("config --scope session set contentDisplay=inline", ctx);
+	doc.calls.length = 0;
+	inbound("inline-guidance");
+	await drain();
+	assert.match(promptSections.wecom, /not a document page/);
+	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "QUOTED-RESULT" }] } });
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	const [quoted] = resultCards();
+	assert.equal(quoted.body.template_card.quote_area.quote_text, "QUOTED-RESULT");
+	assert.equal(quoted.body.template_card.quote_area.url, undefined);
+	assert.deepEqual(doc.calls, []);
+	await command("config --scope session unset contentDisplay", ctx);
+	await sendNotification({ chatid: "test-user", content: "BACK-TO-DOCUMENT" });
+	assert.equal(
+		ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)!.body.template_card.quote_area.url,
+		PAGE_URL,
+	);
+	assert.match(doc.written().at(-1)!, /BACK-TO-DOCUMENT/);
+	inbound("linked-guidance");
+	await drain();
+	assert.match(promptSections.wecom, /document page in Markdown/);
+});
+
+test("an unreadable page record also falls back to the body without creating another document", async (t) => {
+	const doc = docService(t);
+	await documentStart(doc);
+	doc.calls.length = 0;
+	await writeFile(join(sandbox, "wecom-aibot", "session-doc.json"), "{broken");
+	await sendNotification({ chatid: "test-user", content: "RECORD-FAILURE-BODY" });
+	const [card] = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(card.body.template_card.quote_area.quote_text, "RECORD-FAILURE-BODY");
+	assert.equal(card.body.template_card.quote_area.url, undefined);
+	assert.deepEqual(doc.calls, [], "an unreadable record must not be treated as an absent document");
+});
+
+test("a slow document write has a six-second card budget; late success cannot erase the fallback body", async (t) => {
+	const doc = docService(t);
+	await documentStart(doc);
+	doc.calls.length = 0;
+	let release!: () => void;
+	doc.paused.set("smartpage_pages_overwrite", new Promise<void>((resolve) => (release = resolve)));
+	try {
+		const pending = sendNotification({ chatid: "test-user", content: "TIMEOUT-BODY" });
+		await until(() => doc.names().includes("smartpage_pages_overwrite"));
+		assert.equal(
+			ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length,
+			0,
+			"wait for this write, not the previous one",
+		);
+		clock.tick(6_000);
+		await pending;
+		const [card] = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+		assert.equal(card.body.template_card.quote_area.quote_text, "TIMEOUT-BODY");
+		assert.equal(card.body.template_card.quote_area.url, undefined);
+		release();
+		await drain();
+		clickCard(card, "refresh");
+		await answered();
+		assert.equal(lastUpdate().body.template_card.quote_area.quote_text, "TIMEOUT-BODY");
+		assert.equal(lastUpdate().body.template_card.quote_area.url, undefined);
+		assert.equal(
+			ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length,
+			1,
+			"no late duplicate or Markdown",
+		);
+	} finally {
+		release();
+	}
+});
+
+for (const failure of ["refused", "timeout"] as const)
+	test(`refreshing a document-backed result with a ${failure} write removes its old link and quotes its own body`, async (t) => {
+		const failures: Record<string, number> = {};
+		const doc = docService(t, failures);
+		const { fixture } = await documentStart(doc);
+		await sendNotification({ chatid: "test-user", content: "ORIGINAL-CARD-BODY" });
+		const card = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)!;
+		fixture.state.lines = ["NEW-SCREEN-MUST-NOT-REPLACE-THE-BODY"];
+		doc.calls.length = 0;
+		let release = () => {};
+		if (failure === "refused") failures.smartpage_pages_overwrite = 851008;
+		else doc.paused.set("smartpage_pages_overwrite", new Promise<void>((resolve) => (release = resolve)));
+		try {
+			clickCard(card, "refresh");
+			await until(() => doc.names().includes("smartpage_pages_overwrite"));
+			if (failure === "timeout") clock.tick(3_300);
+			await answered();
+			assert.match(noteOf(lastUpdate()), /文档写入失败/);
+			assert.equal(lastUpdate().body.template_card.quote_area.quote_text, "ORIGINAL-CARD-BODY");
+			assert.equal(lastUpdate().body.template_card.quote_area.url, undefined);
+			release();
+			delete failures.smartpage_pages_overwrite;
+			await sendNotification({ chatid: "test-user", content: "A-NEWER-HEALTHY-CARD" });
+			clickCard(card, "model");
+			await drain();
+			assert.equal(lastUpdate().body.template_card.quote_area.quote_text, "ORIGINAL-CARD-BODY");
+			assert.equal(
+				lastUpdate().body.template_card.quote_area.url,
+				undefined,
+				"a fallback is not undone by another card",
+			);
+		} finally {
+			release();
+		}
+	});
+
+test("reconnecting during page preparation joins the same frozen completion instead of publishing it twice", async (t) => {
+	const doc = docService(t);
+	const { fixture } = await documentStart(doc);
+	fixture.state.lines = ["ORIGINAL-SCREEN"];
+	idle = false;
+	await sendNotification({ chatid: "test-user", after_settle: true });
+	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "FROZEN-ANSWER" }] } });
+	doc.calls.length = 0;
+	let release!: () => void;
+	doc.paused.set("smartpage_pages_overwrite", new Promise<void>((resolve) => (release = resolve)));
+	try {
+		idle = true;
+		const settled = emit("agent_settled", { aborted: false });
+		await until(() => doc.names().includes("smartpage_pages_overwrite"));
+		ctx.model = { ...ctx.model!, ...modelB };
+		fixture.state.lines = ["UNRELATED-LATER-SCREEN"];
+		ws.close();
+		clock.tick(1000);
+		ws = FakeWebSocket.instances.at(-1)!;
+		ws.open();
+		ws.acknowledge();
+		await drain();
+		assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+		release();
+		await settled;
+		await drain();
+		const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+		assert.equal(pushes.length, 1);
+		assertCard(pushes[0]);
+		assert.equal(pushes[0].body.template_card.quote_area.quote_text, "ORIGINAL-SCREEN");
+		assert.equal(bodyOf(pushes[0]), "FROZEN-ANSWER");
+		assert.equal(doc.names().filter((name) => name === "smartpage_pages_overwrite").length, 1);
+	} finally {
+		release();
+	}
+});
+
+for (const scheduled of [false, true])
+	test(`disconnect during a document write cancels the ${scheduled ? "scheduled" : "immediate"} notification`, async (t) => {
+		const doc = docService(t);
+		await documentStart(doc);
+		doc.calls.length = 0;
+		let release!: () => void;
+		doc.paused.set("smartpage_pages_overwrite", new Promise<void>((resolve) => (release = resolve)));
+		let pending: Promise<unknown>;
+		if (scheduled) {
+			idle = false;
+			await sendNotification({ content: "CANCELLED-DURING-WRITE", after_settle: true });
+			idle = true;
+			pending = emit("agent_settled", { aborted: false });
+		} else pending = sendNotification({ content: "CANCELLED-DURING-WRITE" });
+		try {
+			await until(() => doc.names().includes("smartpage_pages_overwrite"));
+			await command("disconnect", ctx);
+			release();
+			if (scheduled) await pending;
+			else await assert.rejects(pending, /会话已停止或切换/);
+			await drain();
+			assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+		} finally {
+			release();
+		}
+	});
+
+test("group refreshes preserve each notification's own quote rather than the newest notification or terminal", async () => {
+	const fixture = await tuiStart();
+	for (const content of ["FIRST-GROUP-BODY", "SECOND-GROUP-BODY"])
+		await sendNotification({ chatid: "group-quote", chat_type: 2, content });
+	fixture.state.lines = ["NEW-GROUP-SCREEN"];
+	const cards = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(cards.length, 2);
+	for (const card of cards) {
+		clickCard(card, "refresh", "colleague");
+		await drain();
+		assert.equal(
+			lastUpdate().body.template_card.quote_area.quote_text,
+			card.body.template_card.quote_area.quote_text,
+		);
+		assert.equal(lastUpdate().body.userids, undefined, "the group-wide redraw still preserves this card's body");
+	}
 });
 
 test("发送 runs the chosen prompt as this session's task, and its result comes back as a card in that chat", async (t) => {

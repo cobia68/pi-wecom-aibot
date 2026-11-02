@@ -489,7 +489,7 @@ class ConfigCommand {
 		const action = configured
 			? await this.choose<"enter" | LayerChange>("会话文档", [
 					["重新输入地址", "enter"],
-					["删除地址（控制卡只更新卡片里的三行）", { remove: ["docMcpUrl"] }],
+					["删除地址（正文回退到文字引用区）", { remove: ["docMcpUrl"] }],
 				])
 			: "enter";
 		if (action !== "enter") return action;
@@ -688,7 +688,7 @@ class ConfigCommand {
 				: "当前 session 的合并结果不变，无需操作";
 		const parts: string[] = [];
 		if (settings) parts.push(adopted === undefined ? "设置下次使用时生效" : "设置已热更新");
-		if (document) parts.push("会话文档地址在下次 connect 或点「刷新卡片」时生效");
+		if (document) parts.push("会话文档地址在下次发卡或点「刷新卡片」时生效");
 		if (connection || pending)
 			parts.push(
 				adopted === undefined

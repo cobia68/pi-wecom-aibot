@@ -373,6 +373,7 @@ test("argument completion offers every word that may come next: subcommands, opt
 		"config --scope global set defaultChatId=",
 		"config --scope global set defaultChatType=",
 		"config --scope global set notificationScope=",
+		"config --scope global set contentDisplay=",
 		"config --scope global set controlPrompts=",
 		"config --scope global set controlPrompts+=",
 		"config --scope global set controlPrompts-=",
@@ -380,11 +381,19 @@ test("argument completion offers every word that may come next: subcommands, opt
 	]);
 	// A field already given is not offered again, whichever of =, += or -= it was given with.
 	assert.deepEqual(values("config --scope session set notificationScope=all-runs c"), [
+		"config --scope session set notificationScope=all-runs contentDisplay=",
 		"config --scope session set notificationScope=all-runs controlPrompts=",
 		"config --scope session set notificationScope=all-runs controlPrompts+=",
 		"config --scope session set notificationScope=all-runs controlPrompts-=",
 	]);
-	assert.equal(values("config --scope session set controlPrompts+=a c"), null);
+	assert.deepEqual(values("config --scope session set controlPrompts+=a c"), [
+		"config --scope session set controlPrompts+=a contentDisplay=",
+	]);
+	assert.deepEqual(values("config --scope session set contentDisplay="), [
+		"config --scope session set contentDisplay=inline ",
+		"config --scope session set contentDisplay=linked ",
+	]);
+	assert.ok(values("config --scope project unset ")?.includes("config --scope project unset contentDisplay "));
 	assert.deepEqual(values("config --scope session set notificationScope="), [
 		"config --scope session set notificationScope=wecom-tasks ",
 		"config --scope session set notificationScope=all-runs ",
@@ -541,6 +550,6 @@ test("error messages never end in a full stop, also when composed from several s
 		assert.ok(!errorOf(input).endsWith("。"), errorOf(input));
 	assert.equal(
 		errorOf("config --scope session set notificationScope=all-runs bogus=1 x"),
-		"未知字段 bogus；可用字段：defaultChatId、defaultChatType、notificationScope、controlPrompts；「x」缺少 =，写成 字段=值。未做任何修改。查看帮助：/wecom-aibot config --help",
+		"未知字段 bogus；可用字段：defaultChatId、defaultChatType、notificationScope、contentDisplay、controlPrompts；「x」缺少 =，写成 字段=值。未做任何修改。查看帮助：/wecom-aibot config --help",
 	);
 });

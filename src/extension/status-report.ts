@@ -158,6 +158,7 @@ function settingRows({ resolved }: StatusSnapshot): [string, string][] {
 	if (!resolved) return [];
 	return [
 		["通知范围", describe(resolved, "notificationScope")],
+		["正文展示", describe(resolved, "contentDisplay")],
 		["提示词", describe(resolved, "controlPrompts")],
 		["会话文档", describe(resolved, "docMcpUrl")],
 	];

@@ -22,7 +22,7 @@ export interface CompletionRequest {
 	chatId: string;
 	chatType: 1 | 2;
 	source: SessionSource;
-	/** Explicit wecom_send content: the card's headline is its first line, its page shows it all. */
+	/** Explicit wecom_send content: the headline is its first line; the body uses the configured display. */
 	content?: string;
 	/** The frozen automatic reply. */
 	result?: string;
@@ -41,22 +41,24 @@ export interface OutboxHost {
 	context(): ExtensionContext | undefined;
 	send(chat: ChatRef, notification: GatewayNotification): Promise<void>;
 	/**
-	 * The notification as a new copy of the session's control card, `note` in its 窗口记录, its page showing
-	 * the body; undefined (or a throw) leaves the gateway to send the body as Markdown.
+	 * Prepare the page, then draw a frozen control card (or quote the body when the page is unavailable).
+	 * Undefined or a throw leaves the gateway to send the body as Markdown.
 	 */
 	controlCard(
 		ctx: ExtensionContext,
+		chat: ChatRef,
+		notification: GatewayNotification,
 		outcome: RunOutcome,
-		note: string,
-		source?: SessionSource,
-		steps?: readonly string[],
-	): GatewayNotification["control"];
+		steps: readonly string[],
+	): Promise<GatewayNotification["control"]>;
 	log(line: string): void;
 	notify(message: string, type?: "info" | "warning" | "error"): void;
 }
 
 type Phase =
 	| { kind: "pending" }
+	/** A reconnect joins the same page preparation; it must not draw or deliver a second card. */
+	| { kind: "preparing"; promise: Promise<void> }
 	/** The payload is frozen; a reconnect sends exactly this. */
 	| { kind: "ready"; notification: GatewayNotification }
 	| { kind: "delivering"; notification: GatewayNotification; promise: Promise<void> };
@@ -93,48 +95,57 @@ export class NotificationOutbox {
 
 	async prepare(ctx: ExtensionContext, aborted: boolean, boundary: "settled" | "ready" = "settled"): Promise<void> {
 		if (this.disposed) return;
+		const preparations: Promise<void>[] = [];
 		for (const [key, entry] of this.waiting) {
-			if (entry.phase.kind !== "pending") continue;
-			try {
-				const request = entry.request;
-				// A readiness change is not the end of a run: scheduled completions still wait for agent_settled.
-				if (boundary === "ready" && request.result === undefined) continue;
-				if (request.source.sessionId !== ctx.sessionManager.getSessionId()) {
-					this.cancel(key, entry, new Error("pi session_id 已改变，已取消通知"));
-					continue;
-				}
-				const answer =
-					request.content === undefined && request.result === undefined
-						? latestAssistantReply(ctx.sessionManager.getBranch(), request.afterEntryId)
-						: undefined;
-				if (answer) request.source = { ...request.source, ...captureModelIdentity(ctx, answer) };
-				const ended = request.aborted ?? aborted;
-				// An extracted completion is titled by how its run ended, known only now.
-				const title = request.title ?? (request.content === undefined ? completionTitle(ended) : undefined);
-				// A result never carries content, so it always has a title here.
-				const kind = request.result !== undefined ? "result" : "notice";
-				// The card offers the body's next steps; nothing sent carries their comment.
-				const body = splitNextSteps(request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT);
-				if (body.problem) this.host.log(body.problem);
-				// The session's control card, drawn now while the terminal shows how the run ended.
-				const control = this.controlCard(
-					ctx,
-					request.failed ? "failed" : ended ? "aborted" : "done",
-					kind === "result" ? (title as string) : noteOf({ kind, title }),
-					request.source,
-					body.steps,
-				);
-				const notification = notificationPayload(kind, request.source, body.text || NO_REPLY_TEXT, {
-					title,
-					aborted: ended,
-					...(control ? { control } : {}),
-				});
-				entry.phase = { kind: "ready", notification };
-			} catch (error) {
-				this.cancel(key, entry, error);
+			if (entry.phase.kind === "preparing") {
+				preparations.push(entry.phase.promise);
+				continue;
 			}
+			if (entry.phase.kind !== "pending") continue;
+			// Readiness is not the end of a run: scheduled completions still wait for agent_settled.
+			if (boundary === "ready" && entry.request.result === undefined) continue;
+			const promise = this.prepareEntry(ctx, entry.request, aborted)
+				.then((notification) => {
+					if (!this.disposed && this.waiting.get(key) === entry) entry.phase = { kind: "ready", notification };
+				})
+				.catch((error: unknown) => this.cancel(key, entry, error));
+			entry.phase = { kind: "preparing", promise };
+			preparations.push(promise);
 		}
+		await Promise.all(preparations);
 		await this.flush();
+	}
+
+	/** Freeze the answer before waiting for its page; another run cannot change its text or source. */
+	private async prepareEntry(
+		ctx: ExtensionContext,
+		request: CompletionRequest,
+		aborted: boolean,
+	): Promise<GatewayNotification> {
+		if (request.source.sessionId !== ctx.sessionManager.getSessionId())
+			throw new Error("pi session_id 已改变，已取消通知");
+		const answer =
+			request.content === undefined && request.result === undefined
+				? latestAssistantReply(ctx.sessionManager.getBranch(), request.afterEntryId)
+				: undefined;
+		if (answer) request.source = { ...request.source, ...captureModelIdentity(ctx, answer) };
+		const ended = request.aborted ?? aborted;
+		const title = request.title ?? (request.content === undefined ? completionTitle(ended) : undefined);
+		const kind = request.result !== undefined ? "result" : "notice";
+		const body = splitNextSteps(request.content ?? request.result ?? answer?.text ?? NO_REPLY_TEXT);
+		if (body.problem) this.host.log(body.problem);
+		const notification = notificationPayload(kind, request.source, body.text || NO_REPLY_TEXT, {
+			title,
+			aborted: ended,
+		});
+		const control = await this.controlCard(
+			ctx,
+			{ chatId: request.chatId, chatType: request.chatType },
+			notification,
+			request.failed ? "failed" : ended ? "aborted" : "done",
+			body.steps,
+		);
+		return control ? { ...notification, control } : notification;
 	}
 
 	async flush(): Promise<void> {
@@ -201,15 +212,15 @@ export class NotificationOutbox {
 		this.handedOver.clear();
 	}
 
-	private controlCard(
+	private async controlCard(
 		ctx: ExtensionContext,
+		chat: ChatRef,
+		notification: GatewayNotification,
 		outcome: RunOutcome,
-		note: string,
-		source: SessionSource,
 		steps: readonly string[],
-	): GatewayNotification["control"] {
+	): Promise<GatewayNotification["control"]> {
 		try {
-			return this.host.controlCard(ctx, outcome, note, source, steps);
+			return await this.host.controlCard(ctx, chat, notification, outcome, steps);
 		} catch (error) {
 			this.host.log(`sent as Markdown: the control card could not be drawn: ${errorMessage(error)}`);
 			return undefined;

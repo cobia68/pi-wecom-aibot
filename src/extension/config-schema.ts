@@ -23,6 +23,7 @@ const VALUES: Record<FieldName, Record<string, unknown>> = {
 	defaultChatId: { type: "string", pattern: "^[^\"'“”‘’`\\s]+$" },
 	defaultChatType: { type: "integer" },
 	notificationScope: { type: "string" },
+	contentDisplay: { type: "string" },
 	controlPrompts: {
 		type: "array",
 		maxItems: MAX_PROMPTS,

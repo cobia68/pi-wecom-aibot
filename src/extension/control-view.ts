@@ -3,7 +3,14 @@
  * the session (the gateway adds the others online), the prompts or models while choosing one.
  */
 import { createHash } from "node:crypto";
-import { type CardAction, type CardModel, type CardSelection, type CardTone, clamp } from "../shared/card.ts";
+import {
+	type CardAction,
+	type CardModel,
+	type CardSelection,
+	type CardTone,
+	clamp,
+	plainText,
+} from "../shared/card.ts";
 import {
 	CONTROL_KEYS,
 	type ControlAction,
@@ -17,7 +24,7 @@ import {
 } from "../shared/control-card.ts";
 import type { SessionSource } from "../shared/notification-types.ts";
 import { type ModelChoice, modelOptions, modelPage } from "./model-options.ts";
-import { withoutNextStepLines } from "./next-steps.ts";
+import { withoutNextStepLines, withoutNextSteps } from "./next-steps.ts";
 
 /** done, aborted, failed: a finished run's copy, until a click shows the live state. */
 export type ControlStatus = "idle" | "running" | "confirming" | "doc-problem" | "done" | "aborted" | "failed";
@@ -32,6 +39,8 @@ export interface ControlView {
 	modelPage?: number;
 	screen?: { at: Date; lines: readonly string[] };
 	pageUrl?: string;
+	/** This card's already-masked plain-text body preview, instead of the terminal; never linked to a page. */
+	bodyQuote?: string;
 	/** The session document's copy of pi's logo; the gateway draws a public one without it. */
 	icon?: string;
 	prompts?: readonly string[];
@@ -141,7 +150,7 @@ export function sessionControlCard(source: SessionSource, view: ControlView): Ca
 		desc: head.desc,
 		quote: quoteOf(view),
 		quoteLimit: QUOTE_LIMIT,
-		...(view.pageUrl ? { quoteUrl: view.pageUrl } : {}),
+		...(view.pageUrl && view.bodyQuote === undefined ? { quoteUrl: view.pageUrl } : {}),
 		subtitle:
 			view.status === "doc-problem"
 				? `${head.subtitle}；文档授权过期请到工作台 → 智能机器人 → 可使用权限重新授权`
@@ -170,8 +179,18 @@ export function quoteTail(lines: readonly string[]): string[] {
 		.slice(-QUOTE_LINES);
 }
 
-/** No screen: pi has no terminal (RPC, print), or none was read yet; the page still has the replies. */
+/** A body's opening, not the terminal's tail: fill the phone's three lines with text, bounded for IPC too. */
+export function quoteHead(markdown: string): string {
+	const lines = plainText(withoutNextSteps(markdown))
+		.split("\n")
+		.filter((line) => line.trim())
+		.slice(0, QUOTE_LINES);
+	return clamp(lines.join("\n"), QUOTE_LIMIT) || "（正文没有可显示的文字）";
+}
+
+/** A body's preview stays on this card through every button redraw; otherwise show the terminal. */
 function quoteOf(view: ControlView): string {
+	if (view.bodyQuote !== undefined) return view.bodyQuote;
 	if (view.screen) return quoteTail(view.screen.lines).join("\n") || "（终端画面为空）";
 	return view.pageUrl ? "没有终端画面；点这里看最近回复" : "点「刷新卡片」读取画面";
 }

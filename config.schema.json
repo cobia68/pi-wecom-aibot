@@ -42,6 +42,15 @@
       ],
       "default": "wecom-tasks"
     },
+    "contentDisplay": {
+      "description": "正文展示方式：任务结果和通知正文如何呈现；全局、项目级和 session 都能设，下次使用时生效。inline：卡片内展示（仅三行）；正文开头放文字引用区，不使用文档，Markdown 转为纯文本；linked：文档链接展示；需配置 docMcpUrl，未配置、写入失败或超时回退到卡片内展示",
+      "type": "string",
+      "enum": [
+        "inline",
+        "linked"
+      ],
+      "default": "inline"
+    },
     "controlPrompts": {
       "description": "控制卡提示词：控制卡「提示词」下拉框的候选，最多 10 条；点「发提示词」时把选中的那条原样作为本 session 的任务。下拉框只显示前 10 个字。config set 用英文逗号分隔（controlPrompts=继续,运行测试），整份替换；controlPrompts+=新提示 加在末尾，controlPrompts-=旧提示 删掉一条，多条也用英文逗号分隔；project 或 session 还没有自己的提示词时，+= 和 -= 先复制继承来的那份再改，之后不再跟随继承来的列表。含空格或逗号的提示词用 config edit 一行一条填写，清空编辑器即为没有提示词。不设置时没有提示词，控制卡不显示下拉框和「发提示词」",
       "type": "array",
@@ -56,7 +65,7 @@
       "default": []
     },
     "docMcpUrl": {
-      "description": "会话文档：智能机器人「文档」授权后的 streamableHTTP URL（工作台 → 智能机器人 → 可使用权限）。配置后，插件在企业微信里建一份文档，每个 session 一页，写最近的回复和通知，点控制卡的引用区打开。地址含 apikey：只能写在全局配置里，用 /wecom-aibot config edit 填写，查看时只显示是否已配置",
+      "description": "会话文档：智能机器人「文档」授权后的 streamableHTTP URL（工作台 → 智能机器人 → 可使用权限）。配置且 contentDisplay=linked 时，插件在企业微信里建一份文档，每个 session 一页，写最近的回复和通知，点控制卡的引用区打开。地址含 apikey：只能写在全局配置里，用 /wecom-aibot config edit 填写，查看时只显示是否已配置",
       "type": "string",
       "pattern": "^https://",
       "maxLength": 2048

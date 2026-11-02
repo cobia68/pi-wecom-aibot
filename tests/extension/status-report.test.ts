@@ -79,6 +79,7 @@ test("a session that has not connected reads as one headline and one aligned tab
 			"  工作目录  pi-wecom-aibot",
 			"",
 			"  通知范围  all-runs（全局）",
+			"  正文展示  inline（内置默认值）",
 			"  提示词    无（内置默认值）",
 			"  会话文档  未配置",
 			"",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { promptOptions, quoteTail, sessionControlCard } from "../../src/extension/control-view.ts";
+import { promptOptions, quoteHead, quoteTail, sessionControlCard } from "../../src/extension/control-view.ts";
 import { modelOptions, modelPage } from "../../src/extension/model-options.ts";
 import { renderCard } from "../../src/shared/card.ts";
 import { parseControlKey, sessionFingerprint } from "../../src/shared/control-card.ts";
@@ -41,6 +41,25 @@ test("确认中止 with tasks queued offers this run, everything or the queue al
 
 test("a reply's next-step comment never shows in the card's quote", () => {
 	assert.deepEqual(quoteTail(["一", "二", "结论", '<!-- wecom_next ["运行测试"] -->']), ["一", "二", "结论"]);
+});
+
+test("body quotes use the first three non-empty plain-text lines, without next steps, and never retain a page link", () => {
+	const bodyQuote = quoteHead(
+		'# **结论：通过**\n\n- 验证成功\n\n```sh\nnpm test\n```\n第四行\n<!-- wecom_next ["提交"] -->',
+	);
+	assert.equal(bodyQuote, "结论：通过\n· 验证成功\n[代码]");
+	const card = sessionControlCard(source, {
+		status: "done",
+		bodyQuote,
+		pageUrl: "https://doc.weixin.qq.com/old-page",
+		screen: { at: new Date(), lines: ["UNRELATED-SCREEN"] },
+	});
+	assert.equal(card.quote, bodyQuote);
+	assert.equal(card.quoteUrl, undefined, "a body quote cannot accidentally link an older page");
+	assert.equal(quoteHead("\n\n"), "（正文没有可显示的文字）");
+	const long = quoteHead("🙂".repeat(2000));
+	assert.equal([...long].length, 1500, "bounded before IPC, by code point");
+	assert.ok(long.endsWith("🙂…"));
 });
 
 test("before any refresh the card names the session; its four buttons are always there, in two rows", () => {

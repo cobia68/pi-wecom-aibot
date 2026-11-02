@@ -32,9 +32,11 @@ export function registerWecomSend(pi: ExtensionAPI, host: WecomSendHost): void {
 		label: "WeCom Send",
 		description:
 			"Send a notification through the WeCom (企业微信) smart robot, as this session's control card. " +
-			"The card shows the headline and the terminal's last lines; tapping the card's quote opens the session's page, which shows the whole Markdown body (or, for an omitted content, that reply). " +
+			"The contentDisplay configuration defaults to inline (the card's plain-text quote); linked uses the session's Markdown document page. " +
+			"In linked mode the quote (the terminal's last lines) links to the page; if no page can be written in time, the body falls back to inline without a link. " +
+			"In inline mode or fallback, only the body's first three non-empty lines are shown; Markdown formatting is removed and code blocks become [代码]. No extra message is sent. " +
 			"The plugin adds the pi session, provider, model and working directory's final folder name; do not repeat them in content. " +
-			"The first line of content becomes the headline, so lead with the conclusion. " +
+			"The first line of content becomes the headline, so lead with the conclusion and put the essential result in the first three short lines. " +
 			"Use userid for single chat, chatid for group chat, or omit chatid to reply to the chat that sent the current WeCom task (local runs use the configured default target). " +
 			"The user must have messaged the robot before. " +
 			"Omit content to send pi's latest visible reply from the current run; to resend an earlier answer, pass it as content. " +

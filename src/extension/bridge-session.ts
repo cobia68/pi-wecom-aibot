@@ -39,7 +39,7 @@ import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 import { type Connection, connectionKey, type Settings } from "./config.ts";
 import { type BridgeConnectionStatus, ConnectionNotices } from "./connection-notices.ts";
 import type { ControlReceipts } from "./control-receipts.ts";
-import { type ControlStatus, promptOptions, sessionControlCard } from "./control-view.ts";
+import { type ControlStatus, type ControlView, promptOptions, quoteHead, sessionControlCard } from "./control-view.ts";
 import { type GatewayClientOptions, whoamiCancelled } from "./gateway-client.ts";
 import { InboundContentPreparer, type PreparedInboundContent } from "./inbound/content.ts";
 import { type ModelChoice, modelOptions, modelPage } from "./model-options.ts";
@@ -68,8 +68,8 @@ const DISPATCH_REJECTED =
 const ABORT_CONFIRM_MS = 60_000;
 /** Pages of models remembered at once, one per viewer's copy of a card. */
 const MODEL_PAGES = 50;
-/** Cards whose offered next steps are remembered at once; an older card offers only controlPrompts. */
-const CARD_STEPS = 50;
+/** Published bodies and next steps remembered at once; older cards return to the terminal and controlPrompts. */
+const CARD_CONTENTS = 50;
 /** A task's first line in its result card's 窗口记录. */
 const SUBJECT_LENGTH = 24;
 const NO_MODELS = "没有可用的模型：先在 pi 里配置模型和密钥";
@@ -80,6 +80,14 @@ interface ClickAnswer {
 	only?: boolean;
 	choosing?: "prompt" | "model";
 	modelPage?: number;
+}
+
+interface CardContent {
+	/** A bounded, masked, plain-text opening; never a whole unbounded reply. */
+	quote: string;
+	steps: readonly string[];
+	/** Only a page that this publication successfully wrote. Missing means this card stays a text quote. */
+	pageUrl?: string;
 }
 
 interface BridgeTask {
@@ -166,8 +174,8 @@ export class BridgeSession {
 	private pendingAbort: { userid: string; chat: string; until: number } | undefined;
 	/** The page of models each viewer's copy shows while 切换模型 waits (modelKey). */
 	private readonly modelPages = new Map<string, number>();
-	/** Each published card's next steps, offered before controlPrompts in its 提示词 dropdown. */
-	private readonly cardSteps = new Map<string, string[]>();
+	/** Each published card's body preview and next steps, preserved through button redraws. */
+	private readonly cardContents = new Map<string, CardContent>();
 	/** /wecom-aibot connect before the registration is ready: the first ready state publishes a card. */
 	private announceOnReady = false;
 
@@ -186,7 +194,8 @@ export class BridgeSession {
 			subscription: () => this.subscription,
 			context: () => this.host.context(),
 			send: (chat, notification) => this.client.notify(chat, notification),
-			controlCard: (ctx, outcome, note, source, steps) => this.publishedCard(ctx, outcome, note, source, steps),
+			controlCard: (ctx, chat, notification, outcome, steps) =>
+				this.publishedCard(ctx, chat, notification, outcome, steps),
 			log: (line) => this.host.log(line),
 			notify: (message, type) => this.host.notify(message, type),
 		});
@@ -196,6 +205,7 @@ export class BridgeSession {
 			sessionId: this.sessionId,
 			live: () => !this.disposed && !this.identifyOnly,
 			context: () => this.host.context(),
+			contentDisplay: () => this.host.settings().contentDisplay,
 			doc: () => this.host.doc(),
 			running: () => this.busy,
 			maskText: (text) => this.host.maskText(text),
@@ -278,6 +288,7 @@ export class BridgeSession {
 		this.currentTask = undefined;
 		this.queue.length = 0;
 		this.outbox.dispose();
+		this.cardContents.clear();
 		this.streamText = this.finalText = "";
 		this.client.stop(reason);
 		for (const wake of [...this.readyWaiters]) wake(new Error(`当前 pi 的企微接入已停止（${reason}）`));
@@ -476,18 +487,20 @@ export class BridgeSession {
 		options: {
 			viewer?: string;
 			chat?: ChatRef;
-			/** The copy being drawn: its own next steps join its prompts. */
+			/** The copy being drawn: its own body preview and next steps. */
 			cardId?: string;
 			status?: ControlStatus;
 			choosing?: "prompt" | "model";
-			/** The model that wrote what the card is published with; a click shows the live one. */
-			source?: SessionSource;
 			modelPage?: number;
 		} = {},
 	): CardModel {
 		const pageUrl = this.page.url();
 		const icon = this.page.icon();
-		return sessionControlCard(options.source ?? captureSessionSource(ctx), {
+		const content = options.cardId ? this.cardContents.get(options.cardId) : undefined;
+		// Once a card falls back, keep its body: another card's successful write must not erase this one's quote.
+		if (content && content.pageUrl !== pageUrl) content.pageUrl = undefined;
+		const bodyQuote = content && !content.pageUrl ? this.host.maskText(content.quote) : undefined;
+		return sessionControlCard(captureSessionSource(ctx), {
 			status: options.status ?? this.controlStatus(options.viewer, options.chat),
 			prompts: this.promptsFor(options.cardId),
 			queued: this.waiting,
@@ -502,44 +515,59 @@ export class BridgeSession {
 			...(icon ? { icon } : {}),
 			...(this.screen ? { screen: this.screen } : {}),
 			...(pageUrl ? { pageUrl } : {}),
+			...(bodyQuote !== undefined ? { bodyQuote } : {}),
 		});
 	}
 
-	/**
-	 * Everything pi publishes (a result, a notice, the deployment test): a new copy of this session's control
-	 * card, 窗口记录 saying why it is here; `status` is a finished run's, else live. The page is rewritten at once
-	 * for its quote.
-	 */
-	private publishedCard(
+	/** Freeze the terminal and body now, then wait for this page write before choosing the card's display. */
+	private async publishedCard(
 		ctx: ExtensionContext,
-		status: RunOutcome | undefined,
-		note: string,
-		source?: SessionSource,
-		steps?: readonly string[],
-	): GatewayNotification["control"] {
-		if (this.identifyOnly) return undefined;
+		chat: ChatRef,
+		notification: GatewayNotification,
+		outcome?: RunOutcome,
+		steps: readonly string[] = [],
+	): Promise<GatewayNotification["control"]> {
+		if (this.identifyOnly || this.disposed) return undefined;
 		this.readScreen(ctx);
 		const cardId = controlCardId(this.sessionId);
-		if (steps?.length) this.rememberSteps(cardId, steps);
-		const card = withNote(this.controlCard(ctx, { status, source, cardId }), note);
-		void this.page.write();
-		return { cardId, card };
+		const content: CardContent = { quote: quoteHead(this.host.maskText(notification.text)), steps: [...steps] };
+		this.rememberCard(cardId, content);
+		const view: ControlView = {
+			status: outcome ?? (this.busy ? "running" : "idle"),
+			prompts: this.promptsFor(cardId),
+			queued: this.waiting,
+			...(this.screen ? { screen: this.screen } : {}),
+		};
+		const at = new Date();
+		const pageUrl = await this.page.publish(ctx, chat, notification);
+		if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId) return undefined;
+		content.pageUrl = pageUrl;
+		const icon = this.page.icon();
+		const card = sessionControlCard(notification.source, {
+			...view,
+			status: !outcome && !pageUrl && this.page.problem ? "doc-problem" : view.status,
+			...(icon ? { icon } : {}),
+			...(pageUrl ? { pageUrl } : { bodyQuote: content.quote }),
+		});
+		const note = notification.kind === "result" ? (notification.title ?? "本轮结果") : noteOf(notification);
+		return { cardId, card: withNote(card, note, at) };
 	}
 
-	private rememberSteps(cardId: string, steps: readonly string[]): void {
-		this.cardSteps.set(cardId, [...steps]);
-		for (const old of this.cardSteps.keys()) if (this.cardSteps.size > CARD_STEPS) this.cardSteps.delete(old);
+	private rememberCard(cardId: string, content: CardContent): void {
+		this.cardContents.set(cardId, content);
+		for (const old of this.cardContents.keys())
+			if (this.cardContents.size > CARD_CONTENTS) this.cardContents.delete(old);
 	}
 
 	/** A card's 提示词: the steps its answer offered, then controlPrompts, each once and at most MAX_PROMPTS. */
 	private promptsFor(cardId: string | undefined): string[] {
-		const steps = (cardId && this.cardSteps.get(cardId)) || [];
+		const steps = (cardId && this.cardContents.get(cardId)?.steps) || [];
 		return [...new Set([...steps, ...this.host.settings().controlPrompts])].slice(0, MAX_PROMPTS);
 	}
 
 	/**
-	 * The terminal now, for the card's three lines and the page; without one (RPC, print) the last stays and
-	 * the reason is returned.
+	 * The terminal now, for document-backed cards and control-only cards; without one (RPC, print) the last
+	 * screen stays and the reason is returned. Body quotes are kept separately.
 	 */
 	private readScreen(ctx: ExtensionContext): string | undefined {
 		try {
@@ -560,10 +588,11 @@ export class BridgeSession {
 		return this.busy ? "running" : "idle";
 	}
 
-	/** The card's three lines from the terminal at once, then the page. */
+	/** Read the terminal and refresh the page independently: a headless pi can still repair its page. */
 	private async refreshControl(ctx: ExtensionContext, viewer: string): Promise<string> {
 		const unread = this.readScreen(ctx);
-		return unread ? `画面读取失败：${unread}` : this.page.refresh(viewer);
+		const page = await this.page.refresh(viewer);
+		return unread ? sentences(`画面读取失败：${unread}`, page) : page;
 	}
 
 	autoWritePage(): void {
@@ -673,17 +702,14 @@ export class BridgeSession {
 					};
 					const before = live();
 					this.readScreen(before);
-					await this.page.ensure(before, chat);
-					// Making the page may take seconds: the registration is checked again.
+					await this.page.publish(before, chat);
+					// Writing the page may take seconds: the registration is checked again.
 					const ctx = live();
 					await this.client.push(chat, { kind: "control", cardId, card: withNote(this.controlCard(ctx), note) });
 				},
 				force,
 			);
-			if (sent && !this.disposed) {
-				this.host.log(`control card delivered for session ${this.sessionId}`);
-				void this.page.write();
-			}
+			if (sent && !this.disposed) this.host.log(`control card delivered for session ${this.sessionId}`);
 		} catch (error) {
 			if (
 				deliveryFailure(error) === "not_sent" &&
@@ -826,10 +852,16 @@ export class BridgeSession {
 		const ctx = options.ctx ?? this.host.context();
 		const current = (context: ExtensionContext | undefined) =>
 			context?.sessionManager.getSessionId() === this.sessionId;
-		if (this.disposed || !ctx || !current(ctx) || !current(this.host.context()))
-			throw new Error("pi 会话已停止或切换，已取消通知");
-		// A notice or the deployment test is this session's control card, drawn as the terminal is now.
-		const control = this.publishedCard(ctx, undefined, noteOf(notification), notification.source, options.steps);
+		if (!ctx) throw new Error("pi 会话已停止或切换，已取消通知");
+		const validate = () => {
+			if (this.disposed || !current(ctx) || !current(this.host.context()))
+				throw new Error("pi 会话已停止或切换，已取消通知");
+		};
+		validate();
+		const control = await this.publishedCard(ctx, chat, notification, undefined, options.steps);
+		// A document write may outlive the tool call or the registration: never send after either was cancelled.
+		validate();
+		signal.throwIfAborted();
 		await this.client.notify(chat, control ? { ...notification, control } : notification);
 	}
 
