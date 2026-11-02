@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { after, afterEach, beforeEach, test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { GatewayClient } from "../../src/extension/gateway-client.ts";
+import { MESSAGE_SOURCE_ENTRY } from "../../src/extension/message-source.ts";
 import { type GatewayServer, startGatewayServer } from "../../src/gateway/server.ts";
 import { controlCardFor, isControlCardId, sessionFingerprint } from "../../src/shared/control-card.ts";
 import { gatewayEndpoint } from "../../src/shared/gateway-protocol.ts";
@@ -65,6 +66,7 @@ function piHarness(id: string) {
 		registerCommand(_name: string, options: { handler: typeof command }) {
 			command = options.handler;
 		},
+		registerEntryRenderer() {},
 		appendEntry(customType: string, data: unknown) {
 			state.entries.push({ type: "custom", id: randomUUID(), customType, data });
 		},
@@ -107,6 +109,11 @@ function piHarness(id: string) {
 			tools.get("wecom_send").execute("send", params, undefined, undefined, ctx),
 		emit,
 		ready: () => state.clients.at(-1)?.isReady() ?? false,
+		/** Who sent each WeCom message, as this pi's terminal shows it. */
+		sources: () =>
+			state.entries
+				.filter((entry) => entry.type === "custom" && entry.customType === MESSAGE_SOURCE_ENTRY)
+				.map((entry) => entry.data),
 	};
 }
 
@@ -326,8 +333,10 @@ test("group participants each choose their own message's session, reach separate
 	choose(askA.task_id, "alice", "session-A");
 	choose(askB.task_id, "bob", "session-B");
 	await until(() => a.state.sent.length === 1 && b.state.sent.length === 1, "chosen tasks delivered over IPC");
-	assert.equal(a.state.sent[0][0].text, "[wecom|from:alice|chat:群聊]\ntask A", "each pi learns who sent it");
-	assert.equal(b.state.sent[0][0].text, "[wecom|from:bob|chat:群聊]\ntask B");
+	assert.deepEqual(a.state.sent[0], [{ type: "text", text: "task A" }], "the model gets only the message");
+	assert.deepEqual(b.state.sent[0], [{ type: "text", text: "task B" }]);
+	assert.deepEqual(a.sources(), [{ userid: "alice", chatType: 2 }], "each pi shows who sent it");
+	assert.deepEqual(b.sources(), [{ userid: "bob", chatType: 2 }]);
 	await result(a, "ORIGINAL-A-RESULT");
 	await result(b, "ORIGINAL-B-RESULT");
 	// Each result is its session's card in the group, named by the task it answers; no message gets a reply.
@@ -356,7 +365,11 @@ test("group participants each choose their own message's session, reach separate
 	choose(again.task_id, "alice", "session-B");
 	await until(() => b.state.sent.length === 2, "Alice's later task reaches B");
 	assert.equal(a.state.sent.length, 1);
-	assert.equal(b.state.sent[1][0].text, "[wecom|from:alice|chat:群聊]\nnow B");
+	assert.deepEqual(b.state.sent[1], [{ type: "text", text: "now B" }]);
+	assert.deepEqual(b.sources(), [
+		{ userid: "bob", chatType: 2 },
+		{ userid: "alice", chatType: 2 },
+	]);
 });
 
 test("each connect publishes a new card listing every session online then: one, then two, then three", async () => {

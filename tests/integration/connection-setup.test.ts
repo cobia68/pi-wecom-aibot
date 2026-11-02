@@ -139,6 +139,7 @@ function harness(entries: unknown[] = []) {
 		registerTool(tool: { name: string }) {
 			tools.set(tool.name, tool);
 		},
+		registerEntryRenderer() {},
 		appendEntry(customType: string, data: unknown) {
 			entries.push({ type: "custom", customType, data });
 		},

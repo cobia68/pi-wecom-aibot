@@ -25,31 +25,35 @@ const text = (prepared: Awaited<ReturnType<InboundContentPreparer["prepare"]>>) 
 		.map((part) => part.text)
 		.join("\n");
 
-test("a WeCom prompt opens with its sender and chat type, never the chat's ID; a quote is a block of its own", async (t) => {
+test("a WeCom prompt is only what the user sent, never who sent it or the chat; a quote is a block of its own", async (t) => {
 	t.mock.method(globalThis, "fetch", async () => png());
 	const preparer = new InboundContentPreparer();
 	const signal = new AbortController().signal;
 	const plain = await preparer.prepare(tmpdir(), { ...message("plain", []), text: "用户正文" }, signal);
-	assert.equal(text(plain), "[wecom|from:user|chat:单聊]\n用户正文");
+	assert.equal(text(plain), "用户正文");
 	plain.release();
 	const group = await preparer.prepare(
 		tmpdir(),
 		{
 			...message("group", []),
 			chat: { chatId: "group-chat-id", chatType: 2 },
-			userid: "ali ce|x]",
+			userid: "alice",
 			text: "看看",
 			quoteText: "上一条结果\n第二行",
 		},
 		signal,
 	);
-	assert.equal(text(group), "[wecom|from:ali_ce_x_|chat:群聊]\n[quote]\n上一条结果\n第二行\n[/quote]\n看看");
-	assert.doesNotMatch(text(group), /group-chat-id/, "the chat's ID never reaches the model");
+	assert.equal(text(group), "[quote]\n上一条结果\n第二行\n[/quote]\n看看");
+	assert.doesNotMatch(text(group), /alice|group-chat-id|wecom\|/, "neither the sender nor the chat reaches the model");
 	group.release();
 	const imageOnly = await preparer.prepare(tmpdir(), message("image-only"), signal);
-	assert.equal(text(imageOnly), "[wecom|from:user|chat:单聊]", "the [图片] placeholder goes; the image is attached");
+	assert.equal(text(imageOnly), "", "the [图片] placeholder goes; the image is attached");
 	assert.equal(images(imageOnly).length, 1);
 	imageOnly.release();
+	// A group message that was only the @mention: the model is not handed nothing.
+	const bare = await preparer.prepare(tmpdir(), { ...message("bare", []), text: "" }, signal);
+	assert.deepEqual(bare.content, [{ type: "text", text: "（空消息）" }]);
+	bare.release();
 });
 
 test("queued images share one byte budget, release frees it, and a second release cannot steal another owner's bytes", async (t) => {

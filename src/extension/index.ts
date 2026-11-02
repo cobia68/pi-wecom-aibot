@@ -30,6 +30,7 @@ import { CONTROL_CARD_ENTRY, ControlReceipts } from "./control-receipts.ts";
 import { DocMcpClient, docUrlSecrets } from "./doc-mcp.ts";
 import { FooterStatus } from "./footer-status.ts";
 import { GatewayClient, type GatewayClientOptions } from "./gateway-client.ts";
+import { MESSAGE_SOURCE_ENTRY, type MessageSource, renderMessageSource } from "./message-source.ts";
 import { captureSessionSource } from "./session-data.ts";
 import { SessionDoc } from "./session-doc.ts";
 import { statusReport, statusTitle } from "./status-report.ts";
@@ -104,6 +105,14 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 		},
 		taskStarted: (chat) => {
 			wecomSourceChat = { ...chat };
+		},
+		showSource: (source) => {
+			// A line pi could not record must not cost the run its WeCom guidance.
+			try {
+				pi.appendEntry<MessageSource>(MESSAGE_SOURCE_ENTRY, { userid: source.userid, chatType: source.chatType });
+			} catch (error) {
+				log(`message source not shown: ${errorMessage(error)}`);
+			}
 		},
 		firstSeen(msgId) {
 			if (seenMsgIds.has(msgId)) return false;
@@ -352,7 +361,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 		if (guidance) event.systemPromptOptions.sections[WECOM_SECTION] = guidance;
 	});
 	pi.on("agent_start", (_event, ctx) => {
-		// Emitted before the run's prompt is persisted, so the leaf still belongs to the previous run.
+		// Emitted before the run's prompt is persisted: replies after this leaf are this run's.
 		runStartEntryId = ctx.sessionManager.getLeafId();
 		refreshSource(ctx);
 	});
@@ -590,6 +599,9 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 			}
 		},
 	});
+
+	// Registered with the extension, not a session: a session opened again draws its earlier source lines too.
+	pi.registerEntryRenderer(MESSAGE_SOURCE_ENTRY, renderMessageSource);
 
 	registerWecomSend(pi, {
 		bridge: () => bridge,

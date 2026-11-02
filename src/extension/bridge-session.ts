@@ -42,6 +42,7 @@ import type { ControlReceipts } from "./control-receipts.ts";
 import { type ControlStatus, type ControlView, promptOptions, quoteHead, sessionControlCard } from "./control-view.ts";
 import { type GatewayClientOptions, whoamiCancelled } from "./gateway-client.ts";
 import { InboundContentPreparer, type PreparedInboundContent } from "./inbound/content.ts";
+import type { MessageSource } from "./message-source.ts";
 import { type ModelChoice, modelOptions, modelPage } from "./model-options.ts";
 import {
 	type CompletionRequest,
@@ -125,6 +126,8 @@ export interface BridgeHost {
 	models(ctx: ExtensionContext): ModelChoice[];
 	setModel(ctx: ExtensionContext, model: ModelChoice): Promise<boolean>;
 	taskStarted?(chat: { chatId: string; chatType: 1 | 2; userid: string }): void;
+	/** Show in pi's terminal who sent the message this run answers; the model is never told. */
+	showSource(source: MessageSource): void;
 	firstSeen(msgId: string): boolean;
 	log(line: string): void;
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -786,6 +789,8 @@ export class BridgeSession {
 		}
 		this.startedTask = task;
 		this.host.taskStarted?.({ chatId: task.chatId, chatType: task.chatType, userid: task.userid });
+		// Before pi records the prompt, so the line sits above it, live and when the session is opened again.
+		if (!task.fromCard) this.host.showSource({ userid: task.userid, chatType: task.chatType });
 		return task.fromCard ? "card" : "message";
 	}
 

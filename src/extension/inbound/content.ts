@@ -7,6 +7,9 @@ import { errorMessage } from "../../shared/text.ts";
 import type { Attachment, InboundMessage } from "../../shared/wecom-protocol.ts";
 import { downloadAndDecrypt, saveMedia } from "./media.ts";
 
+/** What the gateway's ask card shows for the same message. */
+const EMPTY_MESSAGE = "（空消息）";
+
 /** Files from WeCom are kept in the project, but never committed by accident. */
 async function mediaDirectory(cwd: string): Promise<string> {
 	const dir = join(cwd, ".pi-wecom-aibot-files");
@@ -98,8 +101,8 @@ async function buildUserContent(
 	reserveImage: (bytes: number) => void,
 ): Promise<{ content: (TextContent | ImageContent)[]; label: string }> {
 	signal.throwIfAborted();
-	// The source line names who sent it and where, never the chat's ID; a quote and saved files are blocks of their own.
-	const header = `[wecom|from:${field(message.userid)}|chat:${message.chat.chatType === 2 ? "群聊" : "单聊"}]`;
+	// Only what the user sent: who and where are shown in pi's terminal, never told the model (message-source.ts).
+	// A quote and saved files are blocks of their own.
 	const quote = message.quoteText ? `[quote]\n${message.quoteText}\n[/quote]` : "";
 	let text = message.text;
 
@@ -146,14 +149,11 @@ async function buildUserContent(
 	if (images.length && /^\[图片\]$/.test(text.trim())) text = "";
 	signal.throwIfAborted();
 	const attachments = saved.length ? `[attachments]\n${saved.join("\n")}\n[/attachments]` : "";
-	const full = [header, quote, text, attachments, ...notes].filter(Boolean).join("\n");
+	const full = [quote, text, attachments, ...notes].filter(Boolean).join("\n");
+	// A bare @mention, with no words and no image, still gives the model something to answer.
+	const empty = !full.trim() && !images.length;
 	return {
-		content: [{ type: "text", text: full }, ...images],
+		content: [{ type: "text", text: empty ? EMPTY_MESSAGE : full }, ...images],
 		label: `${message.chat.chatType === 2 ? "group" : "single"}/${message.msgtype}`,
 	};
-}
-
-/** A userid as a header value: no line break or delimiter can end the line early. */
-function field(value: string): string {
-	return value.replace(/[\s|\]]+/g, "_");
 }

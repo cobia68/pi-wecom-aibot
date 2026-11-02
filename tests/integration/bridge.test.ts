@@ -3,8 +3,10 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { after, afterEach, beforeEach, type TestContext, test } from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { MESSAGE_SOURCE_ENTRY } from "../../src/extension/message-source.ts";
 import { clamp } from "../../src/shared/card.ts";
 import {
 	CONTROL_KEYS,
@@ -18,7 +20,7 @@ import type { GatewayNotification } from "../../src/shared/notification-types.ts
 import type { ChatRef } from "../../src/shared/wecom-protocol.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
 import { LoopbackClient } from "../support/loopback-client.ts";
-import { installTuiFixture } from "../support/tui-fixture.ts";
+import { fixtureTheme, installTuiFixture } from "../support/tui-fixture.ts";
 
 const sandbox = await mkdtemp(join(tmpdir(), "pi-wecom-aibot-bridge-test-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -34,6 +36,8 @@ let command: (args: string, ctx: ExtensionContext) => Promise<void>;
 let complete: (prefix: string) => { value: string; label: string }[] | null;
 let sent: { content: any; options: any }[];
 let tools: Map<string, any>;
+/** What the extension asked pi to draw custom session entries with, by type. */
+let entryRenderers: Map<string, (entry: any, options: any, theme: any) => any>;
 let idle: boolean;
 let ctx: ExtensionContext;
 let ws: FakeWebSocket;
@@ -105,6 +109,13 @@ function resultCards(chatId = "test-user", frames = ws.sent): any[] {
 /** Replies to the task's own message. */
 function replies(frames = ws.sent): any[] {
 	return frames.filter((frame) => frame.cmd === "aibot_respond_msg");
+}
+
+/** Who sent each WeCom message, as pi's terminal shows it above the message. */
+function sources(): unknown[] {
+	return sessionEntries
+		.filter((entry) => entry.type === "custom" && entry.customType === MESSAGE_SOURCE_ENTRY)
+		.map((entry) => entry.data);
 }
 
 /** What pi published with a card: its whole answer, on the session's page. */
@@ -322,6 +333,7 @@ beforeEach(async (t) => {
 	FakeWebSocket.instances = [];
 	handlers = new Map();
 	tools = new Map();
+	entryRenderers = new Map();
 	sent = [];
 	idle = true;
 	sessionId = "pi-session-1";
@@ -371,6 +383,9 @@ beforeEach(async (t) => {
 		},
 		registerTool(tool: { name: string }) {
 			tools.set(tool.name, tool);
+		},
+		registerEntryRenderer(customType: string, renderer: (entry: any, options: any, theme: any) => any) {
+			entryRenderers.set(customType, renderer);
 		},
 		appendEntry(customType: string, data: unknown) {
 			sessionEntries.push({ type: "custom", id: `entry-${sessionEntries.length + 1}`, customType, data });
@@ -615,6 +630,7 @@ test("a task pi refused is reported instead of taking the next local answer", as
 	assertResultCard(card, "⚠️ 未执行：refused-task", "未执行");
 	assert.match(bodyOf(card), /没有接受/);
 	assert.doesNotMatch(bodyOf(card), /LOCAL-ONLY-ANSWER/);
+	assert.deepEqual(sources(), [], "neither the refused message nor the local run shows a sender");
 	// The local run uses the configured default, never the refused task's source chat.
 	await sendNotification({ content: "LOCAL-PUSH" });
 	const localPush = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)!;
@@ -627,6 +643,7 @@ test("a task pi refused is reported instead of taking the next local answer", as
 	await drain();
 	assert.equal(sent.length, 2);
 	assert.match(sent[1].content[0].text, /after-refusal/);
+	assert.deepEqual(sources(), [{ userid: "test-user", chatType: 1 }], "the message pi ran shows its sender");
 });
 
 test("a task pi silently refused fails while the session stays idle", async () => {
@@ -3300,6 +3317,7 @@ test("发送 runs the chosen prompt as this session's task, and its result comes
 	await drain();
 	assert.equal(sent.length, 1);
 	assert.deepEqual(sent[0].content, [{ type: "text", text: "继续" }]);
+	assert.deepEqual(sources(), [], "a card's prompt was not a WeCom message: no sender line");
 	assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort"], "back to the controls");
 	assert.match(lastUpdate().body.template_card.horizontal_content_list.at(-1).value, /已发送「继续」$/);
 	assert.equal(lastUpdate().body.template_card.source.desc, "执行中");
@@ -3323,7 +3341,18 @@ test("a WeCom task's run is told where its answer goes; a later terminal run onl
 	inbound("guided-task");
 	await drain();
 	assert.equal(sent.length, 1);
-	assert.match(sent[0].content[0].text, /^\[wecom\|from:test-user\|chat:单聊\]\n/);
+	assert.deepEqual(
+		sent[0].content,
+		[{ type: "text", text: "[quote]\nsession: pi-session-1\n[/quote]\nguided-task" }],
+		"the model gets the quoted text and the message, never sender metadata",
+	);
+	assert.deepEqual(sources(), [{ userid: "test-user", chatType: 1 }], "pi's terminal shows who sent it");
+	const [source] = sessionEntries.filter((entry) => entry.customType === MESSAGE_SOURCE_ENTRY);
+	const drawn = entryRenderers.get(MESSAGE_SOURCE_ENTRY)?.(source, { expanded: false }, fixtureTheme("dark"));
+	assert.deepEqual(
+		drawn.render(60).map((line: string) => stripVTControlCharacters(line).trimEnd()),
+		[" [wecom|from:test-user|chat:单聊]"],
+	);
 	assert.match(promptSections.wecom, /task sent from WeCom/);
 	await emit("message_end", {
 		message: { role: "assistant", content: [{ type: "text", text: '结果\n<!-- wecom_next ["下一步"] -->' }] },
@@ -3347,6 +3376,7 @@ test("a WeCom task's run is told where its answer goes; a later terminal run onl
 	await command("config --scope global set notificationScope=all-runs", ctx);
 	await emit("before_agent_start", { messageType: "user", prompt: "LOCAL-REPORTED" });
 	assert.match(promptSections.wecom, /published to the default chat/);
+	assert.equal(sources().length, 1, "a terminal run shows no sender");
 });
 
 test("a card's answer offers its next steps first in that card's 提示词; the comment never reaches WeCom", async (t) => {

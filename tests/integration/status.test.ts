@@ -135,6 +135,7 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
 			command = options.handler;
 		},
 		registerTool() {},
+		registerEntryRenderer() {},
 		appendEntry(customType: string, data: unknown) {
 			entries.push({ type: "custom", customType, data });
 		},

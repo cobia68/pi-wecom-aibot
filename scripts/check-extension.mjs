@@ -32,4 +32,7 @@ assert.equal(extension.tools.get("wecom_send").definition.parameters.properties.
 assert.ok((await wecom.getArgumentCompletions("co")).some((item) => item.value === "connect "));
 assert.ok(extension.handlers.has("session_shutdown"));
 assert.ok(extension.handlers.has("agent_settled"));
-console.log("pi extension loaded: /wecom-aibot, --help, argument completion, wecom_send, lifecycle handlers");
+assert.ok(extension.entryRenderers?.has("wecom-aibot-message-source"), "the source line of a WeCom message is drawn");
+console.log(
+	"pi extension loaded: /wecom-aibot, --help, argument completion, wecom_send, lifecycle handlers, source line renderer",
+);
