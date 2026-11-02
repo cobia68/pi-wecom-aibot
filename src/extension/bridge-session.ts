@@ -348,10 +348,6 @@ export class BridgeSession {
 				.catch((error: unknown) => answer({ ok: false, error: clamp(errorMessage(error), 120) }));
 			return;
 		}
-		if (request.action === "cancel") {
-			this.host.abort();
-			answer({ ok: true });
-		}
 	}
 
 	resume(): void {
@@ -729,7 +725,7 @@ export class BridgeSession {
 			this.host.log(`control card failed (${outcome}): ${errorMessage(error)}`);
 			if (outcome !== "not_sent")
 				this.host.notify(
-					`控制卡${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errorMessage(error)}；可在企微用 card 命令显式补发`,
+					`控制卡${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errorMessage(error)}；可发 /wecom-aibot sessions 后点「打开会话」补发`,
 					"warning",
 				);
 		});

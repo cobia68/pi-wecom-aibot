@@ -15,7 +15,7 @@ import type { DeliveryFailure } from "./delivery.ts";
 import type { GatewayNotification, SessionSource } from "./notification-types.ts";
 import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComState } from "./wecom-protocol.ts";
 
-export const GATEWAY_PROTOCOL_VERSION = 13;
+export const GATEWAY_PROTOCOL_VERSION = 14;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;
 const IPC_MAX_BYTES = 1_048_576;
@@ -52,8 +52,8 @@ export interface SessionTarget {
 }
 
 /** What the gateway may ask one pi; none of them starts a turn. */
-type BridgeRequestAction = "cancel" | "state" | "click";
-const BRIDGE_REQUEST_ACTIONS: readonly string[] = ["cancel", "state", "click"] satisfies BridgeRequestAction[];
+type BridgeRequestAction = "state" | "click";
+const BRIDGE_REQUEST_ACTIONS: readonly string[] = ["state", "click"] satisfies BridgeRequestAction[];
 
 /** A button on one of this pi's cards: the key, who pressed it and where its card is. */
 export interface CardClick {
@@ -67,7 +67,7 @@ export interface CardClick {
 }
 
 export type BridgeRequest =
-	| { action: "cancel" | "state"; target: SessionTarget }
+	| { action: "state"; target: SessionTarget }
 	| { action: "click"; target: SessionTarget; click: CardClick };
 
 export interface BridgeResponse {

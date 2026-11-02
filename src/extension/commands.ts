@@ -474,9 +474,8 @@ function isScope(word: string | undefined): word is ConfigScope {
 }
 
 /**
- * `config [--scope <global|project|session>] <动作> …`: the scope is the command's target and goes before the action, like
- * the WeCom side's `--session-id <id> <动作>`; whoami's --wait goes after it. `positionOf` counts the words after
- * `config` that came before each option.
+ * `config [--scope <global|project|session>] <动作> …`: the scope is the command's target and goes before the action;
+ * whoami's --wait goes after it. `positionOf` counts the words after `config` that came before each option.
  */
 function parseConfigArgs(args: string[], options: Map<string, string>, positionOf: Map<string, number>): Invocation {
 	const error = (message: string): Invocation => ({

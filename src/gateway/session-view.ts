@@ -3,7 +3,6 @@ import { type CardFact, type CardModel, clamp } from "../shared/card.ts";
 import { SESSION_QUESTION, sessionFingerprint, sessionLabel, sessionOption } from "../shared/control-card.ts";
 import { markdownValue } from "../shared/notification.ts";
 import type { SessionSource } from "../shared/notification-types.ts";
-import { sessionCommand } from "./command.ts";
 
 /** WeCom's dropdown takes ten options. */
 const MAX_OPTIONS = 10;
@@ -34,18 +33,6 @@ function sessionSummary({ source, busy }: SessionState): string {
 	return `· ${value(source.directoryName)} · ${value(source.provider)} · ${value(source.modelName)} · ${stateLabel(busy)}`;
 }
 
-/** One session as text, with the commands that use it ready to copy. */
-export function sessionText(session: SessionState): string {
-	const id = session.source.sessionId;
-	return [
-		sessionSummary(session),
-		"",
-		sessionCommand(id, "send"),
-		sessionCommand(id, "card"),
-		sessionCommand(id, "cancel"),
-	].join("\n");
-}
-
 /** The online sessions as text, for a chat that gets no card; `prefix` says why they are listed. */
 export function sessionsText(sessions: readonly SessionState[], prefix?: string): string {
 	const lines = prefix ? [prefix] : [];
@@ -60,7 +47,7 @@ export function sessionsText(sessions: readonly SessionState[], prefix?: string)
 		}
 		lines.push(entry);
 	}
-	lines.push(`把任务发给其中一个：\n${sessionCommand("<上面的 session ID>", "send", "你的任务")}`);
+	lines.push("可发 /wecom-aibot sessions 重试打开会话卡；卡片仍不可用请回到 pi 终端操作");
 	return lines.join("\n\n");
 }
 

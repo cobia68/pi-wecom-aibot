@@ -50,10 +50,10 @@ export function askCard(message: InboundMessage, choices: readonly SessionState[
 		quote: preview(message),
 		subtitle: [
 			reason,
+			more > 0 ? `另有 ${more} 个会话未列出；发 /wecom-aibot sessions 打开所需会话的控制卡后重发` : undefined,
 			"选好会话后点「确认发送」；只对这一条消息有效，下一条再问",
 			message.chat.chatType === 2 ? "只有发送者能选" : undefined,
 			shown.length > ASK_ROWS ? `正文列前 ${ASK_ROWS} 个，下拉框列前 ${shown.length} 个` : undefined,
-			more > 0 ? `另有 ${more} 个会话未列出，可用 --session-id 指定` : undefined,
 		]
 			.filter(Boolean)
 			.join("；"),

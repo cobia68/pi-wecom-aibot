@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
+import { sessionControlCard } from "../../src/extension/control-view.ts";
 import { type GatewayPeer, WeComGateway } from "../../src/gateway/runtime.ts";
-import { sessionFingerprint } from "../../src/shared/control-card.ts";
+import { controlCardId, sessionFingerprint } from "../../src/shared/control-card.ts";
 import type { GatewayRegistration, ServerFrame } from "../../src/shared/gateway-protocol.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
 
@@ -231,23 +232,24 @@ test("in a group only the sender decides; another member's click changes only th
 	assert.equal(updated().body.userids, undefined, "everyone sees it was sent");
 });
 
-test("commands and quotes that name a session go straight there; nothing is asked or remembered", async () => {
+test("retired commands are rejected while quoted tasks still reach only their own session", async () => {
 	const a = add("A");
 	const b = add("B");
 	await ready();
 	message("/wecom-aibot --session-id session-A send --prompt named");
+	assert.match(reply(), /仅支持/);
 	message("quoted", { quote: quoted("B") });
 	await ready();
-	assert.equal(a.tasks().length, 1);
+	assert.equal(a.tasks().length, 0);
 	assert.equal(b.tasks().length, 1);
 	assert.equal(
 		ws().sent.some((frame) => /^q@/.test(frame.body?.template_card?.task_id ?? "")),
 		false,
-		"no question for a message that names its session",
+		"neither a rejected command nor a quoted task creates a chooser",
 	);
 	message("plain again");
 	await ready();
-	assert.equal(a.tasks().length + b.tasks().length, 2);
+	assert.equal(a.tasks().length + b.tasks().length, 1);
 	assert.equal(question().quote_area.quote_text, "plain again");
 });
 
@@ -382,7 +384,7 @@ test("打开会话 asks the session the dropdown names for a new control card; t
 		assert.ok(frame?.type === "request" && frame.request.action === "click");
 		return { id: frame.id, click: frame.request.click };
 	};
-	// The dropdown names B: B is asked to publish its card, as the card command does; no card ID goes with it.
+	// The dropdown names B: B is asked to publish its card; no card ID goes with it.
 	pick(list.task_id, `pick@show@${first}`, "session-B");
 	const asked = forwarded(b);
 	assert.deepEqual(asked.click, { key: "control", userid: "alice", chat: { chatId: "alice", chatType: 1 } });
@@ -466,6 +468,53 @@ test("a list of more than five sessions turns its pages in place; in a group onl
 	assert.equal(forwarded.request.click.key, "control");
 });
 
+test("more than ten sessions remain reachable by opening their control through sessions, without an implicit target", async () => {
+	const peers = Array.from({ length: 12 }, (_, index) => add(String(index)));
+	const target = peers[0];
+	await ready();
+	message("first task");
+	await ready();
+	const first = question();
+	const ids = (card: any) => card.button_selection.option_list.map((option: { id: string }) => option.id);
+	assert.equal(ids(first).includes(sessionFingerprint("session-0")), false, "only ten recent sessions fit");
+	assert.match(first.sub_title_text, /sessions.*控制卡后重发/);
+
+	message("/wecom-aibot sessions");
+	await ready();
+	const list = cardFrame().body.template_card;
+	pick(list.task_id, list.button_list[0].key, "session-0");
+	const request = target.frames.filter((frame) => frame.type === "request").at(-1);
+	assert.ok(request?.type === "request" && request.request.action === "click");
+	assert.equal(request.request.click.key, "control");
+	await gateway.push(
+		"0",
+		{ chatId: "alice", chatType: 1 },
+		{
+			kind: "control",
+			cardId: controlCardId("session-0"),
+			card: sessionControlCard(target.registration.source, { status: "idle" }),
+		},
+	);
+	gateway.response("0", request.id, { ok: true });
+	await ready();
+	message("second task");
+	await ready();
+	const next = question();
+	assert.ok(ids(next).includes(sessionFingerprint("session-0")), "the opened session is now offered");
+	assert.equal(
+		peers.reduce((count, peer) => count + peer.tasks().length, 0),
+		0,
+		"opening a card never selects a target",
+	);
+	send(next.task_id, "session-0");
+	await ready();
+	assert.equal(target.tasks()[0].task.message.text, "second task");
+	message("third task");
+	await ready();
+	assert.equal(question().quote_area.quote_text, "third task");
+	assert.equal(target.tasks().length, 1, "the next task must be confirmed too");
+});
+
 test("whoami codes keep priority and never become a question", async () => {
 	const a = add("A");
 	const b = add("B");
@@ -480,7 +529,7 @@ test("whoami codes keep priority and never become a question", async () => {
 	);
 });
 
-test("a question card WeCom refuses leaves the message unsent, with how to name its session instead", async () => {
+test("a refused question leaves the message unsent and points to retry or pi, never retired commands", async () => {
 	const a = add("A");
 	await ready();
 	ws().onSend = (frame) => ws().acknowledge(frame, frame.body?.msgtype === "template_card" ? 40058 : 0);
@@ -489,9 +538,10 @@ test("a question card WeCom refuses leaves the message unsent, with how to name 
 	await ready();
 	assert.equal(a.tasks().length, 0);
 	const answer = repliesTo(sent).at(-1);
-	assert.match(answer.body.stream.content, /这条消息没有发出，请用命令指定会话/);
-	assert.match(answer.body.stream.content, /--session-id <id> send --prompt/);
-	assert.match(answer.body.stream.content, /session ID 写在会话的控制卡上$/, "a result is a card: nothing to quote");
+	assert.match(answer.body.stream.content, /这条消息没有发出：会话选择卡不可用/);
+	assert.match(answer.body.stream.content, /回到 pi 终端操作/);
+	assert.match(answer.body.stream.content, /\/wecom-aibot sessions/);
+	assert.doesNotMatch(answer.body.stream.content, /--session-id|--prompt|\/wecom-aibot (?:send|card|cancel)/);
 });
 
 test("welcome uses the dedicated event reply within five seconds and never pushes or starts a task", async (t) => {
@@ -574,6 +624,8 @@ test("a rejected chooser falls back to the text list, while an uncertain deliver
 	await ready();
 	assert.match(reply(), /session-A/);
 	assert.match(reply(), /当前有 1 个在线会话/);
+	assert.match(reply(), /回到 pi 终端操作/);
+	assert.doesNotMatch(reply(), /--session-id|--prompt|\/wecom-aibot (?:send|card|cancel)/);
 	ws().onSend = (frame) => {
 		if (frame.cmd === "aibot_send_msg") ws().close();
 	};

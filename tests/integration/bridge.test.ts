@@ -221,7 +221,7 @@ async function drain(): Promise<void> {
 }
 
 function inbound(id: string, extra: Record<string, unknown> = {}): void {
-	// Media callbacks carry no text, so they name their target by quoting a notification instead.
+	// Target this task through a quoted notification; ordinary unquoted messages use the chooser.
 	const media = typeof extra.msgtype === "string" && extra.msgtype !== "text";
 	const quote = { quote: { msgtype: "text", text: { content: `session: ${sessionId}` } } };
 	ws.receive({
@@ -232,17 +232,12 @@ function inbound(id: string, extra: Record<string, unknown> = {}): void {
 			from: { userid: "test-user" },
 			chattype: "single",
 			msgtype: "text",
-			text: { content: taskText(id) },
-			...(media ? quote : {}),
+			text: { content: id },
+			...quote,
 			...extra,
 			...(media ? quote : {}),
 		},
 	});
-}
-
-/** Every task names its target: the bridge tests speak the WeCom-side grammar. */
-function taskText(prompt: string): string {
-	return `/wecom-aibot --session-id ${sessionId} send --prompt ${prompt}`;
 }
 
 function sendNotification(params: Record<string, unknown>): Promise<any> {
@@ -290,6 +285,24 @@ function plain(content: string, extra: Record<string, unknown> = {}): void {
 			...extra,
 		},
 	});
+}
+
+/** Open a fresh control through the real sessions card, not a removed textual card command. */
+async function openControl(chat: ChatRef = { chatId: "test-user", chatType: 1 }): Promise<any> {
+	const start = ws.sent.length;
+	plain(
+		"/wecom-aibot sessions",
+		chat.chatType === 2 ? { chattype: "group", chatid: chat.chatId } : { from: { userid: chat.chatId } },
+	);
+	await drain();
+	const list = ws.sent
+		.slice(start)
+		.find((frame) => frame.body?.template_card?.button_selection?.question_key === "pick");
+	assert.ok(list, "sessions returned its picker");
+	clickCard(list, list.body.template_card.button_list[0].key, chat.chatType === 1 ? chat.chatId : "test-user");
+	await until(() => introductions(ws.sent.slice(start)).length > 0);
+	await drain();
+	return introductions(ws.sent.slice(start)).at(-1);
 }
 
 beforeEach(async (t) => {
@@ -411,8 +424,7 @@ beforeEach(async (t) => {
 	await drain();
 	initialControl = ws.sent.find((frame) => isControlCardId(frame.body?.template_card?.task_id));
 	// These long-standing task tests start with both their default and task chat already introduced.
-	plain(`/wecom-aibot --session-id ${sessionId} card`);
-	await drain();
+	await openControl();
 	ws.sent.length = 0;
 });
 
@@ -1298,7 +1310,7 @@ test("group messages addressed to the bot reach pi and their result card goes to
 	inbound("group-request", {
 		chattype: "group",
 		chatid: "test-group",
-		text: { content: taskText("帮我检查项目") },
+		text: { content: "帮我检查项目" },
 	});
 	await drain();
 	assert.equal(sent.length, 1);
@@ -2417,10 +2429,8 @@ test("an earlier control card still refreshes the owning pi's live state after g
 	assert.equal(next.body.template_card.source.desc, "空闲");
 });
 
-test("an explicit card command publishes a new control copy in that chat, and the following task reuses it", async () => {
-	plain(`/wecom-aibot --session-id ${sessionId} card`, { chattype: "group", chatid: "control-group" });
-	await drain();
-	const first = ws.sent.find((frame) => isControlCardId(frame.body?.template_card?.task_id));
+test("opening a session's card republishes a control copy without selecting a target for later tasks", async () => {
+	const first = await openControl({ chatId: "control-group", chatType: 2 });
 	assert.ok(first);
 	assert.equal(first.body.chatid, "control-group");
 	assert.equal(first.body.chat_type, 2);
@@ -2428,9 +2438,8 @@ test("an explicit card command publishes a new control copy in that chat, and th
 	plain("not selected yet", { chattype: "group", chatid: "control-group" });
 	await drain();
 	assert.equal(sent.length, 0, "asking for a card does not silently select its session");
-	plain(`/wecom-aibot --session-id ${sessionId} card`, { chattype: "group", chatid: "control-group" });
-	await drain();
-	const copies = ws.sent.filter((frame) => isControlCardId(frame.body?.template_card?.task_id));
+	await openControl({ chatId: "control-group", chatType: 2 });
+	const copies = introductions(ws.sent);
 	assert.equal(copies.length, 2);
 	assert.match(copies[1].body.template_card.horizontal_content_list[0].value, /^\d\d:\d\d 已补发控制卡$/);
 	assert.notEqual(copies[0].body.template_card.task_id, copies[1].body.template_card.task_id);
@@ -2444,24 +2453,23 @@ test("an explicit card command publishes a new control copy in that chat, and th
 	plain("still no target", { chattype: "group", chatid: "control-group" });
 	await drain();
 	assert.equal(sent.length, 0, "a control card never chooses a target");
-	assert.equal(
-		ws.sent.filter((frame) => frame.cmd === "aibot_send_msg" && isControlCardId(frame.body?.template_card?.task_id))
-			.length,
-		2,
-	);
+	assert.equal(introductions(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg")).length, 2);
 });
 
 test("an uncertain manual control delivery is reported as unknown, never as definitely unsent or automatically repeated", async () => {
 	const original = ws.onSend;
 	ws.onSend = (frame) => {
-		if (frame.cmd === "aibot_send_msg" && isControlCardId(frame.body?.template_card?.task_id))
+		if (
+			frame.cmd === "aibot_send_msg" &&
+			isControlCardId(frame.body?.template_card?.task_id) &&
+			frame.body.template_card.button_selection?.question_key !== "pick"
+		)
 			ws.receive({ headers: frame.headers, errmsg: "malformed acknowledgement" });
 		else original?.(frame);
 	};
-	plain(`/wecom-aibot --session-id ${sessionId} card`);
-	await drain();
+	await openControl();
 	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(pushes.filter((frame) => isControlCardId(frame.body?.template_card?.task_id)).length, 1);
+	assert.equal(introductions(pushes).length, 1);
 	const note = pushes.find((frame) => frame.body.msgtype === "markdown");
 	assert.match(note.body.markdown.content, /控制卡发送结果未知/);
 	assert.doesNotMatch(note.body.markdown.content, /未发出/);
@@ -2680,41 +2688,23 @@ test("help stays text while sessions sends one selection card", async () => {
 	assert.equal(pushes[0].body.template_card.button_selection.question_key, "pick", "the session list");
 });
 
-test("the WeCom list and target-only query ask this pi whether it is busy right now", async () => {
-	let asked = 0;
-	const state = async (content: string) => {
-		const reqId = `sessions-${++asked}`;
-		ws.receive({
-			cmd: "aibot_msg_callback",
-			headers: { req_id: reqId },
-			body: {
-				msgid: reqId,
-				from: { userid: "test-user" },
-				chattype: "single",
-				msgtype: "text",
-				text: { content },
-			},
-		});
+test("the WeCom session list asks this pi whether it is busy right now", async () => {
+	const state = async () => {
+		plain("/wecom-aibot sessions");
 		await drain();
-		if (content === "/wecom-aibot sessions") {
-			const card = ws.sent
-				.filter((frame) => frame.body?.template_card?.button_selection?.question_key === "pick")
-				.at(-1);
-			const option = card?.body.template_card.button_selection.option_list[0].text ?? "";
-			return / · (执行中|空闲|状态未知)$/.exec(option)?.[1];
-		}
-		const reply = ws.sent.find((frame) => frame.cmd === "aibot_respond_msg" && frame.headers.req_id === reqId);
-		return /· (执行中|空闲|状态未知)\n/.exec(reply?.body.stream.content ?? "")?.[1];
+		const card = ws.sent
+			.filter((frame) => frame.body?.template_card?.button_selection?.question_key === "pick")
+			.at(-1);
+		const option = card?.body.template_card.button_selection.option_list[0].text ?? "";
+		return / · (执行中|空闲|状态未知)$/.exec(option)?.[1];
 	};
-	const commands = ["/wecom-aibot sessions", `/wecom-aibot --session-id ${sessionId}`];
-	for (const content of commands) assert.equal(await state(content), "空闲");
+	assert.equal(await state(), "空闲");
 	idle = false;
-	for (const content of commands) assert.equal(await state(content), "执行中", "a run typed in pi itself");
-	assert.equal(sent.length, 0, "neither query starts a task");
+	assert.equal(await state(), "执行中", "a run typed in pi itself");
+	assert.equal(sent.length, 0, "the list never starts a task");
 	inbound("queued-behind-local-run");
 	idle = true;
-	for (const content of commands)
-		assert.equal(await state(content), "执行中", "pi is idle, but a WeCom task is still on its way");
+	assert.equal(await state(), "执行中", "pi is idle, but a WeCom task is still on its way");
 });
 
 test("automatic reconnect does not send a scheduled completion before the run settles", async () => {
@@ -3650,11 +3640,7 @@ test("more than ten models: 下一页 turns the clicker's copy, and 确认切换
 test("in a group only the member who pressed 中止 is asked to confirm, and only they can confirm", async () => {
 	const aborts: number[] = [];
 	Object.assign(ctx, { abort: () => aborts.push(1) });
-	plain(`/wecom-aibot --session-id ${sessionId} card`, { chattype: "group", chatid: "team" });
-	await drain();
-	const control = ws.sent.find(
-		(frame) => frame.body?.chatid === "team" && isControlCardId(frame.body?.template_card?.task_id),
-	);
+	const control = await openControl({ chatId: "team", chatType: 2 });
 	idle = false;
 	clickCard(control, "abort", "alice");
 	await drain();

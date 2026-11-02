@@ -83,9 +83,8 @@ test("every server frame the extension consumes is validated before use", () => 
 	assert.equal(parseServerFrame({ type: "nonsense" }).ok, false);
 	assert.equal(parseServerFrame("pong").ok, false);
 	const target = { instanceId: "i", registrationId: "r", sessionId: "s" };
-	for (const action of ["cancel", "state"])
-		assert.equal(parseServerFrame({ type: "request", id: "1", request: { action, target } }).ok, true, action);
-	for (const action of ["prompt", "screen"])
+	assert.equal(parseServerFrame({ type: "request", id: "1", request: { action: "state", target } }).ok, true);
+	for (const action of ["cancel", "prompt", "screen"])
 		assert.equal(parseServerFrame({ type: "request", id: "1", request: { action, target } }).ok, false, action);
 	// A click names its key, its clicker and the chat of its card; nothing else reaches pi.
 	const click = { key: "full-e-abc", userid: "user", chat: { chatId: "user", chatType: 1 } };

@@ -1,9 +1,7 @@
-/** The WeCom-side grammar: each command declares its own target before its action. */
+/** Only help and the session picker are textual WeCom commands; retired commands must never become tasks. */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseWeComCommand } from "../../src/gateway/command.ts";
-
-const ID = "01234567-89ab-4cde-8012-3456789abcde";
+import { helpText, parseWeComCommand } from "../../src/gateway/command.ts";
 
 function errorOf(text: string): string {
 	const parsed = parseWeComCommand(text);
@@ -12,208 +10,76 @@ function errorOf(text: string): string {
 	return parsed.message;
 }
 
-test("a message that is not the command prefix is not a command", () => {
-	for (const text of ["帮我检查构建", "/wecom-aibotx send", "/wecom send --session-id x", ""]) {
+test("ordinary messages and other command prefixes are not interpreted as WeCom commands", () => {
+	for (const text of ["帮我检查构建", "/wecom-aibotx send", "/wecom send", "", "/WECOM-AIBOT sessions"])
 		assert.deepEqual(parseWeComCommand(text), { kind: "none" }, text);
-	}
 });
 
-test("the bare prefix and --help show the command index", () => {
-	for (const text of ["/wecom-aibot", "/wecom-aibot --help", "/wecom-aibot  --help"]) {
+test("the bare prefix and --help show help; sessions opens the picker and has its own help", () => {
+	for (const text of ["/wecom-aibot", "/wecom-aibot --help", "  /wecom-aibot\t--help\n"])
 		assert.deepEqual(parseWeComCommand(text), { kind: "help" }, text);
-	}
-});
-
-test("send takes its target before the action and the prompt as the rest of the message", () => {
-	const prompt = "修复 --screen 与 --session-id 的解析\n第二行";
-	assert.deepEqual(parseWeComCommand(`/wecom-aibot --session-id ${ID} send --prompt ${prompt}`), {
-		kind: "send",
-		sessionId: ID,
-		prompt,
-	});
-});
-
-test("cancel takes its target before the action; screen is no longer an action", () => {
-	assert.deepEqual(parseWeComCommand(`/wecom-aibot --session-id ${ID} cancel`), { kind: "cancel", sessionId: ID });
-	assert.equal(
-		errorOf(`/wecom-aibot --session-id ${ID} screen`),
-		"未知子命令 screen。可用子命令：sessions、send、card、cancel",
-	);
-});
-
-test("card explicitly republishes a named control and follows the same target-first grammar", () => {
-	assert.deepEqual(parseWeComCommand(`/wecom-aibot --session-id ${ID} card`), { kind: "card", sessionId: ID });
-	assert.deepEqual(parseWeComCommand("/wecom-aibot card --help"), { kind: "help", topic: "card" });
-	assert.match(errorOf("/wecom-aibot card"), /^card 需要目标/);
-	assert.match(errorOf(`/wecom-aibot card --session-id ${ID}`), /--session-id 要写在动作前/);
-	assert.match(errorOf(`/wecom-aibot --session-id ${ID} card --prompt x`), /card 不接受 --prompt/);
-});
-
-test("a target without an action is a read-only single-session query", () => {
-	assert.deepEqual(parseWeComCommand(`/wecom-aibot --session-id ${ID}`), { kind: "session", sessionId: ID });
-	assert.deepEqual(parseWeComCommand(`  /wecom-aibot\t--session-id\n${ID}\n `), {
-		kind: "session",
-		sessionId: ID,
-	});
-});
-
-test("sessions takes no target in either position", () => {
 	assert.deepEqual(parseWeComCommand("/wecom-aibot sessions"), { kind: "sessions" });
-	for (const text of [`/wecom-aibot --session-id ${ID} sessions`, `/wecom-aibot sessions --session-id ${ID}`]) {
-		assert.equal(errorOf(text), "sessions 不需要 --session-id");
-	}
-	assert.match(errorOf("/wecom-aibot sessions --prompt x"), /sessions 不接受 --prompt/);
+	assert.deepEqual(parseWeComCommand(" /wecom-aibot\nsessions\t"), { kind: "sessions" });
+	assert.deepEqual(parseWeComCommand("/wecom-aibot sessions --help"), { kind: "help", topic: "sessions" });
 });
 
-test("each action has help without requiring a target", () => {
-	for (const topic of ["sessions", "send", "card", "cancel"] as const) {
-		assert.deepEqual(parseWeComCommand(`/wecom-aibot ${topic} --help`), { kind: "help", topic });
-		assert.deepEqual(parseWeComCommand(`/wecom-aibot --session-id ${ID} ${topic} --help`), {
-			kind: "help",
-			topic,
-		});
-	}
-	assert.deepEqual(parseWeComCommand(`/wecom-aibot --session-id ${ID} --help`), { kind: "help" });
-});
-
-test("a missing target explains the new order and how to get an ID", () => {
-	for (const kind of ["send", "card", "cancel"] as const) {
-		const suffix = kind === "send" ? " --prompt <正文>" : "";
-		const text = `/wecom-aibot ${kind}${kind === "send" ? " --prompt 检查构建" : ""}`;
-		assert.equal(
-			errorOf(text),
-			`${kind} 需要目标：/wecom-aibot --session-id <id> ${kind}${suffix}。先发 /wecom-aibot sessions 获取 ID`,
-		);
-	}
-});
-
-test("a target option after the action is refused and suggests a copyable replacement", () => {
-	for (const kind of ["send", "card", "cancel"] as const) {
-		const suffix = kind === "send" ? " --prompt <正文>" : "";
-		const text = `/wecom-aibot ${kind} --session-id ${ID}${kind === "send" ? " --prompt task" : ""}`;
-		assert.equal(errorOf(text), `--session-id 要写在动作前：/wecom-aibot --session-id ${ID} ${kind}${suffix}`);
-	}
-});
-
-test("a missing or empty prompt is refused", () => {
-	for (const text of [
-		`/wecom-aibot --session-id ${ID} send`,
-		`/wecom-aibot --session-id ${ID} send --prompt`,
-		`/wecom-aibot --session-id ${ID} send --prompt   \n\t`,
+test("retired actions and target/prompt parameters are rejected, even when followed by --help", () => {
+	for (const command of [
+		"send",
+		"card",
+		"cancel",
+		"screen",
+		"config",
+		"Sessions",
+		"send --prompt 任务",
+		"send --help",
+		"card --help",
+		"cancel --help",
+		"--session-id session-A",
+		"--session-id session-A send --prompt 任务",
+		"--session-id session-A card",
+		"--session-id session-A cancel",
+		"--session-id session-A --help",
+		"--session-id=session-A",
+		"--prompt 任务",
+		"--prompt=任务",
+		"--SESSION-ID session-A",
+		"--HELP",
+		"-h",
 	]) {
-		assert.match(errorOf(text), /缺少 --prompt|--prompt 之后要有正文/, text);
+		const error = errorOf(`/wecom-aibot ${command}`);
+		assert.match(error, /仅支持 \/wecom-aibot sessions 和 \/wecom-aibot --help/);
+		assert.match(error, /任务请直接发送，其他操作请用控制卡/);
 	}
 });
 
-test("everything after --prompt is prose, including real IDs, help and repeated option names", () => {
-	for (const prompt of [
-		`解释 --session-id ${ID} 的用法`,
-		`--session-id ${ID} --help --prompt --unknown`,
-		"正文  有两个空格\n第二行\n\n",
-		"/wecom-aibot cancel --session-id=xxx  ",
-	]) {
-		assert.deepEqual(parseWeComCommand(`/wecom-aibot --session-id ${ID} send --prompt ${prompt}`), {
-			kind: "send",
-			sessionId: ID,
-			prompt,
-		});
+test("extra arguments never execute sessions or bypass validation through help", () => {
+	for (const args of [
+		"sessions extra",
+		"sessions --unknown",
+		"sessions --session-id session-A",
+		"sessions --prompt 任务",
+		"sessions --help extra",
+		"sessions --help --session-id session-A",
+		"sessions --help --help",
+		"--help sessions",
+		"--help send",
+		"--help --unknown",
+		"--help --help",
+	])
+		assert.match(errorOf(`/wecom-aibot ${args}`), /不接受参数/);
+});
+
+test("help describes the real interaction and never recommends retired commands", () => {
+	for (const topic of [undefined, "sessions"] as const) {
+		const help = helpText(topic);
+		assert.match(help, /\/wecom-aibot sessions/);
+		assert.match(help, /控制卡/);
+		assert.match(help, /直接发/);
+		assert.doesNotMatch(help, /--session-id|--prompt|\/wecom-aibot (?:send|card|cancel)/);
+		for (const line of help.split("\n")) assert.equal(line.endsWith("。"), false);
 	}
-});
-
-test("a target mentioned only in the prompt cannot supply the command's missing target", () => {
-	const message = errorOf(`/wecom-aibot send --prompt 正文 --session-id ${ID}`);
-	assert.match(message, /^send 需要目标：/);
-	assert.doesNotMatch(message, /必须写在 --prompt 之前|要写在动作前/);
-});
-
-test("--prompt belongs to send and must follow the action", () => {
-	for (const kind of ["card", "cancel"] as const) {
-		assert.equal(errorOf(`/wecom-aibot --session-id ${ID} ${kind} --prompt x`), `${kind} 不接受 --prompt`);
-	}
-	assert.match(errorOf(`/wecom-aibot --session-id ${ID} --prompt x send`), /^未知选项 --prompt/);
-});
-
-test("equals forms remain unknown options, with options listed for the relevant position", () => {
-	const global = errorOf(`/wecom-aibot --session-id=${ID} send --prompt x`);
-	assert.match(global, /^未知选项 --session-id=/);
-	assert.match(global, /可用选项：--session-id、--help/);
-	assert.match(global, /不支持 =/);
-	const action = errorOf(`/wecom-aibot --session-id ${ID} send --prompt=x`);
-	assert.match(action, /^未知选项 --prompt=x/);
-	assert.match(action, /可用选项：--prompt、--help/);
-});
-
-test("positional parameters after an action are refused", () => {
-	for (const text of [
-		`/wecom-aibot send ${ID} 正文`,
-		`/wecom-aibot --session-id ${ID} send 正文`,
-		`/wecom-aibot --session-id ${ID} card extra`,
-		`/wecom-aibot --session-id ${ID} cancel card`,
-		"/wecom-aibot sessions extra",
-	]) {
-		assert.match(errorOf(text), /不接受位置参数/, text);
-	}
-});
-
-test("unknown actions still list the available ones, with or without a target", () => {
-	for (const text of ["/wecom-aibot strat", `/wecom-aibot --session-id ${ID} strat`]) {
-		assert.equal(errorOf(text), "未知子命令 strat。可用子命令：sessions、send、card、cancel");
-	}
-});
-
-test("the command prefix, actions and options are case-sensitive, like pi's own command names", () => {
-	assert.deepEqual(parseWeComCommand(`/wecom-aibot --session-id ${ID} send --prompt x`), {
-		kind: "send",
-		sessionId: ID,
-		prompt: "x",
-	});
-	// Another case of the prefix is no command: the message is an ordinary one, handled like any other.
-	assert.deepEqual(parseWeComCommand(` /WECOM-AIBOT --session-id ${ID} send --prompt x`), { kind: "none" });
-	assert.deepEqual(parseWeComCommand("/Wecom-aibot sessions"), { kind: "none" });
-	assert.equal(
-		errorOf(`/wecom-aibot --session-id ${ID} SEND --prompt x`),
-		"未知子命令 SEND。可用子命令：sessions、send、card、cancel",
-	);
-	assert.equal(errorOf("/wecom-aibot Sessions"), "未知子命令 Sessions。可用子命令：sessions、send、card、cancel");
-	assert.match(errorOf(`/wecom-aibot --SESSION-ID ${ID} card`), /^未知选项 --SESSION-ID/);
-});
-
-test("a repeated target option before --prompt is refused", () => {
-	for (const text of [
-		`/wecom-aibot --session-id ${ID} --session-id ${ID} cancel`,
-		`/wecom-aibot --session-id ${ID} --session-id ${ID}`,
-		`/wecom-aibot --session-id ${ID} cancel --session-id ${ID}`,
-	]) {
-		assert.equal(errorOf(text), "--session-id 重复给出", text);
-	}
-});
-
-test("--session-id without a value keeps its diagnostic", () => {
-	for (const text of [
-		"/wecom-aibot --session-id",
-		"/wecom-aibot --session-id --help",
-		"/wecom-aibot cancel --session-id",
-		`/wecom-aibot --session-id ${ID} --session-id`,
-	]) {
-		assert.equal(errorOf(text), "--session-id 缺少值", text);
-	}
-});
-
-test("unknown options are refused before or after the action", () => {
-	for (const text of [
-		"/wecom-aibot -h",
-		"/wecom-aibot --unknown x",
-		`/wecom-aibot --session-id ${ID} cancel --unknown x`,
-		"/wecom-aibot sessions --unknown x",
-	]) {
-		assert.match(errorOf(text), /^未知选项/, text);
-	}
-});
-
-test("the target option is --session-id, as pi and the cards spell it; any other spelling is unknown", () => {
-	assert.deepEqual(parseWeComCommand(`/wecom-aibot --session-id ${ID} card`), { kind: "card", sessionId: ID });
-	assert.match(
-		errorOf(`/wecom-aibot --sessionid ${ID} card`),
-		/^未知选项 --sessionid。可用选项：--session-id、--help/,
-	);
+	assert.match(helpText(), /\/wecom-aibot --help/);
+	assert.match(helpText(), /回到 pi 终端/);
+	assert.match(helpText("sessions"), /列表保留/);
 });

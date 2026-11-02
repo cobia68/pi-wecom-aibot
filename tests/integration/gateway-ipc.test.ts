@@ -9,7 +9,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { sessionControlCard } from "../../src/extension/control-view.ts";
 import { GatewayClient, type GatewayClientOptions } from "../../src/extension/gateway-client.ts";
 import { type GatewayServer, startGatewayServer } from "../../src/gateway/server.ts";
-import { controlCardFor, controlCardId } from "../../src/shared/control-card.ts";
+import { controlCardFor, controlCardId, controlKey } from "../../src/shared/control-card.ts";
 import {
 	type ClientFrame,
 	GATEWAY_PROTOCOL_VERSION,
@@ -78,7 +78,7 @@ async function startServer(idleTimeoutMs = 1000) {
 			const socket = new FakeWebSocket(url);
 			socket.onSend = (frame) => {
 				if (
-					["aibot_subscribe", "ping", "aibot_respond_msg"].includes(frame.cmd) ||
+					["aibot_subscribe", "ping", "aibot_respond_msg", "aibot_respond_update_msg"].includes(frame.cmd) ||
 					(autoAcknowledge && frame.cmd === "aibot_send_msg")
 				)
 					socket.acknowledge(frame);
@@ -120,7 +120,7 @@ function client(
 	return { connection, tasks, states, logs, errors };
 }
 
-/** A task that names its target; every WeCom task does since routing is explicit. */
+/** A task that names its target through a quoted notification; unquoted tasks use the chooser. */
 function inbound(content: string, extra: Record<string, unknown> = {}, sessionId = "session-A") {
 	const id = randomUUID();
 	FakeWebSocket.instances.at(-1)!.receive({
@@ -131,7 +131,8 @@ function inbound(content: string, extra: Record<string, unknown> = {}, sessionId
 			from: { userid: "user" },
 			chattype: "single",
 			msgtype: "text",
-			text: { content: `/wecom-aibot --session-id ${sessionId} send --prompt ${content}` },
+			text: { content },
+			quote: { msgtype: "text", text: { content: `session: ${sessionId}` } },
 			...extra,
 		},
 	});
@@ -295,26 +296,44 @@ test("a pi cannot send a notification labelled with another pi's session", async
 	assert.equal(pushes[1].body.chat_type, 2);
 });
 
-test("IPC carries a cancel request to the pi and returns its answer", async () => {
+test("IPC carries a control-card click to the owning pi and returns its failure on that card", async () => {
 	await startServer();
 	const requests: { id: string; request: any }[] = [];
 	const a = client("A", {}, { onRequest: (id, request) => requests.push({ id, request }) });
 	a.connection.start();
 	await until(() => a.connection.isReady(), "A ready");
-	messageFor("A", "/wecom-aibot --session-id session-A cancel");
-	await until(() => requests.length === 1, "request delivered");
-	assert.equal(requests[0].request.action, "cancel");
+	const card = notification("A");
+	await a.connection.notify(user, card);
+	const ws = FakeWebSocket.instances[0];
+	const eventId = randomUUID();
+	ws.receive({
+		cmd: "aibot_event_callback",
+		headers: { req_id: eventId },
+		body: {
+			msgid: eventId,
+			from: { userid: "user" },
+			chattype: "single",
+			msgtype: "event",
+			event: {
+				eventtype: "template_card_event",
+				template_card_event: {
+					task_id: card.control.cardId,
+					event_key: controlKey("abort", "session-A"),
+				},
+			},
+		},
+	});
+	await until(() => requests.length === 1, "click delivered");
+	assert.equal(requests[0].request.action, "click");
+	assert.equal(requests[0].request.click.key, controlKey("abort", "session-A"));
 	a.connection.respond(requests[0].id, { ok: false, error: "这一轮已结束" });
-	await until(
-		() =>
-			FakeWebSocket.instances[0].sent.some((frame) =>
-				String(frame.body?.stream?.content ?? "").includes("中止请求未送达：这一轮已结束"),
-			),
-		"failure reported",
-	);
+	await until(() => ws.sent.some((frame) => frame.cmd === "aibot_respond_update_msg"), "failure reported on card");
+	const update = ws.sent.find((frame) => frame.cmd === "aibot_respond_update_msg");
+	assert.equal(update.body.template_card.task_id, card.control.cardId);
+	assert.match(update.body.template_card.horizontal_content_list.at(-1).value, /处理失败：这一轮已结束/);
 });
 
-test("IPC carries a target-only live-state query to just that pi and keeps no selected target", async () => {
+test("IPC session lists poll the live state of every session without selecting a task target", async () => {
 	await startServer();
 	let busy = true;
 	let askedA = 0;
@@ -334,8 +353,10 @@ test("IPC carries a target-only live-state query to just that pi and keeps no se
 		"B",
 		{},
 		{
-			onRequest: () => {
+			onRequest: (id, request) => {
+				assert.equal(request.action, "state");
 				askedB++;
+				b.connection.respond(id, { ok: true, busy: false });
 			},
 		},
 	);
@@ -343,28 +364,20 @@ test("IPC carries a target-only live-state query to just that pi and keeps no se
 	b.connection.start();
 	await until(() => a.connection.isReady() && b.connection.isReady(), "both ready");
 	const ws = FakeWebSocket.instances[0];
-	const replies = () => ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg");
-	messageFor("A", "/wecom-aibot --session-id session-A");
-	await until(() => replies().length === 1, "single-session busy reply");
-	assert.equal(
-		replies()[0].body.stream.content,
-		[
-			"· directory-A · provider-A · model-A · 执行中",
-			"",
-			"/wecom-aibot --session-id session-A send --prompt <正文>",
-			"/wecom-aibot --session-id session-A card",
-			"/wecom-aibot --session-id session-A cancel",
-		].join("\n"),
-	);
+	const lists = () => ws.sent.filter((frame) => frame.body?.template_card?.button_selection?.question_key === "pick");
+	messageFor("A", "/wecom-aibot sessions");
+	await until(() => lists().length === 1, "busy session list");
+	assert.equal(lists()[0].body.template_card.horizontal_content_list[0].keyname, "执行中");
 	busy = false;
-	messageFor("A", "/wecom-aibot --session-id session-A");
-	await until(() => replies().length === 2, "single-session idle reply");
-	assert.match(replies()[1].body.stream.content, /^· directory-A · provider-A · model-A · 空闲\n/);
+	messageFor("A", "/wecom-aibot sessions");
+	await until(() => lists().length === 2, "idle session list");
+	assert.equal(lists()[1].body.template_card.horizontal_content_list[0].keyname, "空闲");
 	messageFor("A", "/wecom-aibot cancel");
-	await until(() => replies().length === 3, "missing target reply");
-	assert.match(replies()[2].body.stream.content, /^cancel 需要目标：/);
+	await until(() => ws.sent.some((frame) => frame.cmd === "aibot_respond_msg"), "retired command refused");
+	const error = ws.sent.find((frame) => frame.cmd === "aibot_respond_msg");
+	assert.match(error.body.stream.content, /仅支持 \/wecom-aibot sessions 和 \/wecom-aibot --help/);
 	assert.equal(askedA, 2);
-	assert.equal(askedB, 0, "B is neither polled nor operated on");
+	assert.equal(askedB, 2);
 	assert.equal(a.tasks.length + b.tasks.length, 0);
 });
 
@@ -527,11 +540,6 @@ test("model metadata updates reach the session list", async () => {
 	const list = replies().at(-1).body.template_card;
 	assert.equal(list.button_selection.option_list[0].text, "new-direc… · on-A · 空闲");
 	assert.deepEqual(list.horizontal_content_list[0], { keyname: "空闲", value: "new-directory · on-A · new-model" });
-	// The list leaves the provider out; querying this ID still exposes its full metadata.
-	messageFor("A", "/wecom-aibot --session-id session-A");
-	const details = () => FakeWebSocket.instances[0].sent.filter((frame) => frame.cmd === "aibot_respond_msg");
-	await until(() => details().length > 0, "session details");
-	assert.match(details().at(-1).body.stream.content, /new-directory · new-provider · new-model · 空闲/);
 });
 
 test("clients re-register the same identity after a gateway crash", async () => {

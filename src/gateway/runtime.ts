@@ -64,16 +64,15 @@ import {
 	isSettled,
 	settledCard,
 } from "./ask-card.ts";
-import { helpText, parseWeComCommand, sessionCommand, type WeComCommand } from "./command.ts";
+import { helpText, parseWeComCommand, type WeComCommand } from "./command.ts";
 import { PICKER_QUESTION, type PickerAction, pageOf, pickerAction, sessionPicker } from "./session-picker.ts";
 import { SessionPoller } from "./session-poller.ts";
-import { sessionsText, sessionText, withSessions } from "./session-view.ts";
+import { sessionsText, withSessions } from "./session-view.ts";
 import { WeComClient, type WeComClientOptions, type WeComInbound } from "./wecom-client.ts";
 
 const MAX_SESSIONS = 100;
 const MAX_TASKS = 10_000;
 const MAX_WATCH_MS = 10 * 60_000;
-const REQUEST_TIMEOUT_MS = 20_000;
 /**
  * WeCom takes a card update within 5 seconds of the click; pi gets most of that, the update the rest. A
  * control card's refresh writes its WeCom document page inside this window (about 2 seconds measured).
@@ -95,13 +94,6 @@ interface Member extends GatewayRegistration {
 	peer: GatewayPeer;
 	/** When this session was last used (registered, given a task, published), as a sequence number. */
 	active: number;
-}
-
-interface PendingRequest {
-	reqId: string;
-	instanceId: string;
-	action: "cancel" | "card";
-	timer: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -159,7 +151,6 @@ export class WeComGateway {
 	private readonly members = new Map<string, Member>();
 	private readonly seen = new Set<string>();
 	private readonly tasks = new Map<string, Task>();
-	private readonly requests = new Map<string, PendingRequest>();
 	private readonly poller = new SessionPoller<Member>((member) => this.members.get(member.instanceId) === member);
 	/** Cards to redraw on a click, by task_id; a control card per session it showed (cardKey). */
 	private readonly cards = new Map<string, CardModel>();
@@ -290,8 +281,6 @@ export class WeComGateway {
 		this.client?.stop("gateway shutdown");
 		for (const member of this.members.values()) member.peer.close();
 		this.members.clear();
-		for (const request of this.requests.values()) clearTimeout(request.timer);
-		this.requests.clear();
 		this.poller.stop();
 		for (const click of this.clicks.values()) clearTimeout(click.timer);
 		this.clicks.clear();
@@ -548,6 +537,15 @@ export class WeComGateway {
 		const sender = senderKey(message);
 		const previous = this.askBySender.get(sender);
 		if (previous) this.dropAsk(previous, "这条消息没有发出：之后又发了一条，以那条为准");
+		// With more than ten sessions, opening a control card from sessions brings it into the next chooser.
+		// This only changes which options fit: every message still needs its own explicit confirmation.
+		if (eligible.length > ASK_CHOICES) {
+			const recent = new Set([...eligible].sort((a, b) => b.active - a.active).slice(0, ASK_CHOICES));
+			eligible = [
+				...eligible.filter((member) => recent.has(member)),
+				...eligible.filter((member) => !recent.has(member)),
+			];
+		}
 		this.poller.poll(eligible, (online, sessions) => {
 			const client = this.client;
 			if (!client) return;
@@ -689,30 +687,7 @@ export class WeComGateway {
 			case "sessions":
 				this.showPicker({ kind: "message", reqId, chat: message.chat }, eligible);
 				return;
-			default:
-				break;
 		}
-		const target = eligible.find((member) => member.source.sessionId === command.sessionId);
-		if (!target) {
-			this.listSessions(reqId, eligible, TARGET_MISSING);
-			return;
-		}
-		if (command.kind === "session") {
-			this.showSession(reqId, target, message.userid);
-			return;
-		}
-		if (command.kind === "send") {
-			this.hand(target, reqId, { ...message, text: command.prompt }, TARGET_GONE);
-			return;
-		}
-		this.request(command.kind, target, reqId, message.chat, message.userid);
-	}
-
-	private showSession(reqId: string, target: Member, userid: string): void {
-		this.poller.poll([target], (online, sessions) => {
-			if (online.length) this.reply(reqId, sessionText(sessions[0]));
-			else this.listSessions(reqId, this.permitted(userid), TARGET_MISSING);
-		});
 	}
 
 	private listSessions(reqId: string, eligible: Member[], prefix?: string): void {
@@ -780,26 +755,6 @@ export class WeComGateway {
 		}
 	}
 
-	private request(action: "cancel" | "card", target: Member, reqId: string, chat: ChatRef, userid: string): void {
-		const id = randomUUID();
-		const timer = setTimeout(() => {
-			if (!this.requests.delete(id)) return;
-			this.reply(
-				reqId,
-				`目标会话未在 ${REQUEST_TIMEOUT_MS / 1000} 秒内响应，可用 /wecom-aibot sessions 确认它仍在线`,
-			);
-		}, REQUEST_TIMEOUT_MS);
-		this.requests.set(id, { reqId, instanceId: target.instanceId, action, timer });
-		const request =
-			action === "card"
-				? { action: "click" as const, target: sessionTarget(target), click: { key: PUBLISH_KEY, userid, chat } }
-				: { action, target: sessionTarget(target) };
-		if (target.peer.send({ type: "request", id, request })) return;
-		clearTimeout(timer);
-		this.requests.delete(id);
-		this.reply(reqId, TARGET_GONE);
-	}
-
 	response(instanceId: string, id: string, response: BridgeResponse): void {
 		if (this.poller.answer(id, instanceId, response.ok ? response.busy : undefined)) return;
 		const click = this.clicks.get(id);
@@ -812,22 +767,6 @@ export class WeComGateway {
 			else this.finishClick(id, response.note, response.card, response.userids);
 			return;
 		}
-		const pending = this.requests.get(id);
-		if (!pending || pending.instanceId !== instanceId) return;
-		clearTimeout(pending.timer);
-		this.requests.delete(id);
-		if (!response.ok) {
-			this.reply(
-				pending.reqId,
-				`${pending.action === "card" ? "控制卡请求失败" : "中止请求未送达"}：${response.error ?? "未知原因"}`,
-			);
-			return;
-		}
-		if (pending.action === "cancel") {
-			this.reply(pending.reqId, "已请求中止；这一轮可能还会输出最后一点内容");
-			return;
-		}
-		this.reply(pending.reqId, response.note ?? "控制卡请求未获确认");
 	}
 
 	/** A button on one of the bot's cards: a question card's, a session list's or a control card's. */
@@ -1138,13 +1077,12 @@ export class WeComGateway {
 	}
 }
 
-/** When the question card cannot be shown: how a message names its session without one. */
+/** No textual task/control commands: a failed question is retried interactively or handled in pi. */
 const ASK_FALLBACK = [
-	"这条消息没有发出，请用命令指定会话：",
-	sessionCommand("<id>", "send"),
-	"session ID 写在会话的控制卡上",
+	"这条消息没有发出：会话选择卡不可用",
+	"请稍后重新发送任务；仍失败请回到 pi 终端操作",
+	"可发 /wecom-aibot sessions 重试查看在线会话",
 ].join("\n");
-const TARGET_MISSING = "找不到这个 session ID；它可能已离线或写错";
 const TARGET_GONE = "目标会话已离线";
 const QUOTED_GONE = "引用的会话已离线";
 const QUOTE_FAILED = "引用的消息或图片看不出是哪个在线会话";
