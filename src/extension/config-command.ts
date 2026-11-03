@@ -145,6 +145,7 @@ class ConfigCommand {
 	) {}
 
 	async run(invocation: ConfigInvocation): Promise<void> {
+		if (invocation.scope === "project") this.config.requireProjectTrust();
 		switch (invocation.action) {
 			case "choose":
 				return this.chooseSubcommand(invocation.scope);

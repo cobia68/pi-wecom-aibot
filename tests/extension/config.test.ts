@@ -20,7 +20,6 @@ const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = sandbox;
 const {
 	CONFIG_FILE,
-	PROJECTS_DIR,
 	SESSIONS_DIR,
 	SessionConfig,
 	clearConfig,
@@ -28,7 +27,6 @@ const {
 	connectionOf,
 	layerFile,
 	mergeLayers,
-	projectFileName,
 	parseAssignments,
 	applyPromptsEdit,
 	parseRemovals,
@@ -61,7 +59,7 @@ beforeEach(() => {
 	// Only the link itself when the file is a symlink.
 	rmSync(CONFIG_FILE, { force: true });
 	rmSync(SESSIONS_DIR, { recursive: true, force: true });
-	rmSync(PROJECTS_DIR, { recursive: true, force: true });
+	rmSync(PROJECT, { recursive: true, force: true });
 });
 
 after(() => {
@@ -609,13 +607,12 @@ test("a working directory's overrides sit between global and session; a group co
 	assert.equal(sessionConfig(PARENT, undefined, join(sandbox, "other")).config.read().values.defaultChatId, "me");
 });
 
-test("the project layer is named after the directory the way pi names its session folders, and is private", () => {
-	assert.equal(projectFileName("/home/me/repo"), "--home-me-repo--");
-	assert.equal(projectFileName("C:\\code\\repo"), "--C--code-repo--");
-	assert.equal(layerFile({ project: "/home/me/repo" }), join(PROJECTS_DIR, "--home-me-repo--.json"));
+test("the project layer lives in the working directory and remains private when created", () => {
+	assert.equal(layerFile({ project: PROJECT }), join(PROJECT, ".pi", "wecom-aibot", "config.json"));
 	writeLayer({ project: PROJECT }, { notificationScope: "all-runs" });
 	if (process.platform !== "win32") {
-		assert.equal(statSync(PROJECTS_DIR).mode & 0o777, 0o700);
+		assert.equal(statSync(join(PROJECT, ".pi")).mode & 0o777, 0o700);
+		assert.equal(statSync(join(PROJECT, ".pi", "wecom-aibot")).mode & 0o777, 0o700);
 		assert.equal(statSync(layerFile({ project: PROJECT })).mode & 0o777, 0o600);
 	}
 	assert.throws(

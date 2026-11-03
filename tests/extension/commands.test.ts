@@ -70,6 +70,13 @@ test("the total help lists its sections in a fixed order and never leaves traili
 	}
 });
 
+test("configuration help places project overrides inside the working directory rather than a global projects store", () => {
+	for (const help of [helpText(), topicHelp("config --help"), topicHelp("reset --help")]) {
+		assert.match(help, /<工作目录>[/\\]\.pi[/\\]wecom-aibot[/\\]config\.json/);
+		assert.doesNotMatch(help, /projects[/\\]--/);
+	}
+});
+
 test("option rows line up for every command with options", () => {
 	for (const input of ["config --help", "test --help"]) {
 		const rows = sectionRows(topicHelp(input), "选项");

@@ -171,21 +171,40 @@ pi install npm:@cobia/pi-wecom-aibot
 
 | 作用域 | 适用范围 | 配置文件 |
 | :--- | :--- | :--- |
-| `global` | 同一系统用户下的所有 pi | `config.json` |
-| `project` | 启动 pi 的目录，同目录会话共用 | `projects/<目录编码>.json`，如 `--home-me-repo--.json` |
-| `session` | 当前会话 | `sessions/<session ID>.json` |
+| `global` | 同一系统用户下的所有 pi | `<agent-dir>/wecom-aibot/config.json` |
+| `project` | 启动 pi 的工作目录，同目录会话共用 | `<工作目录>/.pi/wecom-aibot/config.json` |
+| `session` | 当前会话 | `<agent-dir>/wecom-aibot/sessions/<session ID>.json` |
 
-这些文件都在插件目录下，不在项目仓库内，以免误提交凭据：
+全局和项目配置使用相同的相对路径 `wecom-aibot/config.json`，只按作用域选择不同的根目录
+
+**项目配置放在项目内，随项目一起复制、移动或重命名**。只读取启动 pi 的工作目录，不向父目录查找，也不按 Git 根目录推断。命令会按需创建 `.pi/wecom-aibot/config.json`，不修改 `.pi/settings.json`、已有目录权限或 `.gitignore`。标准 pi 使用 `.pi`，其他发行版跟随其 `CONFIG_DIR_NAME`
+
+全局和 session 配置仍放在用户侧插件目录：
 
 - Linux / macOS：`~/.pi/agent/wecom-aibot/`
 - Windows：`C:\Users\你的用户名\.pi\agent\wecom-aibot\`
 
-实际位置以 `/wecom-aibot status` 为准，随 `PI_CODING_AGENT_DIR` 移动。项目和 session 只保存显式覆盖的字段；分叉会话首次启动时复制父会话的覆盖，之后各自独立
+实际位置以 `/wecom-aibot status` 或 `config --scope project show` 为准。`PI_CODING_AGENT_DIR` 只移动用户侧目录，不改变项目配置的位置。项目和 session 只保存显式覆盖的字段；分叉会话首次启动时复制父会话的覆盖，之后各自独立
+
+插件遵从 pi 当前会话的项目可信状态：未信任时不读取项目配置，显式的项目配置命令会拒绝操作。检查项目内容后，可用 pi 的 `/trust` 授权并重新加载
 
 - `--scope` 写在动作前。不写时：`edit`、`set`、`unset` 改全局，`show` 显示合并结果，`whoami` 只识别不保存目标；指定作用域后，只查看或修改那一层
 - `set` 支持一次修改多个字段，全部校验通过才保存。`unset` 删除本层设置，恢复继承值
 - BotID 与 Secret、默认目标与类型各自成组，不能跨层拼接
 - BotID、Secret、`docMcpUrl` 只能通过 `edit` 或直接编辑文件填写，不能用会留在输入历史里的 `set`。没有交互界面时请直接编辑文件
+
+### 项目配置示例
+
+`<项目>/.pi/wecom-aibot/config.json`：
+
+```json
+{
+  "contentDisplay": "inline",
+  "controlPrompts": ["运行测试", "总结改动"]
+}
+```
+
+未设置的凭据、推送目标等继续继承全局配置。项目可设置的字段范围不变，`docMcpUrl`、`allowedUserIds` 仍仅限全局。**建议只把可共享、不含秘密的项目配置纳入版本控制**；如果在项目层覆盖 BotID 和 Secret，不要提交该文件
 
 ### 全局配置示例
 
@@ -221,7 +240,7 @@ pi install npm:@cobia/pi-wecom-aibot
 - 凭据、默认目标、白名单：**各窗口重新 `connect` 后生效**，此前继续用旧配置。切换会清除当前接入的排队任务和待发通知；已开始的任务继续运行，但结果不再回传。没有交互界面且有待处理工作时拒绝切换
 - 未知字段或无效值会报错，不会静默忽略；已接入的会话继续使用上一次有效配置
 
-Secret 以明文保存，编辑时也会显示在屏幕上，请勿分享或提交到仓库。删除 pi 会话或项目目录不会清理其覆盖文件，不需要时手动删除 `sessions/`、`projects/` 中的对应文件
+Secret 以明文保存，编辑时也会显示在屏幕上，请勿分享或提交到仓库。项目配置随项目目录一起删除；删除 pi 会话不会清理用户目录里的 session 覆盖，不需要时手动删除 `sessions/` 中的对应文件
 
 ## 🧰 命令速查
 
@@ -266,9 +285,15 @@ pi update npm:@cobia/pi-wecom-aibot
 
 用 `pi install npm:@cobia/pi-wecom-aibot@版本号` 固定版本后，`pi update` 不会更新它；换版本需重新 `install`。旧配置、命令和卡片不自动迁移：遇到未知字段按 `config --help` 调整，旧卡失效时重新 `connect` 或在企微发 `/wa s` 打开新卡
 
+**0.5.0 项目配置路径变更**：不再从用户目录的 `wecom-aibot/projects/<目录编码>.json` 加载项目覆盖，改读 `<项目>/.pi/wecom-aibot/config.json`
+
+- 新位置尚无文件、旧位置却有对应文件时，会报错并列出新旧路径，阻止静默套用全局的机器人或推送目标
+- 先核对旧文件确实属于当前项目，再将需要的字段迁移到新文件；旧编码可能重名，旧文件也可能含 Secret，因此不会自动复制进仓库或自动删除
+- 新文件存在后只使用新文件，空对象 `{}` 表示没有项目覆盖，也不会回读旧配置。若不再需要旧覆盖，可在新位置写入 `{}` 或手动移除旧文件
+
 ### 卸载
 
-1. 在 pi 执行 `/wecom-aibot reset`；其他已接入窗口也要断开。若项目或 session 中存过凭据，清理插件目录的 `projects/`、`sessions/`
+1. 在 pi 执行 `/wecom-aibot reset`；其他已接入窗口也要断开。若项目或 session 中存过凭据，清理各项目的 `.pi/wecom-aibot/config.json`、用户侧插件目录的 `sessions/`，以及旧版遗留的 `projects/`
 2. 执行 `pi remove npm:@cobia/pi-wecom-aibot`
 3. 按需清理项目中的 `.pi-wecom-aibot-files/`、插件目录中的 `gateway/` 和 `session-doc.json`；在企业微信撤销「文档」授权并删除会话文档
 

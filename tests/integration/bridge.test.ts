@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { after, afterEach, beforeEach, type TestContext, test } from "node:test";
@@ -345,6 +345,8 @@ beforeEach(async (t) => {
 	sessionHeader = null;
 	promptSections = {};
 	await rm(SESSIONS_DIR, { recursive: true, force: true });
+	await rm(join(sandbox, ".pi"), { recursive: true, force: true });
+	await rm(join(sandbox, "wecom-aibot", "projects"), { recursive: true, force: true });
 	// The machine's record of document pages is shared by every pi; each test starts without one.
 	await rm(join(sandbox, "wecom-aibot", "session-doc.json"), { force: true });
 	await rm(join(sandbox, "wecom-aibot", "session-doc.lock"), { force: true });
@@ -353,6 +355,7 @@ beforeEach(async (t) => {
 	ctx = {
 		hasUI: false,
 		cwd: sandbox,
+		isProjectTrusted: () => true,
 		isIdle: () => idle,
 		model: { ...modelA },
 		modelRegistry: {
@@ -1885,6 +1888,7 @@ test("config --scope project writes the working directory's layer, between globa
 	const notices: string[] = [];
 	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
 	const project = layerFile({ project: ctx.cwd });
+	assert.equal(project, join(ctx.cwd, ".pi", "wecom-aibot", "config.json"));
 	const session = layerFile({ session: sessionId });
 	const global = await readFile(CONFIG_FILE, "utf8");
 	try {
@@ -1898,10 +1902,9 @@ test("config --scope project writes the working directory's layer, between globa
 		await command("config show", ctx);
 		assert.match(notices.at(-1)!, /notificationScope +all-runs（项目级）/);
 		await command("config --scope project show", ctx);
-		assert.match(
-			notices.at(-1)!,
-			/^当前目录的项目级配置：\n {2}notificationScope {2}all-runs\n文件：.*projects\/--.*--\.json$/,
-		);
+		assert.match(notices.at(-1)!, /^当前目录的项目级配置：\n {2}notificationScope {2}all-runs\n/);
+		assert.ok(notices.at(-1)!.endsWith(`文件：${project}`));
+		assert.equal(existsSync(join(sandbox, "wecom-aibot", "projects")), false);
 		// A change below a layer that holds the field does not reach this session: the report says which one does.
 		await command("config set notificationScope=wecom-tasks", ctx);
 		assert.match(
@@ -1924,6 +1927,80 @@ test("config --scope project writes the working directory's layer, between globa
 		await rm(session, { force: true });
 		await writeFile(CONFIG_FILE, global);
 	}
+});
+
+test("untrusted project settings cannot retarget a connection, and explicit project commands refuse access", async (t) => {
+	const project = layerFile({ project: ctx.cwd });
+	writeLayer(
+		{ project: ctx.cwd },
+		{
+			botId: "untrusted-bot",
+			secret: "untrusted-secret",
+			defaultChatId: "untrusted-user",
+			contentDisplay: "linked",
+		},
+	);
+	const notices: string[] = [];
+	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
+	t.mock.method(ctx, "isProjectTrusted", () => false);
+	await emit("session_start");
+	await command("connect", ctx);
+	ws = FakeWebSocket.instances.at(-1)!;
+	ws.open();
+	const subscribe = ws.sent.find((frame) => frame.cmd === "aibot_subscribe")!;
+	assert.equal(subscribe.body.bot_id, "test-bot");
+	assert.equal(subscribe.body.secret, "test-secret");
+	ws.acknowledge(subscribe);
+	await drain();
+	assert.ok(ws.sent.some((frame) => frame.cmd === "aibot_send_msg" && frame.body.chatid === "default-user"));
+	assert.doesNotMatch(JSON.stringify(ws.sent), /untrusted-bot|untrusted-secret|untrusted-user/);
+	await writeFile(project, "{untrusted malformed config");
+	await command("config show", ctx);
+	assert.match(notices.at(-1)!, /^当前 session 的企业微信配置/);
+	for (const action of ["show", "set contentDisplay=inline", "unset contentDisplay", "edit"]) {
+		await command(`config --scope project ${action}`, ctx);
+		assert.match(notices.at(-1)!, /未信任项目/);
+	}
+	await command("config set controlPrompts=可信全局", ctx);
+	assert.match(notices.at(-1)!, /已保存全局配置/);
+	assert.equal(await readFile(project, "utf8"), "{untrusted malformed config");
+});
+
+test("legacy project configuration blocks a new connection until the user supplies the project-local file", async (t) => {
+	const old = join(
+		sandbox,
+		"wecom-aibot",
+		"projects",
+		`--${ctx.cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--.json`,
+	);
+	const project = layerFile({ project: ctx.cwd });
+	await mkdir(dirname(old), { recursive: true });
+	const original = JSON.stringify({ defaultChatId: "legacy-user", contentDisplay: "linked" });
+	await writeFile(old, original);
+	const notices: string[] = [];
+	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
+	const connections = FakeWebSocket.instances.length;
+	await emit("session_start");
+	await command("connect", ctx);
+	assert.equal(FakeWebSocket.instances.length, connections, "do not silently connect with global defaults");
+	assert.match(notices.at(-1)!, /迁移/);
+	assert.ok(notices.at(-1)!.includes(old));
+	assert.ok(notices.at(-1)!.includes(project));
+	assert.equal(existsSync(project), false, "private overrides are not copied into the checkout automatically");
+	writeLayer({ project: ctx.cwd }, { defaultChatId: "project-group", defaultChatType: 2 });
+	await command("connect", ctx);
+	assert.equal(FakeWebSocket.instances.length, connections + 1);
+	ws = FakeWebSocket.instances.at(-1)!;
+	ws.open();
+	ws.acknowledge();
+	await drain();
+	assert.ok(
+		ws.sent.some(
+			(frame) =>
+				frame.cmd === "aibot_send_msg" && frame.body.chatid === "project-group" && frame.body.chat_type === 2,
+		),
+	);
+	assert.equal(await readFile(old, "utf8"), original, "the legacy file is left to the user");
 });
 
 test("config whoami without a scope only reports the chat and the command that would save it", async (t) => {

@@ -257,7 +257,7 @@ test("an upstream diagnostic stays on the headline line without terminal control
 });
 
 test("the project row names the fields the working directory decides, like the session row", () => {
-	const projectFile = "/agent/wecom-aibot/projects/--home-me-repo--.json";
+	const projectFile = "/home/me/repo/.pi/wecom-aibot/config.json";
 	const resolved = mergeLayers({
 		global: GLOBAL,
 		project: { notificationScope: "wecom-tasks", controlPrompts: ["部署"] },

@@ -15,7 +15,7 @@ import {
 	fieldNamed,
 	LAYERS,
 	type ManagedFields,
-	PROJECTS_DIR,
+	PROJECT_FILE,
 	type PromptsEdit,
 	parseAssignments,
 	parseRemovals,
@@ -610,7 +610,7 @@ function hasOptionsOrArgs(command: CommandSpec): boolean {
 function configPaths(): string[] {
 	return table([
 		["配置文件", CONFIG_FILE],
-		["项目级", join(PROJECTS_DIR, "--<工作目录>--.json")],
+		["项目级", join("<工作目录>", PROJECT_FILE)],
 		["会话覆盖", join(SESSIONS_DIR, "<session-id>.json")],
 	]);
 }

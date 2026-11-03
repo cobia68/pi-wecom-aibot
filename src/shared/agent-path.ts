@@ -1,6 +1,6 @@
 /**
- * Everything this extension owns (credentials, gateway socket, routing state) lives in one folder inside
- * pi's agent directory, so `PI_CODING_AGENT_DIR` moves all of them at once.
+ * User-local defaults and runtime state (gateway socket, routing state) live inside pi's agent directory,
+ * so `PI_CODING_AGENT_DIR` moves them together. Project configuration stays in the project's config directory.
  */
 
 import { homedir } from "node:os";

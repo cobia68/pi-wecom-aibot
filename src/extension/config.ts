@@ -2,12 +2,12 @@
  * WeCom 智能机器人 configuration: one field table shared by validation, help, completion and the editor,
  * and the merge of a global file with per-directory and per-session override files.
  *
- *   <agent-dir>/wecom-aibot/config.json                 global defaults; allowedUserIds lives only here
- *   <agent-dir>/wecom-aibot/projects/--<directory>--.json  one working directory's explicit overrides
- *   <agent-dir>/wecom-aibot/sessions/<session>.json     one session's explicit overrides
+ *   <agent-dir>/wecom-aibot/config.json              global defaults; allowedUserIds lives only here
+ *   <cwd>/.pi/wecom-aibot/config.json                project overrides, travelling with the directory
+ *   <agent-dir>/wecom-aibot/sessions/<session>.json  one session's explicit overrides
  *
- * The project layer lives in the plugin's own folder, not in the repository: it may hold a Secret and points
- * at a userid, which a shared checkout must not hand to everyone who opens it.
+ * Project files follow pi's config directory name and project trust. Credentials may still be overridden,
+ * but shared project files should contain no secrets. Legacy project files are never silently imported.
  *
  * A missing file means "no values here"; an unreadable one is an error, never an empty layer. A key the layer
  * does not know makes the file unreadable too, like a value it cannot use: a typo is said, never ignored.
@@ -17,6 +17,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
 	closeSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readFileSync,
@@ -27,6 +28,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { pluginDirectory } from "../shared/agent-path.ts";
 import { MAX_PROMPT_LENGTH, MAX_PROMPTS } from "../shared/control-card.ts";
 import { errorMessage, sentences } from "../shared/text.ts";
@@ -232,10 +234,11 @@ export function chatIdProblem(chatId: string): string | undefined {
 
 // ---------------------------------------------------------------- files
 
-/** A file of its own: pi gives extensions no settings writer, and project settings cannot override credentials here. */
+/** Our user-level defaults, separate from pi's own settings.json. */
 export const CONFIG_FILE = join(pluginDirectory(), "config.json");
 export const SESSIONS_DIR = join(pluginDirectory(), "sessions");
-export const PROJECTS_DIR = join(pluginDirectory(), "projects");
+/** Relative to the session's working directory; standard pi uses .pi/wecom-aibot/config.json. */
+export const PROJECT_FILE = join(CONFIG_DIR_NAME, "wecom-aibot", "config.json");
 
 /** The layers in merge order: a later one overrides an earlier one. */
 export const LAYERS = ["global", "project", "session"] as const;
@@ -246,13 +249,13 @@ export type Scope = "global" | { project: string } | { session: string };
 export function layerFile(scope: Scope): string {
 	if (scope === "global") return CONFIG_FILE;
 	return "project" in scope
-		? join(PROJECTS_DIR, `${projectFileName(scope.project)}.json`)
+		? join(scope.project, PROJECT_FILE)
 		: join(SESSIONS_DIR, `${sessionFileName(scope.session)}.json`);
 }
 
-/** The directory written into one name the way pi names its own session folders: `/a/b` is `--a-b--`. */
-export function projectFileName(cwd: string): string {
-	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+/** Only used to diagnose an unmigrated file; different paths could collide in this retired encoding. */
+function legacyProjectFile(cwd: string): string {
+	return join(dirname(CONFIG_FILE), "projects", `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--.json`);
 }
 
 /** pi's own (lowercase UUID) IDs name their file; any other ID is hashed, so no ID can form a path or a device name. */
@@ -320,8 +323,27 @@ function fileValueProblem(spec: (typeof FIELDS)[number], value: unknown, scope: 
 }
 
 export function readLayer(scope: Scope): Layer | undefined {
-	const raw = readObject(layerFile(scope));
+	const raw = readLayerObject(scope);
 	return raw && parseLayer(raw, scope);
+}
+
+/** Do not copy private legacy settings into a checkout, or silently switch their bot/target to global defaults. */
+function readLayerObject(scope: Scope): Record<string, unknown> | undefined {
+	const file = layerFile(scope);
+	const raw = readObject(file);
+	if (raw === undefined && scope !== "global" && "project" in scope) {
+		const legacy = legacyProjectFile(scope.project);
+		try {
+			lstatSync(legacy);
+		} catch (error) {
+			if (isErrnoException(error) && error.code === "ENOENT") return undefined;
+			throw new Error(`无法检查旧项目配置 ${legacy}：${errorMessage(error)}`);
+		}
+		throw new Error(
+			`项目配置已改为 ${file}；旧位置 ${legacy} 仍有文件，请核对归属和敏感字段后手动迁移。未自动复制或读取旧配置；如不再使用旧覆盖，请在新位置写入 {} 或移除旧文件`,
+		);
+	}
+	return raw;
 }
 
 export function writeLayer(scope: Scope, layer: Layer): void {
@@ -348,7 +370,7 @@ function rewriteLayer(
 	edit: (raw: Record<string, unknown> | undefined) => Record<string, unknown> | undefined,
 ): Layer {
 	const file = layerFile(scope);
-	const raw = readObject(file);
+	const raw = readLayerObject(scope);
 	const next = edit(raw);
 	if (!next) return parseLayer(raw ?? {}, scope);
 	const layer = parseLayer(next, scope);
@@ -397,7 +419,7 @@ function readIfExists<T>(file: string, read: (file: string) => T): T | undefined
 
 /** Written whole or not at all: a temporary file renamed over the old one. */
 export function writeJson(file: string, value: object, privateDirectory: boolean): void {
-	// The agent directory belongs to pi; only our files, and the folder named after session IDs, are private.
+	// Keep existing directory permissions: project .pi and the agent directory may also serve other extensions.
 	mkdirSync(dirname(file), { recursive: true, mode: privateDirectory ? 0o700 : undefined });
 	// A symlinked configuration stays a symlink: replace the file it points to.
 	const target = existsSync(file) ? realpathSync(file) : file;
@@ -497,6 +519,8 @@ export class SessionConfig {
 		/** The parent's session file from the session header (fork, clone, `--fork`). */
 		private readonly parentSessionFile: string | undefined,
 		private readonly report: (message: string, type: "info" | "warning") => void,
+		/** Host trust is checked before any project file read, including the legacy-path diagnostic. */
+		private readonly projectTrusted: () => boolean = () => true,
 	) {}
 
 	scope(layer: LayerName): Scope {
@@ -549,10 +573,20 @@ export class SessionConfig {
 	}
 
 	layer(layer: LayerName): Layer | undefined {
+		if (layer === "project" && !this.projectTrusted()) return undefined;
 		return layer === "session" ? this.ensure() : readLayer(this.scope(layer));
 	}
 
+	/** Explicit project commands and writes must not silently operate on an ignored layer. */
+	requireProjectTrust(): void {
+		if (!this.projectTrusted())
+			throw new Error(
+				`当前会话未信任项目，未读写 ${layerFile(this.scope("project"))}；请先检查项目内容，再用 /trust 授权并重新加载`,
+			);
+	}
+
 	patch(layer: LayerName, change: LayerChange, guard?: (current: Layer | undefined) => void): Layer {
+		if (layer === "project") this.requireProjectTrust();
 		if (layer === "session") this.ensure();
 		return patchLayer(this.scope(layer), change, guard);
 	}

@@ -322,6 +322,8 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 			ctx.cwd,
 			ctx.sessionManager.getHeader()?.parentSession,
 			(message, type) => sessionCtx?.ui.notify(message, type),
+			// Older hosts without project-trust support keep their previous trust model.
+			() => ctx.isProjectTrusted?.() ?? true,
 		);
 		// An unreadable file is reported now, never taken for “not configured” later.
 		readResolved(ctx);
