@@ -149,8 +149,29 @@ test("confirming an abort leaves only 确认中止 and 取消; a broken document
 	const broken = sessionControlCard(source, { status: "doc-problem" });
 	assert.equal(broken.label, "文档不可用");
 	assert.equal(broken.tone, "danger");
-	assert.match(broken.subtitle!, /^🆔 session-id: session-A；.*工作台 → 智能机器人 → 可使用权限/);
+	assert.equal(broken.subtitle, "🆔 session-id: session-A");
+	assert.match(broken.quote!, /会话文档不可用/);
+	assert.doesNotMatch(broken.quote!, /授权|过期|到期/, "a generic document failure must not claim expired permission");
 	assert.ok([...broken.subtitle!].length <= 112);
+});
+
+test("a document problem replaces body and terminal quotes and removes the stale link, even on finished result cards", () => {
+	const pageProblem = "文档权限不足或授权已到期\n工作台 → 智能机器人 → 可使用权限\n重新授权后点「刷新卡片」";
+	for (const status of ["idle", "done", "aborted", "failed", "confirming"] as const) {
+		const card = sessionControlCard(source, {
+			status,
+			pageProblem,
+			pageUrl: "https://doc.weixin.qq.com/stale",
+			bodyQuote: "PRIVATE-BODY",
+			screen: { at: new Date(), lines: ["PRIVATE-SCREEN"] },
+		});
+		assert.equal(card.quote, pageProblem);
+		assert.equal(card.quoteUrl, undefined);
+		assert.equal(card.subtitle, "🆔 session-id: session-A");
+		const rendered = renderCard(card, "card");
+		assert.doesNotMatch(JSON.stringify(rendered), /PRIVATE-BODY|PRIVATE-SCREEN|https:\/\/doc/);
+		assert.deepEqual(rendered.quote_area, { quote_text: pageProblem });
+	}
 });
 
 test("a prompt's option shows ten characters, sends all of it, and keeps its ID wherever it moves in the list", () => {

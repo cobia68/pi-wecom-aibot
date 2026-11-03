@@ -369,7 +369,7 @@ export class WeComGateway {
 		}
 	}
 
-	/** A notification is its session's control card; without one, or refused, its text goes as Markdown. */
+	/** A notification is its session's control card; only inline may fall back to Markdown when the card is refused. */
 	private async publishCard(
 		client: WeComClient,
 		member: Member,
@@ -378,12 +378,14 @@ export class WeComGateway {
 	): Promise<void> {
 		member.active = ++this.activity;
 		const { control } = notification;
+		if (!control && notification.documentOnly)
+			throw new DeliveryError("linked 控制卡不可用，未回退发送正文", "rejected");
 		let refused = !control;
 		if (control) {
 			try {
 				await this.sendControl(client, member, chat, control);
 			} catch (error) {
-				if (deliveryFailure(error) !== "rejected") throw error;
+				if (deliveryFailure(error) !== "rejected" || notification.documentOnly) throw error;
 				this.log(`卡片被拒绝，改发 Markdown：${errorMessage(error)}`);
 				refused = true;
 			}

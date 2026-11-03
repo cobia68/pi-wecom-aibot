@@ -39,10 +39,12 @@ export interface OutboxHost {
 	/** Counts subscriptions; a changed value during an attempt means a recovery must be re-checked. */
 	subscription(): number;
 	context(): ExtensionContext | undefined;
+	/** Captured with the payload, before any document write or reconnect. */
+	documentOnly(): boolean;
 	send(chat: ChatRef, notification: GatewayNotification): Promise<void>;
 	/**
-	 * Prepare the page, then draw a frozen control card (or quote the body when the page is unavailable).
-	 * Undefined or a throw leaves the gateway to send the body as Markdown.
+	 * Prepare the page and draw a frozen control card. linked failures stay on the card, never in the body.
+	 * Only inline may fall back to Markdown when a card cannot be drawn.
 	 */
 	controlCard(
 		ctx: ExtensionContext,
@@ -137,6 +139,7 @@ export class NotificationOutbox {
 		const notification = notificationPayload(kind, request.source, body.text || NO_REPLY_TEXT, {
 			title,
 			aborted: ended,
+			documentOnly: this.host.documentOnly(),
 		});
 		const control = await this.controlCard(
 			ctx,
@@ -222,6 +225,7 @@ export class NotificationOutbox {
 		try {
 			return await this.host.controlCard(ctx, chat, notification, outcome, steps);
 		} catch (error) {
+			if (notification.documentOnly) throw error;
 			this.host.log(`sent as Markdown: the control card could not be drawn: ${errorMessage(error)}`);
 			return undefined;
 		}

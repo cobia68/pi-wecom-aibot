@@ -39,6 +39,8 @@ export interface ControlView {
 	modelPage?: number;
 	screen?: { at: Date; lines: readonly string[] };
 	pageUrl?: string;
+	/** linked's failure/recovery instructions; replaces both terminal text and body previews, with no link. */
+	pageProblem?: string;
 	/** This card's already-masked plain-text body preview, instead of the terminal; never linked to a page. */
 	bodyQuote?: string;
 	/** The session document's copy of pi's logo; the gateway draws a public one without it. */
@@ -108,6 +110,8 @@ const BUTTONS = {
 } as const satisfies Record<string, readonly (readonly [ControlAction, string, CardAction["style"]])[]>;
 
 export function sessionControlCard(source: SessionSource, view: ControlView): CardModel {
+	const pageProblem =
+		view.pageProblem ?? (view.status === "doc-problem" ? "会话文档不可用，请检查配置后点「刷新卡片」" : undefined);
 	const prompts = promptOptions(view.prompts ?? []);
 	const all = modelOptions(view.models ?? [], view.model);
 	const models = modelPage(all, view.modelPage);
@@ -148,15 +152,12 @@ export function sessionControlCard(source: SessionSource, view: ControlView): Ca
 		...(view.icon ? { icon: view.icon } : {}),
 		title: head.title,
 		desc: head.desc,
-		quote: quoteOf(view),
+		quote: pageProblem ?? quoteOf(view),
 		quoteLimit: QUOTE_LIMIT,
-		...(view.pageUrl && view.bodyQuote === undefined ? { quoteUrl: view.pageUrl } : {}),
-		subtitle:
-			view.status === "doc-problem"
-				? `${head.subtitle}；文档授权过期请到工作台 → 智能机器人 → 可使用权限重新授权`
-				: paged
-					? `${head.subtitle}；共 ${all.options.length} 个模型，分 ${models.pages} 页，用「上一页」「下一页」翻`
-					: head.subtitle,
+		...(view.pageUrl && view.bodyQuote === undefined && !pageProblem ? { quoteUrl: view.pageUrl } : {}),
+		subtitle: paged
+			? `${head.subtitle}；共 ${all.options.length} 个模型，分 ${models.pages} 页，用「上一页」「下一页」翻`
+			: head.subtitle,
 		facts: [],
 		...(selection ? { selection } : {}),
 		actions: buttons.map(([action, text, style]) => ({ key: controlKey(action, source.sessionId), text, style })),

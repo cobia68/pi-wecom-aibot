@@ -429,6 +429,39 @@ test("a refused result control card is sent as Markdown with the reply, so the r
 	assert.match(markdown.body.markdown.content, /✅ 本轮完成[\s\S]*THE WHOLE REPLY/);
 });
 
+for (const hasCard of [false, true])
+	test(`linked never falls back to Markdown when its card is ${hasCard ? "refused" : "missing"}`, async () => {
+		const a = add("A");
+		const socket = ws();
+		socket.onSend = (frame) => socket.acknowledge(frame, 40008);
+		const before = socket.sent.length;
+		await assert.rejects(
+			gateway.notify(
+				"A",
+				{ chatId: "alice", chatType: 1 },
+				{
+					...notificationPayload("result", a.registration.source, "BODY-MUST-NOT-BE-SENT", { documentOnly: true }),
+					...(hasCard
+						? {
+								control: {
+									cardId: controlCardId("session-A"),
+									card: sessionControlCard(a.registration.source, {
+										status: "done",
+										pageProblem: "文档权限已到期",
+									}),
+								},
+							}
+						: {}),
+				},
+			),
+			{ outcome: "rejected" },
+		);
+		const attempted = socket.sent.slice(before);
+		assert.equal(attempted.length, hasCard ? 1 : 0);
+		assert.ok(attempted.every((frame) => frame.body?.msgtype === "template_card"));
+		assert.doesNotMatch(JSON.stringify(attempted), /BODY-MUST-NOT-BE-SENT/);
+	});
+
 test("choosing another session redraws the clicker's copy for it, and no button acts on either session", async () => {
 	const a = add("A");
 	const b = add("B");

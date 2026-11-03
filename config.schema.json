@@ -43,7 +43,7 @@
       "default": "wecom-tasks"
     },
     "contentDisplay": {
-      "description": "正文展示方式：任务结果和通知正文如何呈现；全局、项目级和 session 都能设，下次使用时生效。inline：卡片内展示（仅三行）；正文开头放文字引用区，不使用文档，Markdown 转为纯文本；linked：文档链接展示；需配置 docMcpUrl，未配置、写入失败或超时回退到卡片内展示",
+      "description": "正文展示方式：任务结果和通知正文如何呈现；全局、项目级和 session 都能设，下次使用时生效。inline：卡片内展示（仅三行）；正文开头放文字引用区，不使用文档，Markdown 转为纯文本；linked：文档链接展示；需配置 docMcpUrl，未配置或不可用时在引用区提示原因，不回退正文",
       "type": "string",
       "enum": [
         "inline",

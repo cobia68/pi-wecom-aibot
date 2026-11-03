@@ -13,7 +13,7 @@ const READ =
 	"It is read on a phone: lead with the conclusion, put the essential result in the first three short non-empty lines, and avoid wide tables.";
 const DISPLAY: Record<ContentDisplay, string> = {
 	linked:
-		"The answer is written to this session's document page in Markdown. If the page cannot be written in time, the card falls back to a plain-text quote of the answer's opening (only three lines visible on a phone).",
+		"The answer is written to this session's document page in Markdown. If the document is unavailable, the card's quote shows the reason and recovery instructions, not an excerpt of the answer. linked never falls back to displaying or sending the body.",
 	inline:
 		"The card shows the answer's opening in its plain-text quote, not a document page or a separate Markdown message. Only three lines are visible on a phone; Markdown formatting is removed and code blocks become [代码].",
 };

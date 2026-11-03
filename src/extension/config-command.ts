@@ -489,7 +489,7 @@ class ConfigCommand {
 		const action = configured
 			? await this.choose<"enter" | LayerChange>("会话文档", [
 					["重新输入地址", "enter"],
-					["删除地址（正文回退到文字引用区）", { remove: ["docMcpUrl"] }],
+					["删除地址（linked 将提示未配置文档）", { remove: ["docMcpUrl"] }],
 				])
 			: "enter";
 		if (action !== "enter") return action;

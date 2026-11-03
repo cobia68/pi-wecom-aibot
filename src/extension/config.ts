@@ -151,7 +151,10 @@ export const FIELDS: readonly FieldSpec[] = [
 				value: "inline",
 				description: "卡片内展示（仅三行）；正文开头放文字引用区，不使用文档，Markdown 转为纯文本",
 			},
-			{ value: "linked", description: "文档链接展示；需配置 docMcpUrl，未配置、写入失败或超时回退到卡片内展示" },
+			{
+				value: "linked",
+				description: "文档链接展示；需配置 docMcpUrl，未配置或不可用时在引用区提示原因，不回退正文",
+			},
 		],
 		default: "inline",
 		effect: "setting",

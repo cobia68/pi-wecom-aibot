@@ -2785,7 +2785,10 @@ function docService(t: TestContext, fail: Record<string, number> = {}, hold?: Pr
 		const text = (body: Record<string, unknown>) =>
 			reply({ content: [{ type: "text", text: JSON.stringify(body) }] });
 		if (fail[name])
-			return text({ errcode: fail[name], errmsg: "partial no authorization, hint: [x], from ip: 1.2.3.4" });
+			return text({
+				errcode: fail[name],
+				errmsg: fail[name] === 851008 ? "partial no authorization, hint: [x], from ip: 1.2.3.4" : "tool failed",
+			});
 		if (name === "smartpage_create")
 			return text({ errcode: 0, docid: "a1_doc", url: "https://doc.weixin.qq.com/smartpage/a1_doc" });
 		if (name === "smartpage_pages_update")
@@ -2996,6 +2999,8 @@ test("a page not made within six seconds leaves connect's card without a link; t
 	clock.tick(6_000);
 	await until(() => control() !== undefined);
 	assert.equal(control().body.template_card.quote_area.url, undefined, "sent without a link");
+	assert.match(control().body.template_card.quote_area.quote_text, /文档写入超时/);
+	assert.doesNotMatch(control().body.template_card.quote_area.quote_text, /initial screen|权限|到期/);
 	release();
 	// The card's own page write waits for the page's lock, retried every 50 ms.
 	await until(() => {
@@ -3007,7 +3012,7 @@ test("a page not made within six seconds leaves connect's card without a link; t
 	assert.equal(lastUpdate().body.template_card.quote_area.url, PAGE_URL, "the page, made meanwhile, is linked");
 });
 
-test("a document that refuses the write turns the card red with the reason; the three lines still update and secrets stay masked", async (t) => {
+test("a permission failure replaces the quote with renewal instructions, not terminal text or the reply", async (t) => {
 	const doc = docService(t, { smartpage_pages_overwrite: 851008, smartpage_images_upload: 851008 });
 	const { fixture } = await documentStart(doc);
 	fixture.state.lines = ["token test-secret here", "deploy step two"];
@@ -3015,14 +3020,18 @@ test("a document that refuses the write turns the card red with the reason; the 
 	await answered();
 	const card = lastUpdate().body.template_card;
 	assert.deepEqual(card.source, { icon_url: PI_ICON_URL, desc: "文档不可用", desc_color: 2 });
-	assert.match(card.sub_title_text, /^🆔 session-id: pi-session-1；.*工作台 → 智能机器人 → 可使用权限/);
+	assert.equal(card.sub_title_text, "🆔 session-id: pi-session-1");
 	assert.match(card.horizontal_content_list.at(-1).value, /文档写入失败/);
-	assert.equal(card.quote_area.quote_text, "token *********** here\ndeploy step two");
+	assert.match(card.quote_area.quote_text, /权限不足或授权已到期/);
+	assert.match(card.quote_area.quote_text, /工作台 → 智能机器人 → 可使用权限/);
+	assert.match(card.quote_area.quote_text, /重新授权后点「刷新卡片」/);
+	assert.equal(card.quote_area.url, undefined);
+	assert.doesNotMatch(card.quote_area.quote_text, /token|deploy step/);
 	assert.doesNotMatch(JSON.stringify(ws.sent), /test-secret|test-api-key/);
 	assert.doesNotMatch(doc.written().join("\n"), /test-secret/);
 });
 
-test("the first notification after a document write fails quotes its body, never the stale page", async (t) => {
+test("the first notification after a document failure shows a problem, and a later click can show the recovered page", async (t) => {
 	const failures: Record<string, number> = {};
 	const doc = docService(t, failures);
 	const { fixture } = await documentStart(doc);
@@ -3033,8 +3042,9 @@ test("the first notification after a document write fails quotes its body, never
 	assert.ok(card);
 	assert.equal(card.body.template_card.quote_area.url, undefined, "this write failed: the old URL must not be linked");
 	assert.equal(card.body.template_card.quote_area.type ?? 0, 0);
-	assert.match(card.body.template_card.quote_area.quote_text, /^NEW-ANSWER\n/);
-	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1, "fallback stays in the card");
+	assert.match(card.body.template_card.quote_area.quote_text, /文档不可用/);
+	assert.doesNotMatch(card.body.template_card.quote_area.quote_text, /NEW-ANSWER|LIVE-TERMINAL|权限|授权|到期/);
+	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1, "no separate body message");
 	delete failures.smartpage_pages_overwrite;
 	await sendNotification({ chatid: "test-user", content: "AFTER-RENEWAL" });
 	const recovered = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)!;
@@ -3042,8 +3052,107 @@ test("the first notification after a document write fails quotes its body, never
 	assert.equal(recovered.body.template_card.quote_area.quote_text, "LIVE-TERMINAL");
 	clickCard(card, "model");
 	await drain();
-	assert.match(lastUpdate().body.template_card.quote_area.quote_text, /^NEW-ANSWER\n/);
-	assert.equal(lastUpdate().body.template_card.quote_area.url, undefined, "an older fallback card keeps its own body");
+	assert.equal(lastUpdate().body.template_card.quote_area.quote_text, "LIVE-TERMINAL");
+	assert.equal(lastUpdate().body.template_card.quote_area.url, PAGE_URL, "a redraw can show the recovered document");
+});
+
+test("HTTP authorization expiry is shown in the quote, and the same card recovers after renewal and refresh", async (t) => {
+	const doc = docService(t);
+	await documentStart(doc);
+	const fetch = globalThis.fetch;
+	let denied = true;
+	t.mock.method(globalThis, "fetch", (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+		denied ? Promise.resolve(new Response(`apikey expired ${DOC_URL}`, { status: 401 })) : fetch(input, init),
+	);
+	await sendNotification({ chatid: "test-user", content: "通知标题\n\nBODY-MUST-STAY-IN-DOCUMENT" });
+	const card = ws.sent.find((frame) => frame.cmd === "aibot_send_msg")!;
+	assert.match(card.body.template_card.quote_area.quote_text, /权限不足或授权已到期/);
+	assert.equal(card.body.template_card.quote_area.url, undefined);
+	assert.doesNotMatch(JSON.stringify(ws.sent), /BODY-MUST-STAY-IN-DOCUMENT|test-api-key/);
+	assert.deepEqual(buttons(card), ["refresh", "send", "model", "abort"]);
+	denied = false;
+	clickCard(card, "refresh");
+	await answered();
+	assert.equal(lastUpdate().body.template_card.quote_area.url, PAGE_URL);
+	assert.equal(lastUpdate().body.template_card.quote_area.quote_text, "initial screen");
+	assert.equal(
+		ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length,
+		1,
+		"renewal updates the card, not the chat body",
+	);
+});
+
+test("a completed linked task keeps its outcome but shows the document permission problem instead of its answer", async (t) => {
+	const failures: Record<string, number> = {};
+	await documentStart(docService(t, failures));
+	inbound("document-only-task");
+	await drain();
+	failures.smartpage_pages_overwrite = 851008;
+	await emit("message_end", {
+		message: { role: "assistant", content: [{ type: "text", text: "RESULT-NOT-FOR-INLINE" }] },
+	});
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	const [card] = resultCards();
+	assert.ok(card);
+	assert.equal(card.body.template_card.source.desc, "已完成");
+	assert.match(card.body.template_card.quote_area.quote_text, /权限不足或授权已到期/);
+	assert.equal(card.body.template_card.quote_area.url, undefined);
+	assert.doesNotMatch(JSON.stringify(ws.sent), /RESULT-NOT-FOR-INLINE/);
+	assert.equal(notified.at(-1)!.documentOnly, true);
+});
+
+for (const scheduled of [false, true])
+	test(`a rejected ${scheduled ? "scheduled" : "immediate"} linked card never sends its body as Markdown`, async (t) => {
+		await documentStart(docService(t));
+		const acknowledge = ws.onSend;
+		ws.onSend = (frame) => {
+			if (frame.body?.msgtype === "template_card") ws.acknowledge(frame, 40014);
+			else acknowledge?.(frame);
+		};
+		const params = { chatid: "test-user", content: "通知标题\n\nNO-LINKED-FALLBACK", after_settle: scheduled };
+		if (scheduled) {
+			idle = false;
+			await sendNotification(params);
+			idle = true;
+			await emit("agent_settled", { aborted: false });
+		} else await assert.rejects(sendNotification(params), { outcome: "rejected" });
+		const sends = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+		assert.equal(sends.length, 1);
+		assert.equal(sends[0].body.msgtype, "template_card");
+		assert.doesNotMatch(JSON.stringify(sends), /NO-LINKED-FALLBACK/);
+	});
+
+test("a linked result prepared offline stays document-only after switching to inline and reconnecting", async (t) => {
+	await documentStart(docService(t));
+	const notices: string[] = [];
+	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
+	idle = false;
+	await sendNotification({
+		chatid: "test-user",
+		content: "通知标题\n\nFROZEN-DOCUMENT-ONLY-BODY",
+		after_settle: true,
+	});
+	ws.close();
+	idle = true;
+	await emit("agent_settled", { aborted: false });
+	await command("config --scope session set contentDisplay=inline", ctx);
+	clock.tick(1000);
+	ws = FakeWebSocket.instances.at(-1)!;
+	const acknowledge = ws.onSend;
+	ws.onSend = (frame) => {
+		if (frame.body?.msgtype === "template_card") ws.acknowledge(frame, 40014);
+		else acknowledge?.(frame);
+	};
+	ws.open();
+	ws.acknowledge();
+	await until(() => notices.some((note) => note.includes("企微通知被拒绝")));
+	const sends = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(sends.length, 1);
+	assert.equal(sends[0].body.msgtype, "template_card");
+	assert.equal(sends[0].body.template_card.quote_area.url, PAGE_URL);
+	assert.doesNotMatch(JSON.stringify(sends), /FROZEN-DOCUMENT-ONLY-BODY/);
+	assert.equal(notified.at(-1)!.documentOnly, true);
 });
 
 test("contentDisplay is editable in every scope without reconnecting, and session overrides can be removed", async (t) => {
@@ -3136,19 +3245,20 @@ test("changing contentDisplay while connected affects the next card and the next
 	assert.match(promptSections.wecom, /document page in Markdown/);
 });
 
-test("an unreadable page record also falls back to the body without creating another document", async (t) => {
+test("an unreadable page record shows a problem without a body or a replacement document", async (t) => {
 	const doc = docService(t);
 	await documentStart(doc);
 	doc.calls.length = 0;
 	await writeFile(join(sandbox, "wecom-aibot", "session-doc.json"), "{broken");
 	await sendNotification({ chatid: "test-user", content: "RECORD-FAILURE-BODY" });
 	const [card] = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(card.body.template_card.quote_area.quote_text, "RECORD-FAILURE-BODY");
+	assert.match(card.body.template_card.quote_area.quote_text, /文档不可用/);
+	assert.doesNotMatch(card.body.template_card.quote_area.quote_text, /RECORD-FAILURE-BODY|权限|到期/);
 	assert.equal(card.body.template_card.quote_area.url, undefined);
 	assert.deepEqual(doc.calls, [], "an unreadable record must not be treated as an absent document");
 });
 
-test("a slow document write has a six-second card budget; late success cannot erase the fallback body", async (t) => {
+test("a slow document write publishes a timeout quote; late success needs a click to update the card", async (t) => {
 	const doc = docService(t);
 	await documentStart(doc);
 	doc.calls.length = 0;
@@ -3165,14 +3275,16 @@ test("a slow document write has a six-second card budget; late success cannot er
 		clock.tick(6_000);
 		await pending;
 		const [card] = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-		assert.equal(card.body.template_card.quote_area.quote_text, "TIMEOUT-BODY");
+		assert.match(card.body.template_card.quote_area.quote_text, /文档写入超时/);
+		assert.doesNotMatch(card.body.template_card.quote_area.quote_text, /TIMEOUT-BODY|权限|到期/);
 		assert.equal(card.body.template_card.quote_area.url, undefined);
 		release();
 		await drain();
+		assert.match(card.body.template_card.quote_area.quote_text, /文档写入超时/, "the sent snapshot stays unchanged");
 		clickCard(card, "refresh");
 		await answered();
-		assert.equal(lastUpdate().body.template_card.quote_area.quote_text, "TIMEOUT-BODY");
-		assert.equal(lastUpdate().body.template_card.quote_area.url, undefined);
+		assert.equal(lastUpdate().body.template_card.quote_area.quote_text, "initial screen");
+		assert.equal(lastUpdate().body.template_card.quote_area.url, PAGE_URL);
 		assert.equal(
 			ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length,
 			1,
@@ -3184,13 +3296,13 @@ test("a slow document write has a six-second card budget; late success cannot er
 });
 
 for (const failure of ["refused", "timeout"] as const)
-	test(`refreshing a document-backed result with a ${failure} write removes its old link and quotes its own body`, async (t) => {
+	test(`a ${failure} document refresh replaces the old link with its problem, never the reply body`, async (t) => {
 		const failures: Record<string, number> = {};
 		const doc = docService(t, failures);
 		const { fixture } = await documentStart(doc);
 		await sendNotification({ chatid: "test-user", content: "ORIGINAL-CARD-BODY" });
 		const card = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1)!;
-		fixture.state.lines = ["NEW-SCREEN-MUST-NOT-REPLACE-THE-BODY"];
+		fixture.state.lines = ["RECOVERED-TERMINAL"];
 		doc.calls.length = 0;
 		let release = () => {};
 		if (failure === "refused") failures.smartpage_pages_overwrite = 851008;
@@ -3201,19 +3313,22 @@ for (const failure of ["refused", "timeout"] as const)
 			if (failure === "timeout") clock.tick(3_300);
 			await answered();
 			assert.match(noteOf(lastUpdate()), /文档写入失败/);
-			assert.equal(lastUpdate().body.template_card.quote_area.quote_text, "ORIGINAL-CARD-BODY");
+			assert.match(
+				lastUpdate().body.template_card.quote_area.quote_text,
+				failure === "refused" ? /权限不足或授权已到期/ : /写入超时/,
+			);
+			assert.doesNotMatch(
+				lastUpdate().body.template_card.quote_area.quote_text,
+				/ORIGINAL-CARD-BODY|RECOVERED-TERMINAL/,
+			);
 			assert.equal(lastUpdate().body.template_card.quote_area.url, undefined);
 			release();
 			delete failures.smartpage_pages_overwrite;
 			await sendNotification({ chatid: "test-user", content: "A-NEWER-HEALTHY-CARD" });
 			clickCard(card, "model");
 			await drain();
-			assert.equal(lastUpdate().body.template_card.quote_area.quote_text, "ORIGINAL-CARD-BODY");
-			assert.equal(
-				lastUpdate().body.template_card.quote_area.url,
-				undefined,
-				"a fallback is not undone by another card",
-			);
+			assert.equal(lastUpdate().body.template_card.quote_area.quote_text, "RECOVERED-TERMINAL");
+			assert.equal(lastUpdate().body.template_card.quote_area.url, PAGE_URL, "a redraw uses the recovered page");
 		} finally {
 			release();
 		}

@@ -415,6 +415,26 @@ test("IPC reports an explicit WeCom rejection without treating it as retryable",
 	await rejected;
 });
 
+test("IPC preserves document-only delivery: a rejected linked card cannot become a body message", async () => {
+	await startServer();
+	const a = client("A");
+	a.connection.start();
+	await until(() => a.connection.isReady(), "A ready");
+	autoAcknowledge = false;
+	const rejected = assert.rejects(
+		a.connection.notify(user, { ...notification("A", "DOCUMENT-ONLY-BODY"), documentOnly: true }),
+		{ outcome: "rejected" },
+	);
+	const ws = FakeWebSocket.instances[0];
+	const pushes = () => ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	await until(() => pushes().length === 1, "linked card attempted");
+	ws.acknowledge(pushes()[0], 40014);
+	await rejected;
+	assert.equal(pushes().length, 1);
+	assert.equal(pushes()[0].body.msgtype, "template_card");
+	assert.doesNotMatch(JSON.stringify(pushes()), /DOCUMENT-ONLY-BODY/);
+});
+
 test("an unconfirmed send in an exiting pi cannot resolve another pi's notification", async () => {
 	await startServer();
 	const a = client("A");

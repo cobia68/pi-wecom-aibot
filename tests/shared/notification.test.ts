@@ -87,6 +87,8 @@ test("pi's payload is bounded for IPC and carries only the options it was given"
 	assert.equal(payload.text.includes("\ufffd"), false);
 	assert.equal(payload.title, "✅ 完成");
 	assert.equal(payload.aborted, true);
+	assert.equal(notificationPayload("notice", source, "body", { documentOnly: true }).documentOnly, true);
+	assert.equal(notificationPayload("notice", source, "body").documentOnly, undefined);
 	assert.deepEqual(notificationPayload("notice", source, "正文"), { kind: "notice", source, text: "正文" });
 	assert.throws(() => notificationPayload("notice", source, "   "), /没有可发送的文本/);
 	assert.throws(() => notificationPayload("notice", { ...source, sessionId: "bad id" }, "正文"), /session_id/);

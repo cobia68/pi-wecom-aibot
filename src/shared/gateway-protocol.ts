@@ -15,7 +15,8 @@ import type { DeliveryFailure } from "./delivery.ts";
 import type { GatewayNotification, SessionSource } from "./notification-types.ts";
 import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComState } from "./wecom-protocol.ts";
 
-export const GATEWAY_PROTOCOL_VERSION = 14;
+// Peers must enforce documentOnly; an older gateway could silently send a linked reply as Markdown.
+export const GATEWAY_PROTOCOL_VERSION = 15;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;
 const IPC_MAX_BYTES = 1_048_576;
@@ -241,6 +242,7 @@ function validNotification(value: unknown): value is GatewayNotification {
 		(notification.title === undefined ||
 			(typeof notification.title === "string" && notification.title.length <= 1024)) &&
 		(notification.aborted === undefined || typeof notification.aborted === "boolean") &&
+		(notification.documentOnly === undefined || typeof notification.documentOnly === "boolean") &&
 		// Every kind may be its session's control card: a result, a wecom_send notice, the deployment test.
 		(notification.control === undefined ||
 			(isControlCardId(notification.control.cardId) && validCardModel(notification.control.card)))

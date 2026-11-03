@@ -78,7 +78,7 @@ export function notificationPayload(
 	kind: NotificationKind,
 	source: SessionSource,
 	text: string,
-	options: Pick<GatewayNotification, "title" | "aborted" | "control"> = {},
+	options: Pick<GatewayNotification, "title" | "aborted" | "control" | "documentOnly"> = {},
 ): GatewayNotification {
 	if (!text.trim()) throw new Error("当前 pi 会话没有可发送的文本回复");
 	validateSessionId(source.sessionId);
@@ -92,6 +92,7 @@ export function notificationPayload(
 		text: bounded,
 		...(options.title?.trim() ? { title: options.title.trim() } : {}),
 		...(options.aborted ? { aborted: true } : {}),
+		...(options.documentOnly ? { documentOnly: true } : {}),
 		...(options.control ? { control: options.control } : {}),
 	};
 }

@@ -13,11 +13,13 @@ test("every run WeCom reads is told its answer becomes a card that may offer nex
 	assert.equal(turnGuidance(undefined), undefined, "a terminal run nobody reports gets nothing");
 });
 
-test("guidance describes the selected display honestly and prepares every answer for the three-line fallback", () => {
+test("guidance describes inline summaries and linked failure notices without promising a linked fallback", () => {
 	for (const origin of ["message", "card", "local"] as const) {
 		const linked = turnGuidance(origin, "linked")!;
 		assert.match(linked, /document page in Markdown/);
-		assert.match(linked, /falls back to a plain-text quote/);
+		assert.match(linked, /quote shows the reason and recovery instructions/);
+		assert.match(linked, /never falls back/);
+		assert.doesNotMatch(linked, /falls back to a plain-text quote/);
 		const inline = turnGuidance(origin, "inline")!;
 		assert.match(inline, /not a document page or a separate Markdown message/);
 		assert.match(inline, /code blocks become \[代码\]/);

@@ -159,6 +159,8 @@ test("every client frame the gateway consumes is validated before use", () => {
 	assert.equal(notify({ kind: "reply", source, text: "b" }), false, "a retired kind");
 	assert.equal(notify({ kind: "result", source, text: "b", title: 7 }), false);
 	assert.equal(notify({ kind: "result", source, text: "b", aborted: "yes" }), false);
+	assert.equal(notify({ kind: "result", source, text: "b", documentOnly: true }), true);
+	assert.equal(notify({ kind: "result", source, text: "b", documentOnly: "yes" }), false);
 	// Every kind may be its session's control card.
 	const control = { cardId: controlCardId(source.sessionId), card: sessionControlCard(source, { status: "idle" }) };
 	for (const kind of ["result", "notice", "test"]) assert.equal(notify({ kind, source, text: "b", control }), true);

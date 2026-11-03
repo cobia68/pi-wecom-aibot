@@ -84,11 +84,9 @@ interface ClickAnswer {
 }
 
 interface CardContent {
-	/** A bounded, masked, plain-text opening; never a whole unbounded reply. */
-	quote: string;
+	/** An inline card's bounded, masked opening; linked never retains a preview to fall back to. */
+	quote?: string;
 	steps: readonly string[];
-	/** Only a page that this publication successfully wrote. Missing means this card stays a text quote. */
-	pageUrl?: string;
 }
 
 interface BridgeTask {
@@ -196,6 +194,7 @@ export class BridgeSession {
 			isReady: () => this.client.isReady(),
 			subscription: () => this.subscription,
 			context: () => this.host.context(),
+			documentOnly: () => this.host.settings().contentDisplay === "linked",
 			send: (chat, notification) => this.client.notify(chat, notification),
 			controlCard: (ctx, chat, notification, outcome, steps) =>
 				this.publishedCard(ctx, chat, notification, outcome, steps),
@@ -493,12 +492,11 @@ export class BridgeSession {
 			modelPage?: number;
 		} = {},
 	): CardModel {
-		const pageUrl = this.page.url();
+		const linked = this.host.settings().contentDisplay === "linked";
+		const page = linked ? this.page.view() : undefined;
 		const icon = this.page.icon();
 		const content = options.cardId ? this.cardContents.get(options.cardId) : undefined;
-		// Once a card falls back, keep its body: another card's successful write must not erase this one's quote.
-		if (content && content.pageUrl !== pageUrl) content.pageUrl = undefined;
-		const bodyQuote = content && !content.pageUrl ? this.host.maskText(content.quote) : undefined;
+		const bodyQuote = !linked && content?.quote !== undefined ? this.host.maskText(content.quote) : undefined;
 		return sessionControlCard(captureSessionSource(ctx), {
 			status: options.status ?? this.controlStatus(options.viewer, options.chat),
 			prompts: this.promptsFor(options.cardId),
@@ -513,12 +511,12 @@ export class BridgeSession {
 				: {}),
 			...(icon ? { icon } : {}),
 			...(this.screen ? { screen: this.screen } : {}),
-			...(pageUrl ? { pageUrl } : {}),
+			...page,
 			...(bodyQuote !== undefined ? { bodyQuote } : {}),
 		});
 	}
 
-	/** Freeze the terminal and body now, then wait for this page write before choosing the card's display. */
+	/** Freeze the chosen display and terminal now; linked publishes a page or a problem, never a body quote. */
 	private async publishedCard(
 		ctx: ExtensionContext,
 		chat: ChatRef,
@@ -529,7 +527,11 @@ export class BridgeSession {
 		if (this.identifyOnly || this.disposed) return undefined;
 		this.readScreen(ctx);
 		const cardId = controlCardId(this.sessionId);
-		const content: CardContent = { quote: quoteHead(this.host.maskText(notification.text)), steps: [...steps] };
+		const text = this.host.maskText(notification.text);
+		const content: CardContent = {
+			steps: [...steps],
+			...(!notification.documentOnly ? { quote: quoteHead(text) } : {}),
+		};
 		this.rememberCard(cardId, content);
 		const view: ControlView = {
 			status: outcome ?? (this.busy ? "running" : "idle"),
@@ -538,15 +540,16 @@ export class BridgeSession {
 			...(this.screen ? { screen: this.screen } : {}),
 		};
 		const at = new Date();
-		const pageUrl = await this.page.publish(ctx, chat, notification);
+		const page = notification.documentOnly
+			? ((await this.page.publish(ctx, chat, notification)) ?? { pageProblem: "文档配置已改变，请点「刷新卡片」" })
+			: undefined;
 		if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId) return undefined;
-		content.pageUrl = pageUrl;
 		const icon = this.page.icon();
 		const card = sessionControlCard(notification.source, {
 			...view,
-			status: !outcome && !pageUrl && this.page.problem ? "doc-problem" : view.status,
+			status: !outcome && page?.pageProblem ? "doc-problem" : view.status,
 			...(icon ? { icon } : {}),
-			...(pageUrl ? { pageUrl } : { bodyQuote: content.quote }),
+			...(page ?? { bodyQuote: content.quote }),
 		});
 		const note = notification.kind === "result" ? (notification.title ?? "本轮结果") : noteOf(notification);
 		return { cardId, card: withNote(card, note, at) };
@@ -859,11 +862,12 @@ export class BridgeSession {
 				throw new Error("pi 会话已停止或切换，已取消通知");
 		};
 		validate();
-		const control = await this.publishedCard(ctx, chat, notification, undefined, options.steps);
+		const prepared = { ...notification, documentOnly: this.host.settings().contentDisplay === "linked" };
+		const control = await this.publishedCard(ctx, chat, prepared, undefined, options.steps);
 		// A document write may outlive the tool call or the registration: never send after either was cancelled.
 		validate();
 		signal.throwIfAborted();
-		await this.client.notify(chat, control ? { ...notification, control } : notification);
+		await this.client.notify(chat, control ? { ...prepared, control } : prepared);
 	}
 
 	// ---------------------------------------------------------------- whoami
