@@ -8,6 +8,12 @@ export interface SessionSource {
 	readonly directoryName: string;
 }
 
+/** A retained card's visible reply and its producing model, never a later session reply or terminal capture. */
+export interface ReplySnapshot {
+	readonly source: SessionSource;
+	readonly text: string;
+}
+
 /**
  * result: a run's automatic answer; notice: wecom_send; test: /wecom-aibot test.
  * pi sends each as its session's control card (control). Without a card, or when WeCom refuses it, only

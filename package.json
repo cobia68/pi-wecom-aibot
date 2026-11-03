@@ -40,6 +40,7 @@
     "probe:cards": "node --import tsx scripts/card-probe.ts"
   },
   "dependencies": {
+    "@resvg/resvg-wasm": "2.6.2",
     "ws": "^8.22.0"
   },
   "peerDependencies": {

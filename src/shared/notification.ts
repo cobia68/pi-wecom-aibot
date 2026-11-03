@@ -1,3 +1,4 @@
+import { markdownParts } from "./markdown-parts.ts";
 import type { GatewayNotification, NotificationKind, SessionSource } from "./notification-types.ts";
 
 export const MAX_NOTIFICATION_BYTES = 20_480;
@@ -25,11 +26,26 @@ const NOTIFICATION_ICONS = { model: "🏷️", session: "🆔", directory: "📁
  * message reaches that pi. Cut from the end to fit WeCom's byte limit.
  */
 export function sessionMarkdown(source: SessionSource, body: string, suffix = ""): string {
-	validateSessionId(source.sessionId);
-	const header = `${NOTIFICATION_ICONS.session} session: ${markdownValue(source.sessionId)}  \n${NOTIFICATION_ICONS.model} ${markdownValue(source.directoryName)} · ${markdownValue(source.provider)} · ${markdownValue(source.modelName)}\n\n`;
+	const header = markdownHeader(source);
 	const budget = MAX_NOTIFICATION_BYTES - Buffer.byteLength(header + suffix, "utf8");
 	if (budget < 64) throw new Error("通知来源信息过长，无法容纳正文");
 	return header + truncateContent(body.trim() || NO_REPLY_TEXT, budget) + suffix;
+}
+
+/** The retained reply in full, numbered when split; every part can be quoted back to its producing session. */
+export function sessionMarkdownParts(source: SessionSource, body: string): string[] {
+	const header = markdownHeader(source);
+	// Reserve room for the part counter before splitting, so it never causes truncation afterwards.
+	const budget = MAX_NOTIFICATION_BYTES - Buffer.byteLength(header) - 64;
+	const parts = markdownParts(body.trim() || NO_REPLY_TEXT, budget);
+	return parts.map(
+		(part, index) => header + (parts.length > 1 ? `**全文 ${index + 1}/${parts.length}**\n\n` : "") + part,
+	);
+}
+
+function markdownHeader(source: SessionSource): string {
+	validateSessionId(source.sessionId);
+	return `${NOTIFICATION_ICONS.session} session: ${markdownValue(source.sessionId)}  \n${NOTIFICATION_ICONS.model} ${markdownValue(source.directoryName)} · ${markdownValue(source.provider)} · ${markdownValue(source.modelName)}\n\n`;
 }
 
 /** A short line naming the session, for notes the gateway or pi send outside a card. */

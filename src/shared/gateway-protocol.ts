@@ -83,6 +83,13 @@ export interface BridgeResponse {
 	userids?: string[];
 }
 
+/** A private, short-lived rendered PNG. Bytes stay out of the bounded IPC frame. The sender cleans it up. */
+export interface GatewayImage {
+	mime: "image/png";
+	filename: string;
+	path: string;
+}
+
 /** A control card, or a click's follow-up. The gateway owns rendering and acknowledged delivery. */
 export type PushItem = { kind: "markdown"; text: string } | { kind: "control"; cardId: string; card: CardModel };
 

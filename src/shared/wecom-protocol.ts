@@ -8,6 +8,13 @@ export type WeComState = "disconnected" | "connecting" | "connected" | "subscrib
 /** A command such as aibot_send_msg is acknowledged within this time, or its outcome is unknown. */
 export const WECOM_ACK_TIMEOUT_MS = 10_000;
 export const WECOM_REPLY_WINDOW_MS = 24 * 60 * 60_000;
+/** Long-connection temporary images: PNG/JPEG/GIF, 5 bytes–10 MiB, in chunks of at most 512 KiB. */
+export const WECOM_IMAGE_MIN_BYTES = 5;
+export const WECOM_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+export const WECOM_MEDIA_CHUNK_BYTES = 512 * 1024;
+/** Init + each chunk (with one safe retry) + finish + send, each with its own ACK deadline. */
+export const WECOM_IMAGE_SEND_TIMEOUT_MS =
+	(3 + 2 * Math.ceil(WECOM_IMAGE_MAX_BYTES / WECOM_MEDIA_CHUNK_BYTES)) * WECOM_ACK_TIMEOUT_MS;
 
 /** A conversation: chatId is the userid in a single chat (chatType 1), the group chatid otherwise. */
 export interface ChatRef {
