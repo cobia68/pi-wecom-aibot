@@ -23,6 +23,9 @@ test("guidance describes inline summaries and linked failure notices without pro
 		const inline = turnGuidance(origin, "inline")!;
 		assert.match(inline, /not a document page or a separate Markdown message/);
 		assert.match(inline, /code blocks become \[代码\]/);
+		assert.match(inline, /查看全文.*查看图片/);
+		assert.match(inline, /do not send extra messages automatically/);
+		assert.doesNotMatch(linked, /查看全文|查看图片/);
 		for (const text of [linked, inline]) assert.match(text, /first three short non-empty lines/);
 	}
 });

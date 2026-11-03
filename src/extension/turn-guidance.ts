@@ -15,7 +15,7 @@ const DISPLAY: Record<ContentDisplay, string> = {
 	linked:
 		"The answer is written to this session's document page in Markdown. If the document is unavailable, the card's quote shows the reason and recovery instructions, not an excerpt of the answer. linked never falls back to displaying or sending the body.",
 	inline:
-		"The card shows the answer's opening in its plain-text quote, not a document page or a separate Markdown message. Only three lines are visible on a phone; Markdown formatting is removed and code blocks become [代码].",
+		"The card shows the answer's opening in its plain-text quote, not a document page or a separate Markdown message. Only three lines are visible on a phone; Markdown formatting is removed and code blocks become [代码]. The user can click 查看全文 or 查看图片 to receive this card's saved full Markdown or rendered long images; do not send extra messages automatically.",
 };
 const SECRETS = "Never write secrets, tokens or the document address into it.";
 const NEXT =

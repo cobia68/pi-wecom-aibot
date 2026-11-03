@@ -4,6 +4,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { setImmediate as yieldToIo } from "node:timers/promises";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type {
 	ExtensionContext,
@@ -32,8 +33,8 @@ import type {
 	GatewayTask,
 	TaskState,
 } from "../shared/gateway-protocol.ts";
-import { NO_REPLY_TEXT, sessionNote } from "../shared/notification.ts";
-import type { GatewayNotification, SessionSource } from "../shared/notification-types.ts";
+import { ABORTED_SUFFIX, NO_REPLY_TEXT, sessionMarkdownParts, sessionNote } from "../shared/notification.ts";
+import type { GatewayNotification, ReplySnapshot, SessionSource } from "../shared/notification-types.ts";
 import { errorMessage, sentences } from "../shared/text.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 import { type Connection, connectionKey, type Settings } from "./config.ts";
@@ -51,6 +52,7 @@ import {
 	noteOf,
 	type RunOutcome,
 } from "./notification-outbox.ts";
+import { ReplyImageRenderer, withReplyImageFile } from "./reply-image/index.ts";
 import {
 	assistantReplyText,
 	captureModelIdentity,
@@ -69,7 +71,7 @@ const DISPATCH_REJECTED =
 const ABORT_CONFIRM_MS = 60_000;
 /** Pages of models remembered at once, one per viewer's copy of a card. */
 const MODEL_PAGES = 50;
-/** Published bodies and next steps remembered at once; older cards return to the terminal and controlPrompts. */
+/** Published snapshots remembered at once; older cards keep controls but can no longer reveal their replies. */
 const CARD_CONTENTS = 50;
 /** A task's first line in its result card's 窗口记录. */
 const SUBJECT_LENGTH = 24;
@@ -87,6 +89,8 @@ interface CardContent {
 	/** An inline card's bounded, masked opening; linked never retains a preview to fall back to. */
 	quote?: string;
 	steps: readonly string[];
+	/** Only an inline publication retains an on-demand reply. */
+	reply?: ReplySnapshot;
 }
 
 interface BridgeTask {
@@ -177,6 +181,9 @@ export class BridgeSession {
 	private readonly modelPages = new Map<string, number>();
 	/** Each published card's body preview and next steps, preserved through button redraws. */
 	private readonly cardContents = new Map<string, CardContent>();
+	/** One on-demand send at a time per registration, so repeated clicks cannot flood chats or rasterisers. */
+	private readingReply = false;
+	private readonly replyImages = new ReplyImageRenderer();
 	/** /wecom-aibot connect before the registration is ready: the first ready state publishes a card. */
 	private announceOnReady = false;
 
@@ -373,6 +380,10 @@ export class BridgeSession {
 					return { note: await this.refreshControl(ctx, click.userid) };
 				case CONTROL_KEYS.show:
 					return { note: `已切换到本会话；${await this.refreshControl(ctx, click.userid)}`, only: true };
+				case CONTROL_KEYS.fullText:
+					return this.readReply(click, "text");
+				case CONTROL_KEYS.image:
+					return this.readReply(click, "image");
 				case CONTROL_KEYS.send:
 					return this.choosePrompt(click);
 				case CONTROL_KEYS.confirmSend:
@@ -416,6 +427,81 @@ export class BridgeSession {
 	}
 
 	// ---------------------------------------------------------------- the control card
+
+	private readReply(click: CardClick, format: "text" | "image"): ClickAnswer {
+		if (this.host.settings().contentDisplay !== "inline")
+			return { note: "仅 inline 模式可用；当前为 linked", only: true };
+		const reply = click.cardId && this.cardContents.get(click.cardId)?.reply;
+		if (!reply) return { note: "本卡正文未保存或已过期，请使用新的 inline 结果卡", only: true };
+		if (this.readingReply) return { note: "已有全文或长图正在发送，请稍候再点", only: true };
+		this.readingReply = true;
+		void this.sendReply(click.chat, reply, format)
+			.catch((error: unknown) => {
+				if (this.disposed) return;
+				const reason = this.host.maskText(errorMessage(error));
+				this.host.log(`card reply ${format} failed: ${reason}`);
+				this.pushNote(click.chat, reason);
+			})
+			.finally(() => {
+				this.readingReply = false;
+			});
+		return {
+			note: format === "text" ? "已请求全文，将分段发到本聊天" : "已请求生成长图，请稍候查看本聊天",
+			only: true,
+		};
+	}
+
+	/** Acknowledge the click before slow work. Each send rechecks the registration and never retries uncertain delivery. */
+	private async sendReply(chat: ChatRef, snapshot: ReplySnapshot, format: "text" | "image"): Promise<void> {
+		const signal = this.lifetime.signal;
+		await yieldToIo(undefined, { signal });
+		let sent = 0;
+		const validate = () => {
+			signal.throwIfAborted();
+			if (this.host.context()?.sessionManager.getSessionId() !== this.sessionId)
+				throw new Error("pi 会话已切换，发送已取消");
+			if (this.host.settings().contentDisplay !== "inline") throw new Error("已切换为 linked，停止发送");
+		};
+		try {
+			validate();
+			// Mask once at publication and again now, so newly configured secrets cannot escape through an old card.
+			const mask = (text: string) => this.host.maskText(text);
+			const reply: ReplySnapshot = {
+				text: mask(snapshot.text),
+				source: {
+					sessionId: mask(snapshot.source.sessionId),
+					provider: mask(snapshot.source.provider),
+					modelName: mask(snapshot.source.modelName),
+					directoryName: mask(snapshot.source.directoryName),
+				},
+			};
+			if (format === "text") {
+				for (const text of sessionMarkdownParts(reply.source, reply.text)) {
+					validate();
+					await this.client.push(chat, { kind: "markdown", text });
+					sent++;
+				}
+			} else {
+				for await (const image of this.replyImages.render(reply, signal)) {
+					validate();
+					await withReplyImageFile(image, async (file) => {
+						validate();
+						await this.client.push(chat, { kind: "image", image: file });
+					});
+					sent++;
+				}
+			}
+		} catch (error) {
+			const kind = format === "text" ? "全文" : "长图";
+			const progress = sent ? `（已确认 ${sent} ${format === "text" ? "段" : "张"}）` : "";
+			const uncertain = deliveryFailure(error) === "unknown" && error instanceof DeliveryError;
+			throw new Error(
+				`${kind}${uncertain ? "送达未确认" : "发送失败"}${progress}：${errorMessage(error)}；${
+					uncertain ? "为避免重复，不自动重发，请先检查聊天" : "未自动重试，可稍后重试或点「查看全文」"
+				}`,
+			);
+		}
+	}
 
 	private choosePrompt(click: CardClick): ClickAnswer {
 		if (!this.promptsFor(click.cardId).length) return { note: "没有提示词：先在 pi 里设置 controlPrompts" };
@@ -501,6 +587,7 @@ export class BridgeSession {
 			status: options.status ?? this.controlStatus(options.viewer, options.chat),
 			prompts: this.promptsFor(options.cardId),
 			queued: this.waiting,
+			readable: !!content?.reply && !linked,
 			...(options.choosing ? { choosing: options.choosing } : {}),
 			...(options.choosing === "model"
 				? {
@@ -530,11 +617,20 @@ export class BridgeSession {
 		const text = this.host.maskText(notification.text);
 		const content: CardContent = {
 			steps: [...steps],
-			...(!notification.documentOnly ? { quote: quoteHead(text) } : {}),
+			...(!notification.documentOnly
+				? {
+						quote: quoteHead(text),
+						reply: {
+							source: { ...notification.source },
+							text: text + (notification.aborted ? ABORTED_SUFFIX : ""),
+						},
+					}
+				: {}),
 		};
 		this.rememberCard(cardId, content);
 		const view: ControlView = {
 			status: outcome ?? (this.busy ? "running" : "idle"),
+			readable: !!content.reply,
 			prompts: this.promptsFor(cardId),
 			queued: this.waiting,
 			...(this.screen ? { screen: this.screen } : {}),

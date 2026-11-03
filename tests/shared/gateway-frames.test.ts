@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import type { Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { sessionControlCard } from "../../src/extension/control-view.ts";
@@ -172,7 +174,18 @@ test("every client frame the gateway consumes is validated before use", () => {
 	const push = (item: unknown) =>
 		parseClientFrame({ type: "push", id: "1", chat: { chatId: "user", chatType: 1 }, item }).ok;
 	assert.equal(push({ kind: "markdown", text: "全文" }), true);
-	assert.equal(push({ kind: "image", image: { mime: "image/png", filename: "a.png", path: "/tmp/a.png" } }), false);
+	const image = { mime: "image/png", filename: "a.png", path: join(tmpdir(), "a.png") };
+	assert.equal(push({ kind: "image", image }), true);
+	for (const invalid of [
+		undefined,
+		{ ...image, mime: "image/jpeg" },
+		{ ...image, filename: "../secret.png" },
+		{ ...image, filename: "..\\secret.png" },
+		{ ...image, filename: "图".repeat(100) },
+		{ ...image, path: "relative.png" },
+		{ ...image, path: `${image.path}\0` },
+	])
+		assert.equal(push({ kind: "image", image: invalid }), false, JSON.stringify(invalid));
 	assert.equal(push({ kind: "file", text: "x" }), false);
 	assert.equal(parseClientFrame({ type: "nonsense" }).ok, false);
 });

@@ -85,6 +85,11 @@ test("pi's payload is bounded for IPC and carries only the options it was given"
 	});
 	assert.ok(Buffer.byteLength(payload.text) <= 256 * 1024);
 	assert.equal(payload.text.includes("\ufffd"), false);
+	assert.match(
+		payload.text,
+		/内容过长已截断）$/,
+		"full-text readers must be told when the retained snapshot hit its limit",
+	);
 	assert.equal(payload.title, "✅ 完成");
 	assert.equal(payload.aborted, true);
 	assert.equal(notificationPayload("notice", source, "body", { documentOnly: true }).documentOnly, true);

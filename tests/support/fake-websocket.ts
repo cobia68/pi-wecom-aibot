@@ -33,7 +33,7 @@ export class FakeWebSocket {
 		this.onmessage?.({ data: JSON.stringify(frame) });
 	}
 
-	acknowledge(frame = this.sent.at(-1), errcode = 0): void {
-		this.receive({ headers: frame.headers, errcode, errmsg: errcode ? "rejected" : "ok" });
+	acknowledge(frame = this.sent.at(-1), errcode = 0, body?: unknown): void {
+		this.receive({ headers: frame.headers, errcode, errmsg: errcode ? "rejected" : "ok", ...(body ? { body } : {}) });
 	}
 }

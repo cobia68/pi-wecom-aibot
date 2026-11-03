@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { sessionControlCard } from "../../src/extension/control-view.ts";
 import { GatewayClient, type GatewayClientOptions } from "../../src/extension/gateway-client.ts";
+import { withReplyImageFile } from "../../src/extension/reply-image/index.ts";
 import { type GatewayServer, startGatewayServer } from "../../src/gateway/server.ts";
 import { controlCardFor, controlCardId, controlKey } from "../../src/shared/control-card.ts";
 import {
@@ -270,6 +272,63 @@ test("a registration arriving during the idle grace period retains the same gate
 	await until(() => b.connection.isReady(), "B ready");
 	assert.equal(FakeWebSocket.instances.length, 1);
 	await b.connection.notify(user, notification("B"));
+});
+
+test("IPC carries a private image path and allows upload ACKs to take longer than a single-message deadline", async (t) => {
+	await startServer();
+	const a = client("A");
+	a.connection.start();
+	await until(() => a.connection.isReady(), "ready");
+	const ws = FakeWebSocket.instances[0];
+	const acknowledge = ws.onSend;
+	const uploads: any[] = [];
+	ws.onSend = (frame) => {
+		if (frame.cmd.startsWith("aibot_upload_media_")) uploads.push(frame);
+		else acknowledge?.(frame);
+	};
+	const png = await readFile(new URL("../../src/extension/assets/pi-logo.png", import.meta.url));
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let finished = false;
+	let failure: unknown;
+	const pending = withReplyImageFile({ png, index: 0, total: 1 }, (image) =>
+		a.connection.push(user, { kind: "image", image }),
+	).then(
+		() => {
+			finished = true;
+		},
+		(error: unknown) => {
+			failure = error;
+		},
+	);
+	const waitFor = async (predicate: () => boolean) => {
+		const deadline = performance.now() + 4000;
+		while (!predicate()) {
+			assert.ok(performance.now() < deadline, "image IPC did not progress");
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+	};
+	try {
+		for (let stage = 0; stage < 3; stage++) {
+			await waitFor(() => uploads.length > stage);
+			t.mock.timers.tick(6000);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(failure, undefined, "image IPC must budget for every upload ACK, not just the final send");
+			assert.equal(finished, false);
+			ws.acknowledge(
+				uploads[stage],
+				0,
+				stage === 0 ? { upload_id: "upload" } : stage === 2 ? { media_id: "media" } : undefined,
+			);
+		}
+		await pending;
+		assert.equal(failure, undefined);
+		assert.equal(finished, true);
+		const image = ws.sent.find((frame) => frame.body?.msgtype === "image");
+		assert.deepEqual(image.body, { chatid: "user", chat_type: 1, msgtype: "image", image: { media_id: "media" } });
+	} finally {
+		a.connection.stop();
+		await pending;
+	}
 });
 
 test("a pi cannot send a notification labelled with another pi's session", async () => {

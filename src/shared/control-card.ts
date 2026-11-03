@@ -39,6 +39,8 @@ export const PUBLISH_KEY = "control";
 
 export const CONTROL_KEYS = {
 	refresh: "refresh",
+	fullText: "full-text",
+	image: "reply-image",
 	send: "send",
 	confirmSend: "send-confirm",
 	cancelSend: "send-cancel",

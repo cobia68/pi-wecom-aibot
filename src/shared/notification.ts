@@ -98,10 +98,8 @@ export function notificationPayload(
 ): GatewayNotification {
 	if (!text.trim()) throw new Error("当前 pi 会话没有可发送的文本回复");
 	validateSessionId(source.sessionId);
-	const bounded =
-		Buffer.byteLength(text, "utf8") <= MAX_NOTIFICATION_BODY_BYTES
-			? text
-			: sliceUtf8(text, MAX_NOTIFICATION_BODY_BYTES);
+	// Retained cards can expose this snapshot as full text: an over-limit body must say what was omitted.
+	const bounded = truncateContent(text, MAX_NOTIFICATION_BODY_BYTES);
 	return {
 		kind,
 		source: { ...source },

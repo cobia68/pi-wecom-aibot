@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -7,6 +8,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { MESSAGE_SOURCE_ENTRY } from "../../src/extension/message-source.ts";
+import { ReplyImageRenderer } from "../../src/extension/reply-image/index.ts";
 import { clamp } from "../../src/shared/card.ts";
 import {
 	CONTROL_KEYS,
@@ -16,7 +18,9 @@ import {
 	parseControlKey,
 	sessionFingerprint,
 } from "../../src/shared/control-card.ts";
-import type { GatewayNotification } from "../../src/shared/notification-types.ts";
+import type { PushItem } from "../../src/shared/gateway-protocol.ts";
+import { MAX_NOTIFICATION_BYTES } from "../../src/shared/notification.ts";
+import type { GatewayNotification, ReplySnapshot } from "../../src/shared/notification-types.ts";
 import type { ChatRef } from "../../src/shared/wecom-protocol.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
 import { LoopbackClient } from "../support/loopback-client.ts";
@@ -420,6 +424,18 @@ beforeEach(async (t) => {
 			new LoopbackClient(options, (url) => {
 				const socket = new FakeWebSocket(url);
 				socket.onSend = (frame) => {
+					if (frame.cmd.startsWith("aibot_upload_media_")) {
+						socket.acknowledge(
+							frame,
+							0,
+							frame.cmd === "aibot_upload_media_init"
+								? { upload_id: "upload" }
+								: frame.cmd === "aibot_upload_media_finish"
+									? { media_id: "media" }
+									: undefined,
+						);
+						return;
+					}
 					if (
 						frame.cmd === "ping" ||
 						frame.cmd === "aibot_respond_msg" ||
@@ -1171,8 +1187,8 @@ test("an extracted reply's first three lines are quoted, never its thinking or t
 	assert.doesNotMatch(JSON.stringify(frame.body), /PRIVATE-/);
 	ws.acknowledge(frame);
 	await pending;
-	// The controls remain available; no second message is pushed into the chat.
-	assert.deepEqual(buttons(frame), ["refresh", "send", "model", "abort"]);
+	// The controls remain available; no second message is pushed until a read button is clicked.
+	assert.deepEqual(buttons(frame), ["refresh", "send", "full-text", "reply-image", "model", "abort"]);
 });
 
 test("explicit content is headed by its first line on the card, which pushes nothing more into the chat", async () => {
@@ -1185,7 +1201,7 @@ test("explicit content is headed by its first line on the card, which pushes not
 	assertCard(card);
 	assert.equal(noteOf(card), "📣 部署成功", "窗口记录 names the notice");
 	assert.equal(card.body.template_card.source.desc, "空闲", "the session's live state");
-	assert.deepEqual(buttons(card), ["refresh", "send", "model", "abort"]);
+	assert.deepEqual(buttons(card), ["refresh", "send", "full-text", "reply-image", "model", "abort"]);
 	assert.equal(notified.at(-1)!.text, body, "the whole body goes with it, for a refused card's Markdown");
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
 });
@@ -2527,7 +2543,7 @@ test("the test card is the control card; its abort acts on the live session", as
 	const card = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
 	assertCard(card);
 	assert.equal(noteOf(card), "🧪 部署测试：点任一按钮验证回调");
-	assert.deepEqual(buttons(card), ["refresh", "send", "model", "abort"]);
+	assert.deepEqual(buttons(card), ["refresh", "send", "full-text", "reply-image", "model", "abort"]);
 	ws.sent.length = 0;
 	clickCard(card, "refresh");
 	await drain();
@@ -2620,6 +2636,236 @@ test("without a document a notification quotes its body, and button redraws keep
 		assert.equal(lastUpdate().body.template_card.quote_area.url, undefined, action);
 	}
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1, "no extra Markdown message");
+});
+
+test("查看全文 sends the clicked card's complete masked reply and original model, not the latest reply", async () => {
+	const body = `FIRST-CARD\n\n${"中文🙂 line\n".repeat(5000)}\nEND-FIRST test-secret`;
+	await sendNotification({ chatid: "test-user", content: `${body}\n<!-- wecom_next ["PRIVATE-NEXT-STEP"] -->` });
+	const card = ws.sent.find((frame) => frame.cmd === "aibot_send_msg")!;
+	ctx.model = { ...ctx.model!, ...modelB };
+	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "LATEST-REPLY" }] } });
+	await sendNotification({ chatid: "test-user", content: "SECOND-CARD" });
+	ws.sent.length = 0;
+	clickCard(card, "full-text");
+	await until(() => ws.sent.some((frame) => frame.body?.markdown?.content?.includes("END-FIRST")));
+	await drain();
+	assert.equal(ws.sent[0].cmd, "aibot_respond_update_msg", "acknowledge the click before sending the reply");
+	assert.match(noteOf(ws.sent[0]), /已请求全文/);
+	const messages = ws.sent.filter((frame) => frame.body?.msgtype === "markdown");
+	assert.ok(messages.length > 1);
+	for (const frame of messages) {
+		assert.equal(frame.body.chatid, "test-user");
+		assert.equal(frame.body.chat_type, 1);
+		assert.ok(Buffer.byteLength(frame.body.markdown.content) <= MAX_NOTIFICATION_BYTES);
+		assert.match(frame.body.markdown.content, /^🆔 session: pi-session-1/);
+		assert.match(frame.body.markdown.content, /test-provider · Model A/);
+	}
+	const text = messages.map((frame) => frame.body.markdown.content).join("\n");
+	assert.equal((text.match(/中文🙂 line/g) ?? []).length, 5000);
+	assert.match(text, /FIRST-CARD/);
+	assert.match(text, /END-FIRST \*+/);
+	assert.doesNotMatch(text, /LATEST-REPLY|SECOND-CARD|PRIVATE-NEXT-STEP|wecom_next|test-secret|Model B|\ufffd|已截断/);
+	assert.equal(sent.length, 0, "viewing the reply never calls the model");
+});
+
+test("查看图片 acknowledges immediately, renders the frozen reply without a terminal or document, and cleans every image", async (t) => {
+	const png = await readFile(new URL("../../src/extension/assets/pi-logo.png", import.meta.url));
+	const rendered: ReplySnapshot[] = [];
+	let release!: () => void;
+	const waiting = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	t.mock.method(ReplyImageRenderer.prototype, "render", async function* (reply: ReplySnapshot, signal: AbortSignal) {
+		rendered.push(reply);
+		await waiting;
+		signal.throwIfAborted();
+		yield { png, index: 0, total: 2 };
+		yield { png, index: 1, total: 2 };
+	});
+	const paths: string[] = [];
+	const push = LoopbackClient.prototype.push;
+	t.mock.method(LoopbackClient.prototype, "push", function (this: LoopbackClient, chat: ChatRef, item: PushItem) {
+		if (item.kind === "image") paths.push(item.image.path);
+		return push.call(this, chat, item);
+	});
+	await sendNotification({
+		chatid: "group-images",
+		chat_type: 2,
+		content: 'ORIGINAL\n\n```ts\nconst x = 1;\n```\nTAIL test-secret\n<!-- wecom_next ["HIDDEN-STEP"] -->',
+	});
+	const card = ws.sent.at(-1)!;
+	ctx.model = { ...ctx.model!, ...modelB };
+	ws.sent.length = 0;
+	clickCard(card, "reply-image");
+	try {
+		await until(() => rendered.length === 1);
+		assert.equal(ws.sent[0].cmd, "aibot_respond_update_msg");
+		assert.deepEqual(ws.sent[0].body.userids, ["test-user"]);
+		assert.match(noteOf(ws.sent[0]), /已请求生成长图/);
+		clock.tick(10_000);
+		clickCard(card, "reply-image");
+		await drain();
+		assert.match(noteOf(lastUpdate()), /已有全文或长图正在发送/);
+		assert.equal(rendered.length, 1, "repeated clicks do not start duplicate renders");
+		assert.equal(rendered[0].source.modelName, "Model A");
+		assert.equal(rendered[0].source.provider, "test-provider");
+		assert.match(rendered[0].text, /```ts\nconst x = 1;\n```\nTAIL \*+/);
+		assert.doesNotMatch(rendered[0].text, /test-secret|wecom_next|HIDDEN-STEP/);
+	} finally {
+		release();
+	}
+	await until(() => paths.length === 2 && paths.every((path) => !existsSync(path)));
+	const images = ws.sent.filter((frame) => frame.body?.msgtype === "image");
+	assert.equal(images.length, 2);
+	assert.ok(images.every((frame) => frame.body.chatid === "group-images" && frame.body.chat_type === 2));
+	assert.equal(
+		ws.sent.filter((frame) => frame.body?.msgtype === "markdown").length,
+		0,
+		"no unsolicited full-text fallback",
+	);
+	assert.equal(sent.length, 0);
+});
+
+test("linked without a document never enables reading or accepts forged read callbacks", async (t) => {
+	t.mock.method(ReplyImageRenderer.prototype, "render", () => assert.fail("linked must not render images"));
+	await command("config --scope session set contentDisplay=linked", ctx);
+	await sendNotification({ chatid: "test-user", content: "LINKED-DOCUMENT-BODY" });
+	const linked = ws.sent.at(-1)!;
+	assert.equal(linked.body.template_card.quote_area.url, undefined);
+	assert.match(linked.body.template_card.quote_area.quote_text, /未配置/);
+	assert.doesNotMatch(linked.body.template_card.quote_area.quote_text, /LINKED-DOCUMENT-BODY/);
+	assert.deepEqual(buttons(linked), ["refresh", "send", "model", "abort"]);
+	ws.sent.length = 0;
+	for (const action of ["full-text", "reply-image"]) {
+		clickCard(linked, action);
+		await drain();
+		assert.match(noteOf(lastUpdate()), /仅 inline 模式可用/);
+	}
+	await command("config --scope session set contentDisplay=inline", ctx);
+	clickCard(linked, "full-text");
+	await drain();
+	assert.match(noteOf(lastUpdate()), /本卡正文未保存或已过期/);
+	assert.equal(
+		ws.sent.some((frame) => frame.cmd === "aibot_send_msg"),
+		false,
+	);
+});
+
+test("an inline card refuses reading after switching to linked, but keeps its original body when switched back", async () => {
+	await sendNotification({ chatid: "test-user", content: "KEPT-INLINE-BODY" });
+	const card = ws.sent.at(-1)!;
+	await command("config --scope session set contentDisplay=linked", ctx);
+	ws.sent.length = 0;
+	clickCard(card, "full-text");
+	await drain();
+	assert.match(noteOf(lastUpdate()), /仅 inline 模式可用/);
+	assert.equal(buttons(lastUpdate()).includes("full-text"), false);
+	assert.equal(
+		ws.sent.some((frame) => frame.cmd === "aibot_send_msg"),
+		false,
+	);
+	await command("config --scope session set contentDisplay=inline", ctx);
+	clickCard(card, "full-text");
+	await until(() => ws.sent.some((frame) => frame.body?.markdown?.content?.includes("KEPT-INLINE-BODY")));
+	assert.equal(buttons(lastUpdate()).includes("reply-image"), true);
+});
+
+test("an expired card cannot reveal a newer reply, while the newest of 50 retained cards stays readable", async () => {
+	const cards: any[] = [];
+	for (let index = 0; index <= 50; index++) {
+		await sendNotification({ chatid: "test-user", content: `CARD-${index}-BODY` });
+		cards.push(ws.sent.at(-1));
+	}
+	ws.sent.length = 0;
+	clickCard(cards[0], "full-text");
+	await drain();
+	assert.match(noteOf(lastUpdate()), /本卡正文未保存或已过期/);
+	assert.equal(
+		ws.sent.some((frame) => frame.cmd === "aibot_send_msg"),
+		false,
+	);
+	clickCard(cards.at(-1), "full-text");
+	await until(() => ws.sent.some((frame) => frame.body?.markdown?.content?.includes("CARD-50-BODY")));
+});
+
+test("a render failure is reported with secrets masked, without sending a substitute reply", async (t) => {
+	t.mock.method(ReplyImageRenderer.prototype, "render", () => {
+		throw new Error("font error test-secret");
+	});
+	await sendNotification({ chatid: "test-user", content: "ORIGINAL-FULL-TEXT" });
+	const card = ws.sent.at(-1)!;
+	ws.sent.length = 0;
+	clickCard(card, "reply-image");
+	await until(() => ws.sent.some((frame) => frame.body?.markdown?.content?.includes("长图发送失败")));
+	const failures = ws.sent.filter((frame) => frame.body?.msgtype === "markdown");
+	assert.equal(failures.length, 1);
+	assert.match(failures[0].body.markdown.content, /font error \*+/);
+	assert.doesNotMatch(failures[0].body.markdown.content, /test-secret|ORIGINAL-FULL-TEXT/);
+	assert.equal(
+		ws.sent.some((frame) => frame.body?.msgtype === "image"),
+		false,
+	);
+	await drain();
+	clickCard(card, "full-text");
+	await until(() => ws.sent.some((frame) => frame.body?.markdown?.content?.includes("ORIGINAL-FULL-TEXT")));
+});
+
+test("a failed full-text part stops the remaining parts and reports how many were acknowledged", async () => {
+	await sendNotification({ chatid: "test-user", content: "FULL-BODY\n".repeat(9000) });
+	const card = ws.sent.at(-1)!;
+	const acknowledge = ws.onSend;
+	let parts = 0;
+	ws.onSend = (frame) => {
+		if (frame.body?.markdown?.content?.includes("**全文") && ++parts === 2) ws.acknowledge(frame, 40014);
+		else acknowledge?.(frame);
+	};
+	ws.sent.length = 0;
+	clickCard(card, "full-text");
+	await until(() => ws.sent.some((frame) => frame.body?.markdown?.content?.includes("已确认 1 段")));
+	assert.equal(parts, 2);
+	clock.tick(30_000);
+	await drain();
+	assert.equal(parts, 2, "no automatic resend after failure");
+});
+
+test("disconnect during slow image generation cancels the upload and old cards cannot substitute the new connection's reply", async (t) => {
+	const png = await readFile(new URL("../../src/extension/assets/pi-logo.png", import.meta.url));
+	let rendering: AbortSignal | undefined;
+	let release!: () => void;
+	const waiting = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	t.mock.method(ReplyImageRenderer.prototype, "render", async function* (_reply: ReplySnapshot, signal: AbortSignal) {
+		rendering = signal;
+		await waiting;
+		yield { png, index: 0, total: 1 };
+	});
+	await sendNotification({ chatid: "test-user", content: "OLD-CONNECTION" });
+	const card = ws.sent.at(-1)!;
+	clickCard(card, "reply-image");
+	await until(() => rendering !== undefined);
+	await command("disconnect", ctx);
+	assert.equal(rendering!.aborted, true);
+	release();
+	await drain();
+	assert.equal(
+		ws.sent.some((frame) => frame.cmd.startsWith("aibot_upload_media_")),
+		false,
+	);
+	await command("connect", ctx);
+	ws = FakeWebSocket.instances.at(-1)!;
+	ws.open();
+	ws.acknowledge();
+	await drain();
+	await sendNotification({ chatid: "test-user", content: "NEW-CONNECTION" });
+	ws.sent.length = 0;
+	clickCard(card, "full-text");
+	await drain();
+	assert.match(noteOf(lastUpdate()), /本卡正文未保存或已过期/);
+	assert.equal(
+		ws.sent.some((frame) => frame.cmd === "aibot_send_msg"),
+		false,
+	);
 });
 
 test("with a usable document wecom_send links the freshly written body and quotes the terminal", async (t) => {

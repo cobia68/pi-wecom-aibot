@@ -7,7 +7,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { Socket } from "node:net";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { agentDirectory, gatewayDirectory } from "./agent-path.ts";
 import { type CardModel, validCardModel } from "./card.ts";
 import { isControlCardId } from "./control-card.ts";
@@ -16,7 +16,7 @@ import type { GatewayNotification, SessionSource } from "./notification-types.ts
 import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComState } from "./wecom-protocol.ts";
 
 // Peers must enforce documentOnly; an older gateway could silently send a linked reply as Markdown.
-export const GATEWAY_PROTOCOL_VERSION = 15;
+export const GATEWAY_PROTOCOL_VERSION = 16;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;
 const IPC_MAX_BYTES = 1_048_576;
@@ -91,7 +91,10 @@ export interface GatewayImage {
 }
 
 /** A control card, or a click's follow-up. The gateway owns rendering and acknowledged delivery. */
-export type PushItem = { kind: "markdown"; text: string } | { kind: "control"; cardId: string; card: CardModel };
+export type PushItem =
+	| { kind: "markdown"; text: string }
+	| { kind: "image"; image: GatewayImage }
+	| { kind: "control"; cardId: string; card: CardModel };
 
 export interface ChatIdentity {
 	chatId: string;
@@ -260,6 +263,21 @@ function validPushItem(value: unknown): value is PushItem {
 	const item = value as PushItem | undefined;
 	if (!item || typeof item !== "object") return false;
 	if (item.kind === "markdown") return typeof item.text === "string" && Buffer.byteLength(item.text) <= 512 * 1024;
+	if (item.kind === "image") {
+		const image = item.image;
+		return (
+			!!image &&
+			image.mime === "image/png" &&
+			typeof image.filename === "string" &&
+			!!image.filename &&
+			Buffer.byteLength(image.filename) <= 256 &&
+			!/[\\/:*?"<>|\u0000-\u001f\u007f]/.test(image.filename) &&
+			typeof image.path === "string" &&
+			image.path.length <= 4096 &&
+			isAbsolute(image.path) &&
+			!/[\u0000-\u001f\u007f]/.test(image.path)
+		);
+	}
 	return item.kind === "control" && isControlCardId(item.cardId) && validCardModel(item.card);
 }
 

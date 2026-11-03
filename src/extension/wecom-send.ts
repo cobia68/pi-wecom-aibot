@@ -35,6 +35,7 @@ export function registerWecomSend(pi: ExtensionAPI, host: WecomSendHost): void {
 			"The contentDisplay configuration defaults to inline (the card's plain-text quote); linked uses the session's Markdown document page. " +
 			"In linked mode the quote (the terminal's last lines) links to the page. If the document is unavailable, the quote shows the reason and recovery instructions, including renewal for authorization failures; linked never falls back to displaying or sending the body. " +
 			"In inline mode, only the body's first three non-empty lines are shown; Markdown formatting is removed and code blocks become [代码]. No extra message is sent automatically. " +
+			"Only with contentDisplay=inline, users can click 查看全文 to receive this card's saved Markdown body or 查看图片 to receive locally rendered long PNG images; linked does not enable these buttons. " +
 			"The plugin adds the pi session, provider, model and working directory's final folder name; do not repeat them in content. " +
 			"The first line of content becomes the headline, so lead with the conclusion and put the essential result in the first three short lines. " +
 			"Use userid for single chat, chatid for group chat, or omit chatid to reply to the chat that sent the current WeCom task (local runs use the configured default target). " +

@@ -32,7 +32,7 @@ import {
 } from "../shared/gateway-protocol.ts";
 import type { GatewayNotification, SessionSource } from "../shared/notification-types.ts";
 import { errorMessage, sentences } from "../shared/text.ts";
-import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
+import { type ChatRef, WECOM_IMAGE_SEND_TIMEOUT_MS, type WeComState } from "../shared/wecom-protocol.ts";
 import type { Connection } from "./config.ts";
 
 const AUTH_FAILED = sentences(
@@ -163,11 +163,17 @@ export class GatewayClient implements BridgeClient {
 	}
 
 	push(chat: ChatRef, item: PushItem): Promise<void> {
-		return this.acknowledged((id) => ({ type: "push", id, chat, item }));
+		return this.acknowledged(
+			(id) => ({ type: "push", id, chat, item }),
+			item.kind === "image" ? WECOM_IMAGE_SEND_TIMEOUT_MS + 2_000 : IPC_SEND_TIMEOUT_MS,
+		);
 	}
 
 	/** A frame the gateway answers with result{id} once WeCom acknowledged what it sent. */
-	private acknowledged(frame: (id: string) => Extract<ClientFrame, { type: "notify" | "push" }>): Promise<void> {
+	private acknowledged(
+		frame: (id: string) => Extract<ClientFrame, { type: "notify" | "push" }>,
+		timeoutMs = IPC_SEND_TIMEOUT_MS,
+	): Promise<void> {
 		// The bridge owns "is this my session"; the gateway is the trust boundary that enforces it.
 		if (!this.isReady()) return Promise.reject(new DeliveryError("共享网关或企微连接未就绪", "not_sent"));
 		return new Promise((resolve, reject) => {
@@ -175,7 +181,7 @@ export class GatewayClient implements BridgeClient {
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
 				reject(new DeliveryError("网关通知确认超时，发送结果未知"));
-			}, IPC_SEND_TIMEOUT_MS);
+			}, timeoutMs);
 			this.pending.set(id, { resolve, reject, timer });
 			if (!writeFrame(this.socket!, frame(id))) {
 				clearTimeout(timer);

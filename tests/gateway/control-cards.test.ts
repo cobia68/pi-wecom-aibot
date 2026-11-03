@@ -258,6 +258,8 @@ test("control clicks obey the owner's allowlist before forwarding", async () => 
 	const before = ws().sent.length;
 	click(cardId, key(a, "refresh"), "bob");
 	click(cardId, key(a, "abort"), "bob");
+	click(cardId, key(a, "full-text"), "bob");
+	click(cardId, key(a, "reply-image"), "bob");
 	// Choosing a session the clicker may use acts on that one alone, never on the one the card shows.
 	click(cardId, key(a, "abort"), "bob", { selected: { session: fingerprintOf(b) } });
 	assert.equal(a.requests().length, 0);
@@ -265,6 +267,20 @@ test("control clicks obey the owner's allowlist before forwarding", async () => 
 	click(cardId, key(b, "refresh"), "alice", { selected: { session: fingerprintOf(b) } });
 	assert.equal(b.requests().length, 1, "alice may not use B: silence");
 	assert.equal(ws().sent.length, before);
+});
+
+test("the reading buttons also only switch the card when its dropdown names another session", async () => {
+	const a = add("A");
+	const b = add("B");
+	const { cardId } = await publish(a);
+	for (const action of ["full-text", "reply-image"] as const)
+		click(cardId, key(a, action), "alice", { selected: { session: fingerprintOf(b) } });
+	assert.equal(a.requests().length, 0);
+	assert.equal(b.requests().length, 2);
+	for (const frame of b.requests()) {
+		assert.ok(frame.request.action === "click");
+		assert.equal(frame.request.click.key, key(b, "show"), "no reply is read while switching sessions");
+	}
 });
 
 test("a refresh may take most of WeCom's five seconds; replies after that or after re-registering are ignored", async (t) => {

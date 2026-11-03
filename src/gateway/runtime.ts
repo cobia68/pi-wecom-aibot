@@ -65,6 +65,7 @@ import {
 	settledCard,
 } from "./ask-card.ts";
 import { helpText, parseWeComCommand, type WeComCommand } from "./command.ts";
+import { readReplyImage } from "./reply-image.ts";
 import { PICKER_QUESTION, type PickerAction, pageOf, pickerAction, sessionPicker } from "./session-picker.ts";
 import { SessionPoller } from "./session-poller.ts";
 import { sessionsText, withSessions } from "./session-view.ts";
@@ -324,7 +325,7 @@ export class WeComGateway {
 		await this.publishCard(client, member, chat, notification);
 	}
 
-	/** A session's control card, or a click's follow-up text; each control card is a new message. */
+	/** A session's control card, or a click's follow-up text/image; each is a new message. */
 	async push(instanceId: string, chat: ChatRef, item: PushItem): Promise<void> {
 		const { member, client } = this.publisher(instanceId);
 		member.active = ++this.activity;
@@ -332,6 +333,27 @@ export class WeComGateway {
 			if (!controlCardFor(item.cardId, member.source.sessionId))
 				throw new DeliveryError("控制卡不属于发送 pi 的 session", "rejected");
 			await this.sendControl(client, member, chat, item);
+			return;
+		}
+		if (item.kind === "image") {
+			// A stopped/replaced pi must not finish a slow upload into its former chat.
+			const validate = () => {
+				if (this.members.get(instanceId) !== member)
+					throw new DeliveryError("会话已离线或重新接入，长图已取消", "not_sent");
+			};
+			let mediaId: string;
+			try {
+				const data = await readReplyImage(item.image.path);
+				mediaId = await client.uploadImage(data, item.image.filename, validate);
+				validate();
+			} catch (error) {
+				// Even an unknown upload ACK cannot have delivered a chat message: sendMsg has not been called.
+				throw new DeliveryError(
+					`长图尚未发送：${errorMessage(error)}`,
+					deliveryFailure(error) === "rejected" ? "rejected" : "not_sent",
+				);
+			}
+			await client.sendMsg(chat.chatId, chat.chatType, { msgtype: "image", image: { media_id: mediaId } });
 			return;
 		}
 		if (Buffer.byteLength(item.text, "utf8") > MAX_NOTIFICATION_BYTES)

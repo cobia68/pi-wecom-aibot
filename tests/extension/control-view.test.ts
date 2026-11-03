@@ -17,6 +17,38 @@ function buttons(card: ReturnType<typeof sessionControlCard>): [string, string, 
 	});
 }
 
+test("an inline reply adds a reading pair without hiding controls or exceeding WeCom's six buttons", () => {
+	const card = sessionControlCard(source, { status: "done", bodyQuote: "摘要", readable: true });
+	assert.deepEqual(buttons(card), [
+		["refresh", "刷新卡片", 1],
+		["send", "发提示词", 2],
+		["full-text", "查看全文", 2],
+		["reply-image", "查看图片", 2],
+		["model", "切换模型", 2],
+		["abort", "中止任务", 3],
+	]);
+	const rendered = renderCard(card, "card");
+	assert.equal((rendered.button_list as unknown[]).length, 6);
+	for (const view of [
+		{ status: "done" as const, pageProblem: "文档不可用" },
+		{ status: "idle" as const },
+		{ status: "done" as const, pageUrl: "https://doc.weixin.qq.com/page" },
+	]) {
+		assert.equal(sessionControlCard(source, view).actions.length, 4);
+	}
+	for (const choosing of ["prompt", "model"] as const) {
+		const selected = sessionControlCard(source, {
+			status: "done",
+			readable: true,
+			choosing,
+			prompts: ["继续"],
+			models: [{ provider: "p", id: "m" }],
+		});
+		assert.equal(selected.actions.length, 2, "reading does not crowd the confirmation step");
+	}
+	assert.equal(sessionControlCard(source, { status: "confirming", readable: true, queued: 2 }).actions.length, 4);
+});
+
 test("the source line counts waiting tasks while live; a finished run's copy says only how it ended", () => {
 	assert.equal(sessionControlCard(source, { status: "running", queued: 2 }).label, "执行中 · 排队 2");
 	assert.equal(sessionControlCard(source, { status: "idle", queued: 0 }).label, "空闲");
@@ -163,11 +195,13 @@ test("a document problem replaces body and terminal quotes and removes the stale
 			pageProblem,
 			pageUrl: "https://doc.weixin.qq.com/stale",
 			bodyQuote: "PRIVATE-BODY",
+			readable: true,
 			screen: { at: new Date(), lines: ["PRIVATE-SCREEN"] },
 		});
 		assert.equal(card.quote, pageProblem);
 		assert.equal(card.quoteUrl, undefined);
 		assert.equal(card.subtitle, "🆔 session-id: session-A");
+		assert.ok(card.actions.every((action) => !["查看全文", "查看图片"].includes(action.text)));
 		const rendered = renderCard(card, "card");
 		assert.doesNotMatch(JSON.stringify(rendered), /PRIVATE-BODY|PRIVATE-SCREEN|https:\/\/doc/);
 		assert.deepEqual(rendered.quote_area, { quote_text: pageProblem });

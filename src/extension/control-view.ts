@@ -43,6 +43,8 @@ export interface ControlView {
 	pageProblem?: string;
 	/** This card's already-masked plain-text body preview, instead of the terminal; never linked to a page. */
 	bodyQuote?: string;
+	/** Only an inline publication with its own retained reply offers these read-only actions. */
+	readable?: boolean;
 	/** The session document's copy of pi's logo; the gateway draws a public one without it. */
 	icon?: string;
 	prompts?: readonly string[];
@@ -73,8 +75,8 @@ const QUOTE_LINES = 3;
 const QUOTE_LIMIT = 1500;
 
 /**
- * Buttons by step, always two or four (three in a row are cut): the frequent pair first, 中止任务 last; a
- * second step confirms on the left and cancels on the right.
+ * Buttons by step, always in pairs (three in a row are cut): the frequent pair first, 中止任务 last; a
+ * second step confirms on the left and cancels on the right. Inline replies add a reading pair in between.
  */
 const BUTTONS = {
 	normal: [
@@ -82,6 +84,10 @@ const BUTTONS = {
 		[CONTROL_KEYS.send, "发提示词", 2],
 		[CONTROL_KEYS.model, "切换模型", 2],
 		[CONTROL_KEYS.abort, "中止任务", 3],
+	],
+	read: [
+		[CONTROL_KEYS.fullText, "查看全文", 2],
+		[CONTROL_KEYS.image, "查看图片", 2],
 	],
 	confirming: [
 		[CONTROL_KEYS.confirmAbort, "确认中止", 3],
@@ -126,7 +132,11 @@ export function sessionControlCard(source: SessionSource, view: ControlView): Ca
 					? "model"
 					: "normal";
 	const paged = mode === "model" && models.pages > 1;
-	const buttons = paged ? [...BUTTONS.model, ...BUTTONS.pages] : BUTTONS[mode];
+	const buttons = paged
+		? [...BUTTONS.model, ...BUTTONS.pages]
+		: mode === "normal" && view.readable && !pageProblem
+			? [...BUTTONS.normal.slice(0, 2), ...BUTTONS.read, ...BUTTONS.normal.slice(2)]
+			: BUTTONS[mode];
 	const options = (items: readonly { id: string; text: string }[]) => items.map(({ id, text }) => ({ id, text }));
 	const own = sessionOption(source.sessionId, source.directoryName);
 	// 确认中止 acts on the session shown: no dropdown may point elsewhere while it is asked.
