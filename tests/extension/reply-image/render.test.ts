@@ -13,8 +13,6 @@ import {
 } from "../../../src/extension/reply-image/index.ts";
 import {
 	cellsToSvg,
-	contrast,
-	headerColors,
 	MAX_CONTENT_ROWS,
 	parseAnsiLine,
 	renderReplyPage,
@@ -22,8 +20,7 @@ import {
 } from "../../../src/extension/reply-image/render.ts";
 
 const metrics = { advance: 0.6, ascent: 0.8, descent: 0.2, lineGap: 0.2 };
-const palette = { accent: "#2357a3", muted: "#526170", warning: "#8f4000", link: "#075985", variable: "#5b21b6" };
-const options = { families: ["monospace"], metrics, foreground: "#182330", background: "#ffffff", palette };
+const options = { families: ["monospace"], metrics };
 const source = {
 	sessionId: "session-original",
 	provider: "original-provider",
@@ -31,7 +28,7 @@ const source = {
 	directoryName: "project",
 };
 
-test("the retired ANSI renderer preserves styles and wide graphemes but drops terminal links and image escape protocols", () => {
+test("the ANSI parser keeps the theme's styles and wide graphemes but drops terminal links and image escape protocols", () => {
 	const cells = parseAnsiLine(
 		"\x1b[1;3;4;9;38;2;1;2;3mA中👨‍👩‍👧e\u0301\x1b[0m!\x1b]8;;https://private.invalid\x07link\x1b]8;;\x07\x1b_Gpayload\x1b\\",
 	);
@@ -121,7 +118,7 @@ test("short images grow with content; overflowing pages fail instead of silently
 	assert.throws(() => replyImagePages("\n\n"), /没有可渲染/);
 });
 
-test("the original source appears in the header, with SVG icons and readable contrast", () => {
+test("the original source appears in the header, with SVG icons", () => {
 	const header = {
 		directory: source.directoryName,
 		provider: source.provider,
@@ -137,9 +134,6 @@ test("the original source appears in the header, with SVG icons and readable con
 	assert.match(svg, /#4D9ABF/);
 	assert.match(svg, /#F1BE58/);
 	assert.equal((svg.match(/viewBox="0 0 24 24"/g) ?? []).length, 4);
-	const colors = headerColors(options);
-	assert.ok(colors.values.every((value) => contrast(value, colors.band) >= 7));
-	assert.ok(contrast(colors.prefix, colors.band) >= 4.5);
 });
 
 test("missing Chinese fonts fail with guidance before rasterisation instead of sending an empty-glyph image", async () => {
@@ -169,8 +163,6 @@ test("real WASM produces a PNG with visible glyphs at a content-sized height", a
 	assert.ok(png.readUInt32BE(20) < 400, "short replies are not padded to a terminal-sized canvas");
 	const longer = Buffer.from(await renderReplyPage({ ...page, lines: [...page.lines, "second row"] }, { fonts }));
 	assert.ok(longer.readUInt32BE(20) > png.readUInt32BE(20));
-	const hidden = await renderReplyPage({ ...page, lines: ["\x1b[8mVisible A123 <code>"] }, { fonts });
-	assert.notDeepEqual(png, Buffer.from(hidden));
 });
 
 test("an already cancelled image read does not discover fonts or render", async () => {

@@ -9,32 +9,27 @@ import type { ReplySnapshot } from "../../shared/notification-types.ts";
 import { WECOM_IMAGE_MAX_BYTES } from "../../shared/wecom-protocol.ts";
 import { withoutNextSteps } from "../next-steps.ts";
 import { loadFonts } from "./fonts.ts";
-import { MAX_CONTENT_ROWS, type ReplyPage, renderReplyPage } from "./render.ts";
+import { COLORS, MAX_CONTENT_ROWS, type ReplyPage, renderReplyPage } from "./render.ts";
 
 export const REPLY_COLUMNS = 80;
 /** Avoid an unbounded render/upload run or flooding a chat; larger replies remain available as Markdown. */
 export const MAX_REPLY_IMAGE_PAGES = 20;
-const COLORS = {
-	foreground: "#182330",
-	background: "#ffffff",
-	palette: { accent: "#2357a3", muted: "#526170", warning: "#8f4000", link: "#075985", variable: "#5b21b6" },
-};
 const color = (hex: string) => {
 	const rgb = hex.match(/[0-9a-f]{2}/gi)!.map((part) => parseInt(part, 16));
 	return (text: string) => `\x1b[38;2;${rgb.join(";")}m${text}\x1b[39m`;
 };
 const style = (on: number, off: number) => (text: string) => `\x1b[${on}m${text}\x1b[${off}m`;
 const theme: MarkdownTheme = {
-	heading: (text) => style(1, 22)(color(COLORS.palette.accent)(text)),
-	link: color(COLORS.palette.link),
-	linkUrl: color(COLORS.palette.link),
-	code: color(COLORS.palette.variable),
+	heading: (text) => style(1, 22)(color(COLORS.accent)(text)),
+	link: color(COLORS.link),
+	linkUrl: color(COLORS.link),
+	code: color(COLORS.variable),
 	codeBlock: color(COLORS.foreground),
-	codeBlockBorder: color(COLORS.palette.muted),
-	quote: color(COLORS.palette.muted),
-	quoteBorder: color(COLORS.palette.accent),
-	hr: color(COLORS.palette.muted),
-	listBullet: color(COLORS.palette.accent),
+	codeBlockBorder: color(COLORS.muted),
+	quote: color(COLORS.muted),
+	quoteBorder: color(COLORS.accent),
+	hr: color(COLORS.muted),
+	listBullet: color(COLORS.accent),
 	bold: style(1, 22),
 	italic: style(3, 23),
 	strikethrough: style(9, 29),
@@ -54,7 +49,7 @@ export function replyImagePages(text: string): ReplyPage[] {
 		throw new Error(`正文超过 ${MAX_REPLY_IMAGE_PAGES} 张长图的上限，请点「查看全文」阅读`);
 	const pages: ReplyPage[] = [];
 	for (let offset = 0; offset < lines.length; offset += MAX_CONTENT_ROWS)
-		pages.push({ lines: lines.slice(offset, offset + MAX_CONTENT_ROWS), columns: REPLY_COLUMNS, ...COLORS });
+		pages.push({ lines: lines.slice(offset, offset + MAX_CONTENT_ROWS), columns: REPLY_COLUMNS });
 	return pages;
 }
 

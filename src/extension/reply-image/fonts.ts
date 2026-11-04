@@ -1,5 +1,5 @@
 /**
- * Font discovery and sfnt parsing for the screen renderer: WebAssembly cannot see system fonts, so
+ * Font discovery and sfnt parsing for reply images: WebAssembly cannot see system fonts, so
  * they are found and read into buffers here.
  */
 

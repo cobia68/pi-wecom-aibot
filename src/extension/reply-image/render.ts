@@ -1,6 +1,6 @@
 /**
- * Markdown's rendered lines → cells → SVG → PNG through resvg's WebAssembly build, reusing the retired
- * screen renderer. Runs in pi only, without a browser, terminal capture, or fetching embedded resources.
+ * pi-tui's rendered Markdown lines → cells → SVG → PNG through resvg's WebAssembly build. Runs in pi only,
+ * without a browser or fetching embedded resources.
  */
 
 import { readFileSync } from "node:fs";
@@ -12,39 +12,39 @@ import { type IconName, iconSvg } from "./icons.ts";
 export interface ReplyPage {
 	lines: string[];
 	columns: number;
-	/** The terminal's default colours as #rrggbb. */
-	foreground: string;
-	background: string;
-	palette: ScreenPalette;
 }
+
+/** One light theme for every image: Markdown styles and the header are drawn in these. */
+export const COLORS = {
+	foreground: "#182330",
+	background: "#ffffff",
+	accent: "#2357a3",
+	muted: "#526170",
+	link: "#075985",
+	variable: "#5b21b6",
+} as const;
+const HEADER_COLORS = {
+	band: "#f5f5f6",
+	rule: "#878c93",
+	tileStroke: "#dfe0e2",
+	values: [COLORS.foreground, "#075782", COLORS.variable],
+	icons: [COLORS.accent, COLORS.link, COLORS.variable],
+	pill: "#d6ddea",
+} as const;
 
 export interface Cell {
 	/** One grapheme; a wide one spans both its columns. */
 	text: string;
 	width: 1 | 2;
 	fg?: string;
-	bg?: string;
 	bold?: boolean;
-	dim?: boolean;
 	italic?: boolean;
 	underline?: boolean;
 	strike?: boolean;
-	inverse?: boolean;
-	hidden?: boolean;
 }
 
 type Style = Omit<Cell, "text" | "width">;
-const STYLE_KEYS = [
-	"fg",
-	"bg",
-	"bold",
-	"dim",
-	"italic",
-	"underline",
-	"strike",
-	"inverse",
-	"hidden",
-] as const satisfies readonly (keyof Style)[];
+const STYLE_KEYS = ["fg", "bold", "italic", "underline", "strike"] as const satisfies readonly (keyof Style)[];
 
 // ---------------------------------------------------------------- ANSI → cells
 
@@ -89,114 +89,41 @@ export function parseAnsiLine(line: string): Cell[] {
 	return cells;
 }
 
-const BASE16 = [
-	"#000000",
-	"#cd3131",
-	"#0dbc79",
-	"#e5e510",
-	"#2472c8",
-	"#bc3fbc",
-	"#11a8cd",
-	"#e5e5e5",
-	"#666666",
-	"#f14c4c",
-	"#23d18b",
-	"#f5f543",
-	"#3b8eea",
-	"#d670d6",
-	"#29b8db",
-	"#ffffff",
-];
-
 function hex(r: number, g: number, b: number): string {
 	return `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function rgb(r: number, g: number, b: number): string | undefined {
-	return [r, g, b].every((v) => Number.isInteger(v) && v >= 0 && v <= 255) ? hex(r, g, b) : undefined;
-}
-
-function color256(n: number): string | undefined {
-	if (!Number.isInteger(n) || n < 0 || n > 255) return undefined;
-	if (n < 16) return BASE16[n];
-	if (n < 232) {
-		const steps = [0, 95, 135, 175, 215, 255];
-		const k = n - 16;
-		return hex(steps[Math.floor(k / 36)], steps[Math.floor(k / 6) % 6], steps[k % 6]);
-	}
-	const grey = 8 + (n - 232) * 10;
-	return hex(grey, grey, grey);
-}
-
+/** The styles our Markdown theme writes: bold, italic, underline, strike and 24-bit foreground colours. */
 function applySgr(style: Style, params: string): void {
-	const groups = (params === "" ? "0" : params)
-		.split(";")
-		.map((group) => group.split(":").map((part) => (part === "" ? 0 : Number(part))));
-	for (let i = 0; i < groups.length; i++) {
-		const sub = groups[i];
-		const code = sub[0];
-		if (code === 38 || code === 48 || code === 58) {
-			let color: string | undefined;
-			if (sub.length > 1) {
-				// Colon form: 38:5:n, 38:2:r:g:b, or 38:2:colorspace:r:g:b.
-				if (sub[1] === 5) color = color256(sub[2]);
-				else if (sub[1] === 2) color = sub.length >= 6 ? rgb(sub[3], sub[4], sub[5]) : rgb(sub[2], sub[3], sub[4]);
-			} else if (groups[i + 1]?.[0] === 5) {
-				color = color256(groups[i + 2]?.[0] ?? -1);
-				i += 2;
-			} else if (groups[i + 1]?.[0] === 2) {
-				color = rgb(groups[i + 2]?.[0] ?? -1, groups[i + 3]?.[0] ?? -1, groups[i + 4]?.[0] ?? -1);
-				i += 4;
-			}
-			if (color && code === 38) style.fg = color;
-			else if (color && code === 48) style.bg = color;
-			continue;
-		}
-		if (code === 0) for (const key of STYLE_KEYS) delete style[key];
+	const codes = (params === "" ? "0" : params).split(";").map((part) => (part === "" ? 0 : Number(part)));
+	for (let i = 0; i < codes.length; i++) {
+		const code = codes[i];
+		if (code === 38 && codes[i + 1] === 2) {
+			const [r, g, b] = codes.slice(i + 2, i + 5);
+			if ([r, g, b].every((v) => Number.isInteger(v) && v >= 0 && v <= 255)) style.fg = hex(r, g, b);
+			i += 4;
+		} else if (code === 0) for (const key of STYLE_KEYS) delete style[key];
 		else if (code === 1) style.bold = true;
-		else if (code === 2) style.dim = true;
-		else if (code === 22) {
-			style.bold = false;
-			style.dim = false;
-		} else if (code === 3) style.italic = true;
+		else if (code === 22) style.bold = false;
+		else if (code === 3) style.italic = true;
 		else if (code === 23) style.italic = false;
-		else if (code === 4) style.underline = sub[1] !== 0;
-		else if (code === 21) style.underline = true;
+		else if (code === 4) style.underline = true;
 		else if (code === 24) style.underline = false;
-		else if (code === 7) style.inverse = true;
-		else if (code === 27) style.inverse = false;
-		else if (code === 8) style.hidden = true;
-		else if (code === 28) style.hidden = false;
 		else if (code === 9) style.strike = true;
 		else if (code === 29) style.strike = false;
-		else if (code >= 30 && code <= 37) style.fg = BASE16[code - 30];
-		else if (code >= 90 && code <= 97) style.fg = BASE16[code - 82];
 		else if (code === 39) delete style.fg;
-		else if (code >= 40 && code <= 47) style.bg = BASE16[code - 40];
-		else if (code >= 100 && code <= 107) style.bg = BASE16[code - 92];
-		else if (code === 49) delete style.bg;
 	}
 }
 
 // ---------------------------------------------------------------- cells → SVG
 
-/** Theme colours as #rrggbb; the capture reads all of them from pi's theme. */
-export interface ScreenPalette {
-	accent: string;
-	muted: string;
-	warning: string;
-	link: string;
-	variable: string;
-}
-
-export interface ScreenHeader {
+export interface ImageHeader {
 	directory: string;
 	provider: string;
 	model: string;
 	session: string;
 	badge: string;
 	badgeIcon: IconName;
-	tone?: "accent" | "warning";
 }
 
 export interface SvgOptions {
@@ -204,10 +131,7 @@ export interface SvgOptions {
 	/** The header's proportional stack, tried before `families`. */
 	sansFamilies?: readonly string[];
 	metrics: FontMetrics;
-	foreground: string;
-	background: string;
-	palette: ScreenPalette;
-	header?: ScreenHeader;
+	header?: ImageHeader;
 	fontSize?: number;
 	lineHeight?: number;
 }
@@ -219,13 +143,11 @@ export const MAX_CONTENT_ROWS = 160;
 const CANVAS = { padX: 36, gap: 30, bottom: 30 } as const;
 
 const FONT_SIZE = 15;
-/** Rows filled edge to edge with one background (messages, tool output) become blocks with round corners. */
-const BLOCK_RADIUS = 6;
 /** Wide glyphs grow toward their two cells, at most by this factor: monospace Latin is wider than half a CJK em. */
 const WIDE_SCALE = 1.12;
 
 /** Cell metrics from the monospace font, clamped so an odd font cannot break the layout. */
-export function cellMetrics(metrics: FontMetrics, fontSize = FONT_SIZE, lineHeight?: number) {
+function cellMetrics(metrics: FontMetrics, fontSize = FONT_SIZE, lineHeight?: number) {
 	const width = fontSize * Math.min(0.75, Math.max(0.45, metrics.advance || 0.6));
 	const natural = (metrics.ascent || 0.8) + (metrics.descent || 0.2) + (metrics.lineGap || 0);
 	const height = Math.round(fontSize * (lineHeight ?? Math.min(1.6, Math.max(1.15, natural))));
@@ -239,7 +161,6 @@ interface Placed {
 	c: Cell;
 	col: number;
 	fg: string;
-	bg?: string;
 }
 
 /** Each bounded page keeps all its rows at the same readable scale; a short reply needs no blank canvas. */
@@ -253,7 +174,7 @@ export function cellsToSvg(rows: Cell[][], columns: number, options: SvgOptions)
 	const height = Math.ceil(top + grid.height * scale + CANVAS.bottom);
 	return [
 		`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
-		`<rect width="100%" height="100%" fill="${options.background}"/>`,
+		`<rect width="100%" height="100%" fill="${COLORS.background}"/>`,
 		header?.svg ?? "",
 		`<svg x="${CANVAS.padX}" y="${top}" width="${round(grid.width * scale)}" height="${round(grid.height * scale)}" viewBox="0 0 ${round(grid.width)} ${round(grid.height)}">${grid.body}</svg>`,
 		"</svg>",
@@ -273,48 +194,12 @@ function gridSvg(
 	const placed = rows.map((cells) => {
 		let col = 0;
 		return cells.map((c): Placed => {
-			const at = {
-				c,
-				col,
-				fg: (c.inverse ? c.bg : c.fg) ?? (c.inverse ? options.background : options.foreground),
-				bg: c.inverse ? (c.fg ?? options.foreground) : c.bg,
-			};
+			const at = { c, col, fg: c.fg ?? COLORS.foreground };
 			col += c.width;
 			return at;
 		});
 	});
-	const blockColor = placed.map((cells) => {
-		const first = cells[0];
-		const last = cells.at(-1);
-		return first?.bg && last && last.col + last.c.width === used && last.bg === first.bg && cells.every((p) => p.bg)
-			? first.bg
-			: undefined;
-	});
 	const out: string[] = [];
-	for (let row = 0; row < rows.length; ) {
-		const color = blockColor[row];
-		let end = row + 1;
-		while (color && end < rows.length && blockColor[end] === color) end++;
-		if (color)
-			out.push(
-				`<rect x="${x(0)}" y="${y(row)}" width="${round(used * cell.width)}" height="${round((end - row) * cell.height)}" rx="${BLOCK_RADIUS}" fill="${color}"/>`,
-			);
-		row = end;
-	}
-	placed.forEach((cells, row) => {
-		for (let i = 0; i < cells.length; ) {
-			const bg = cells[i].bg;
-			let j = i + 1;
-			while (j < cells.length && cells[j].bg === bg) j++;
-			if (bg && bg !== blockColor[row]) {
-				const end = cells[j - 1].col + cells[j - 1].c.width;
-				out.push(
-					`<rect x="${x(cells[i].col)}" y="${y(row)}" width="${round((end - cells[i].col) * cell.width)}" height="${cell.height}" fill="${bg}"/>`,
-				);
-			}
-			i = j;
-		}
-	});
 	// A wide glyph is drawn larger, up to filling its two cells, with its centre (about 0.38 em up) kept in place.
 	const wide = Math.min(WIDE_SCALE, Math.max(1, (2 * cell.width) / fontSize));
 	const wideAttrs = wide > 1 ? ` font-size="${round(fontSize * wide)}"` : "";
@@ -323,7 +208,6 @@ function gridSvg(
 	placed.forEach((cells, row) => {
 		const baseline = round(y(row) + cell.baseline);
 		for (const p of cells) {
-			if (p.c.hidden) continue;
 			if (p.c.underline)
 				out.push(
 					`<rect x="${x(p.col)}" y="${round(baseline + fontSize * 0.12)}" width="${round(p.c.width * cell.width)}" height="1" fill="${p.fg}"/>`,
@@ -335,7 +219,7 @@ function gridSvg(
 		}
 		for (let i = 0; i < cells.length; ) {
 			const p = cells[i];
-			if (p.c.hidden || p.c.text.trim() === "") {
+			if (p.c.text.trim() === "") {
 				i++;
 				continue;
 			}
@@ -345,13 +229,7 @@ function gridSvg(
 				let j = i + 1;
 				while (j < cells.length) {
 					const q = cells[j];
-					if (
-						q.c.width !== 1 ||
-						q.c.text.length !== 1 ||
-						q.c.hidden ||
-						q.c.text === " " ||
-						textAttributes(q.fg, q.c) !== attrs
-					)
+					if (q.c.width !== 1 || q.c.text.length !== 1 || q.c.text === " " || textAttributes(q.fg, q.c) !== attrs)
 						break;
 					run.push(q);
 					j++;
@@ -378,7 +256,7 @@ const HEADER = {
 	top: 30,
 	bottom: 30,
 	strip: 6,
-	/** The rule between the header and the terminal grid. */
+	/** The rule between the header and the reply. */
 	rule: 3,
 	row: 48,
 	text: 34,
@@ -400,8 +278,8 @@ const PI_LOGO = [
 	'<path fill="#F1BE58" d="M517.36 400H634.72V634.72H517.36Z"/>',
 ].join("");
 
-function headerSvg(header: ScreenHeader, width: number, options: SvgOptions): { svg: string; height: number } {
-	const colors = headerColors(options, header.tone);
+function headerSvg(header: ImageHeader, width: number, options: SvgOptions): { svg: string; height: number } {
+	const colors = HEADER_COLORS;
 	const sans = escapeXml(fontFamilyList([...new Set([...(options.sansFamilies ?? []), ...options.families])]));
 	const { row, text } = HEADER;
 	const band = HEADER.top + 3 * row + HEADER.bottom;
@@ -432,15 +310,15 @@ function headerSvg(header: ScreenHeader, width: number, options: SvgOptions): { 
 		return [
 			iconSvg(icon, round(columnX + (HEADER.iconColumn - HEADER.icon) / 2), iconAt, HEADER.icon, colors.icons[i]),
 			`<text x="${textX}" y="${baseline(top, row, text)}" font-family="${sans}" font-size="${text}">`,
-			shownPrefix ? `<tspan fill="${colors.prefix}">${escapeXml(shownPrefix)}</tspan>` : "",
+			shownPrefix ? `<tspan fill="${COLORS.muted}">${escapeXml(shownPrefix)}</tspan>` : "",
 			`<tspan font-weight="700" fill="${colors.values[i]}">${escapeXml(shownValue)}</tspan></text>`,
 		].join("");
 	});
 	const svg = [
 		`<rect width="${width}" height="${band}" fill="${colors.band}"/>`,
-		`<rect width="${width}" height="${HEADER.strip}" fill="${colors.tone}"/>`,
+		`<rect width="${width}" height="${HEADER.strip}" fill="${COLORS.accent}"/>`,
 		`<rect y="${band}" width="${width}" height="${HEADER.rule}" fill="${colors.rule}"/>`,
-		`<rect x="${left}" y="${tileTop}" width="${HEADER.tile}" height="${HEADER.tile}" rx="${HEADER.tileRadius}" fill="${colors.tile}"${colors.tileStroke ? ` stroke="${colors.tileStroke}" stroke-width="2"` : ""}/>`,
+		`<rect x="${left}" y="${tileTop}" width="${HEADER.tile}" height="${HEADER.tile}" rx="${HEADER.tileRadius}" fill="${COLORS.background}" stroke="${colors.tileStroke}" stroke-width="2"/>`,
 		`<svg x="${left + (HEADER.tile - HEADER.logo) / 2}" y="${tileTop + (HEADER.tile - HEADER.logo) / 2}" width="${HEADER.logo}" height="${HEADER.logo}" viewBox="165.29 165.29 469.43 469.43">${PI_LOGO}</svg>`,
 		...lines,
 		`<rect x="${pillX}" y="${pillTop}" width="${pillWidth}" height="${pill.height}" rx="${pill.height / 2}" fill="${colors.pill}"/>`,
@@ -449,10 +327,10 @@ function headerSvg(header: ScreenHeader, width: number, options: SvgOptions): { 
 			round(pillX + pill.padX),
 			round(pillTop + (pill.height - pill.icon) / 2),
 			pill.icon,
-			colors.pillText,
+			COLORS.accent,
 			2.25,
 		),
-		`<text x="${round(pillX + pill.padX + pill.icon + pill.gap)}" y="${baseline(pillTop, pill.height, pill.text)}" font-family="${sans}" font-size="${pill.text}" font-weight="700" fill="${colors.pillText}">${escapeXml(header.badge)}</text>`,
+		`<text x="${round(pillX + pill.padX + pill.icon + pill.gap)}" y="${baseline(pillTop, pill.height, pill.text)}" font-family="${sans}" font-size="${pill.text}" font-weight="700" fill="${COLORS.accent}">${escapeXml(header.badge)}</text>`,
 	].join("");
 	return { svg, height: band + HEADER.rule };
 }
@@ -462,82 +340,6 @@ function fitPair(prefix: string, value: string, limit: number, size: number): [s
 	const prefixWidth = fitWidth(prefix, sansMeasure(size));
 	if (prefixWidth < limit) return [prefix, fitText(value, limit - prefixWidth, sansMeasure(size, true))];
 	return [fitText(prefix, limit, sansMeasure(size)), ""];
-}
-
-/**
- * Every text and icon colour is pushed toward white or black until it reaches its floor against the
- * band: 7:1 for values, 4.5:1 for prefixes and pill text, 3:1 for icons and the rule. Of pi's built-in
- * themes only the light theme's values need it.
- */
-export function headerColors(
-	options: Pick<SvgOptions, "foreground" | "background" | "palette">,
-	tone?: "accent" | "warning",
-) {
-	const { foreground: fg, background: bg, palette } = options;
-	const dark = isDark(bg);
-	const ink = dark ? "#ffffff" : "#000000";
-	const band = mix(fg, bg, dark ? 0.08 : 0.045);
-	const toneColor = tone === "warning" ? palette.warning : palette.accent;
-	const pill = mix(toneColor, band, dark ? 0.22 : 0.15);
-	const hues = [palette.accent, palette.link, palette.variable];
-	return {
-		band,
-		tone: toneColor,
-		rule: withContrast(band, band, contrast(fg, band) >= 3 ? fg : ink, 3),
-		tile: dark ? mix(fg, band, 0.12) : bg,
-		tileStroke: dark ? undefined : mix(fg, bg, 0.14),
-		prefix: withContrast(palette.muted, band, ink, 4.5),
-		values: [
-			withContrast(fg, band, ink, 7),
-			withContrast(palette.link, band, ink, 7),
-			withContrast(palette.variable, band, ink, 7),
-		],
-		icons: hues.map((hue) => withContrast(hue, band, ink, 3)),
-		pill,
-		pillText: withContrast(toneColor, pill, ink, 4.5),
-	};
-}
-
-/** Colours reaching the renderer are #rrggbb by construction (ANSI parsing and colorToHex); anything else is a bug. */
-function rgbOf(color: string): [number, number, number] {
-	const match = /^#([0-9a-f]{6})$/i.exec(color);
-	if (!match) throw new Error(`invalid colour: ${color}`);
-	const n = parseInt(match[1], 16);
-	return [n >> 16, (n >> 8) & 255, n & 255];
-}
-
-/** `weight` of a over b. */
-function mix(a: string, b: string, weight: number): string {
-	const x = rgbOf(a);
-	const y = rgbOf(b);
-	return hex(...(x.map((v, i) => Math.round(v * weight + y[i] * (1 - weight))) as [number, number, number]));
-}
-
-function isDark(color: string): boolean {
-	const c = rgbOf(color);
-	return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255 < 0.5;
-}
-
-/** WCAG relative luminance. */
-function luminance(color: string): number {
-	const [r, g, b] = rgbOf(color).map((v) => {
-		const c = v / 255;
-		return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-	});
-	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-export function contrast(a: string, b: string): number {
-	const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-	return (light + 0.05) / (dark + 0.05);
-}
-
-function withContrast(color: string, background: string, ink: string, min: number): string {
-	for (let step = 0; step <= 40; step++) {
-		const candidate = mix(ink, color, step / 40);
-		if (contrast(candidate, background) >= min) return candidate;
-	}
-	return ink;
 }
 
 type Measure = (segment: string) => number;
@@ -563,7 +365,7 @@ function fitWidth(text: string, measure: Measure): number {
 	return width;
 }
 
-export function fitText(text: string, max: number, measure: Measure): string {
+function fitText(text: string, max: number, measure: Measure): string {
 	if (fitWidth(text, measure) <= max) return text;
 	const budget = max - measure("…");
 	let kept = "";
@@ -577,7 +379,7 @@ export function fitText(text: string, max: number, measure: Measure): string {
 }
 
 function textAttributes(fill: string, c: Cell): string {
-	return ` fill="${fill}"${c.bold ? ' font-weight="bold"' : ""}${c.italic ? ' font-style="italic"' : ""}${c.dim ? ' fill-opacity="0.6"' : ""}`;
+	return ` fill="${fill}"${c.bold ? ' font-weight="bold"' : ""}${c.italic ? ' font-style="italic"' : ""}`;
 }
 
 function round(value: number): number {
@@ -632,7 +434,7 @@ function loadResvg(): Promise<ResvgModule> {
 export interface RenderOptions {
 	/** Overrides for tests and for reusing a font set across pages. */
 	fonts?: FontSet;
-	header?: ScreenHeader;
+	header?: ImageHeader;
 	fontSize?: number;
 	lineHeight?: number;
 }
@@ -652,9 +454,6 @@ export async function renderReplyPage(page: ReplyPage, options: RenderOptions = 
 		families: fonts.families,
 		sansFamilies: fonts.sansFamilies,
 		metrics: fonts.metrics,
-		foreground: page.foreground,
-		background: page.background,
-		palette: page.palette,
 		header,
 		fontSize: options.fontSize,
 		lineHeight: options.lineHeight,
