@@ -19,7 +19,7 @@
       }
     },
     "autoConnect": {
-      "description": "自动接入：会话启动时是否自动接入机器人，包括新建、恢复、分叉及 /reload；需配置有效且凭据、默认推送目标齐全。全局、项目级和 session 都能设；修改不改变当前接入状态，手动 disconnect 后本次运行保持断开，不影响网络断线重连。false：不自动接入，需要时手动运行 /wecom-aibot connect；true：会话启动时按有效配置自动接入",
+      "description": "自动接入：会话启动时是否自动接入机器人，包括新建、恢复、分叉及 /reload，print/JSON 等无界面运行不自动接入；需配置有效且凭据、默认推送目标齐全。全局、项目级和 session 都能设；修改不改变当前接入状态，手动 disconnect 后本次运行保持断开，不影响网络断线重连。false：不自动接入，需要时手动运行 /wecom-aibot connect；true：会话启动时按有效配置自动接入",
       "type": "boolean",
       "enum": [
         false,

@@ -53,6 +53,7 @@ pi install npm:@cobia/pi-wecom-aibot
 
 - **默认关闭**：`autoConnect` 是布尔值，只接受 `true` / `false`。全局、项目和 session 都能设，沿用[配置优先级](#作用域与位置)；上面的命令修改全局，只改当前目录时用 `/wecom-aibot config --scope project set autoConnect=true`
 - **只在会话启动时判断**：新建、恢复、分叉和 `/reload` 都会按当时的有效配置尝试接入，仍要求 BotID、Secret 和默认推送目标齐全。配置缺失或无效时不接入，修复后请手动 `connect` 或 `/reload`
+- **只在有界面的会话生效**：终端界面和 RPC 模式会自动接入；`pi -p`、`--mode json` 等无界面运行（脚本、子代理）不自动接入，需要时显式 `connect`
 - **保存不改变当前连接**：改为 `true` 不会立即接入，改为 `false` 也不会断开已接入的会话。想立即接入或断开，仍用 `connect` / `disconnect`
 - **手动断开优先**：`disconnect` 后不会自动连回，直到手动 `connect` 或下次会话启动；它不修改 `autoConnect`。此参数不控制网络断线后的自动重连
 

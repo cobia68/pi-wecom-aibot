@@ -501,10 +501,17 @@ for (const mode of ["rpc", "json", "print"] as const) {
 }
 
 for (const mode of ["tui", "rpc", "json", "print"] as const) {
-	test(`autoConnect works in ${mode} mode and only a ready TUI connection gets a footer`, async () => {
+	const interactive = mode === "tui" || mode === "rpc";
+	test(`autoConnect ${interactive ? "connects" : "stays offline"} in ${mode} mode and only a ready TUI connection gets a footer`, async () => {
 		writeLayer("global", { ...config, autoConnect: true });
 		const h = harness(mode);
 		await h.emit("session_start", { reason: "startup" });
+		if (!interactive) {
+			assert.equal(h.clients.length, 0, "print and JSON runs (scripts, subagents) never auto-connect");
+			await h.command("connect");
+			assert.equal(h.clients.length, 1, "an explicit connect still works without a UI");
+			return;
+		}
 		assert.equal(h.clients.length, 1);
 		assert.deepEqual(h.changes, [], "startup does not announce readiness before subscription");
 		h.clients[0].publish({ state: "subscribed", sessions: 1 });

@@ -373,8 +373,8 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 		// An unreadable file is reported now, never taken for “not configured” later.
 		const resolved = readResolved(ctx);
 		stopReason = undefined;
-		// Check only at startup: config saves and manual disconnect never trigger another attempt.
-		if (resolved?.values.autoConnect) await connectSession(ctx, resolved);
+		// Only at startup, and only for a session someone is looking at: print/JSON runs (scripts, subagents) stay offline.
+		if (resolved?.values.autoConnect && ctx.hasUI) await connectSession(ctx, resolved);
 	});
 
 	pi.on("session_shutdown", async () => {
