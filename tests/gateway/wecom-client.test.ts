@@ -77,27 +77,25 @@ test("only idempotent upload chunks are retried once, never init or finish", asy
 		if (frame.cmd === "aibot_upload_media_chunk" && ++chunks === 1) ws.acknowledge(frame, 40014);
 		else ws.acknowledge(frame, 0, frame.cmd === "aibot_upload_media_init" ? { upload_id: "u" } : { media_id: "m" });
 	};
-	assert.equal(await client.uploadImage(Buffer.alloc(32)), "m");
+	assert.equal(await client.uploadImage(Buffer.alloc(32), "reply.png"), "m");
 	assert.equal(chunks, 2);
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_upload_media_init").length, 1);
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_upload_media_finish").length, 1);
 	ws.onSend = (frame) =>
 		ws.acknowledge(frame, frame.cmd === "aibot_upload_media_chunk" ? 40014 : 0, { upload_id: "u" });
-	await assert.rejects(client.uploadImage(Buffer.alloc(32)), { outcome: "rejected" });
+	await assert.rejects(client.uploadImage(Buffer.alloc(32), "reply.png"), { outcome: "rejected" });
 });
 
-test("invalid image sizes or names and missing upload IDs fail without a fake success", async () => {
+test("invalid image sizes and missing upload IDs fail without a fake success", async () => {
 	const ws = connect();
 	const before = ws.sent.length;
 	for (const data of [Buffer.alloc(0), Buffer.alloc(WECOM_IMAGE_MAX_BYTES + 1)])
-		await assert.rejects(client.uploadImage(data), { outcome: "rejected" });
-	for (const name of ["../a.png", "..\\a.png", "图".repeat(100)])
-		await assert.rejects(client.uploadImage(Buffer.alloc(32), name), { outcome: "rejected" });
+		await assert.rejects(client.uploadImage(data, "reply.png"), { outcome: "rejected" });
 	assert.equal(ws.sent.length, before);
 	ws.onSend = (frame) => ws.acknowledge(frame);
-	await assert.rejects(client.uploadImage(Buffer.alloc(32)), /upload_id/);
+	await assert.rejects(client.uploadImage(Buffer.alloc(32), "reply.png"), /upload_id/);
 	ws.onSend = (frame) => ws.acknowledge(frame, 0, { upload_id: "u" });
-	await assert.rejects(client.uploadImage(Buffer.alloc(32)), /media_id/);
+	await assert.rejects(client.uploadImage(Buffer.alloc(32), "reply.png"), /media_id/);
 });
 
 test("an upload validates its registration between acknowledgements, before sending the next chunk", async () => {

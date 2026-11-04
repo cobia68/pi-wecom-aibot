@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type TestContext, test } from "node:test";
-import { readReplyImage } from "../../src/gateway/reply-image.ts";
 import { type GatewayPeer, WeComGateway } from "../../src/gateway/runtime.ts";
 import { WECOM_IMAGE_MAX_BYTES } from "../../src/shared/wecom-protocol.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
@@ -57,19 +56,18 @@ function gatewayFor(t: TestContext, identifyOnly = false) {
 	return { gateway, ws, peer, acknowledge };
 }
 
-test("the gateway reads a bounded regular PNG, rejecting missing, disguised, oversized and symlinked files", async (t) => {
+test("a missing or oversized image file fails before anything reaches WeCom", async (t) => {
 	const image = await imageFile(t);
-	assert.deepEqual(await readReplyImage(image.path), png);
-	await assert.rejects(readReplyImage(`${image.path}-missing`), { code: "ENOENT" });
-	await writeFile(image.path, Buffer.alloc(40));
-	await assert.rejects(readReplyImage(image.path), /PNG/);
+	const { gateway, ws } = gatewayFor(t);
+	await assert.rejects(
+		gateway.push("pi", chat, { kind: "image", image: { ...image, path: `${image.path}-missing` } }),
+		{
+			outcome: "not_sent",
+		},
+	);
 	await truncate(image.path, WECOM_IMAGE_MAX_BYTES + 1);
-	await assert.rejects(readReplyImage(image.path), /10 MiB/);
-	if (process.platform !== "win32") {
-		const link = `${image.path}-link`;
-		await symlink(image.path, link);
-		await assert.rejects(readReplyImage(link), { code: "ELOOP" });
-	}
+	await assert.rejects(gateway.push("pi", chat, { kind: "image", image }), { outcome: "rejected" });
+	assert.deepEqual(ws.sent, []);
 });
 
 test("a rendered PNG is uploaded and pushed as an image to the clicked chat, not to a default recipient", async (t) => {

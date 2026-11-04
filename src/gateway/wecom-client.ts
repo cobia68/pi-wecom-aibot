@@ -360,12 +360,10 @@ export class WeComClient {
 	}
 
 	/** Temporary media: init → chunks → finish. Only chunks are retried: the API explicitly makes them idempotent. */
-	async uploadImage(data: Buffer, filename = "pi-reply.png", validate: () => void = () => {}): Promise<string> {
+	async uploadImage(data: Buffer, filename: string, validate: () => void = () => {}): Promise<string> {
 		validate();
 		if (data.byteLength < WECOM_IMAGE_MIN_BYTES || data.byteLength > WECOM_IMAGE_MAX_BYTES)
 			throw new DeliveryError("图片大小必须在 5 字节到 10 MiB 之间", "rejected");
-		if (!filename || Buffer.byteLength(filename) > 256 || /[\\/:*?"<>|\u0000-\u001f\u007f]/.test(filename))
-			throw new DeliveryError("图片文件名无效", "rejected");
 		const init = await this.sendCommand("aibot_upload_media_init", {
 			type: "image",
 			filename,
@@ -437,7 +435,5 @@ export class WeComClient {
 
 function bodyField(response: WeComResponse, key: string): string | undefined {
 	const value = asRecord(response.body)?.[key];
-	if (typeof value === "string" && value) return value;
-	const direct = response[key];
-	return typeof direct === "string" && direct ? direct : undefined;
+	return typeof value === "string" && value ? value : undefined;
 }

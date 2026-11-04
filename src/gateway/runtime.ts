@@ -1,6 +1,7 @@
 /** One WeCom connection, with routing and membership independent of any pi process. */
 
 import { randomInt, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { type CardModel, renderCard, withNote } from "../shared/card.ts";
 import {
 	CONTROL_KEYS,
@@ -65,7 +66,6 @@ import {
 	settledCard,
 } from "./ask-card.ts";
 import { helpText, parseWeComCommand, type WeComCommand } from "./command.ts";
-import { readReplyImage } from "./reply-image.ts";
 import { PICKER_QUESTION, type PickerAction, pageOf, pickerAction, sessionPicker } from "./session-picker.ts";
 import { SessionPoller } from "./session-poller.ts";
 import { type SessionState, sessionsText, withSessions } from "./session-view.ts";
@@ -363,7 +363,7 @@ export class WeComGateway {
 			};
 			let mediaId: string;
 			try {
-				const data = await readReplyImage(item.image.path);
+				const data = await readFile(item.image.path);
 				mediaId = await client.uploadImage(data, item.image.filename, validate);
 				validate();
 			} catch (error) {

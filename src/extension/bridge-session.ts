@@ -217,7 +217,7 @@ export class BridgeSession {
 			isReady: () => this.client.isReady(),
 			subscription: () => this.subscription,
 			context: () => this.host.context(),
-			documentOnly: () => this.host.settings().contentDisplay === "linked",
+			documentOnly: () => this.documentOnly(),
 			send: (chat, notification) => this.client.notify(chat, notification),
 			controlCard: (ctx, chat, notification, outcome, steps) =>
 				this.publishedCard(ctx, chat, notification, outcome, steps),
@@ -544,7 +544,7 @@ export class BridgeSession {
 		};
 		try {
 			validate();
-			// Mask once at publication and again now, so newly configured secrets cannot escape through an old card.
+			// Mask at send time, so newly configured secrets cannot escape through an old card.
 			const mask = (text: string) => this.host.maskText(text);
 			const reply: ReplySnapshot = {
 				text: mask(snapshot.text),
@@ -684,6 +684,10 @@ export class BridgeSession {
 		});
 	}
 
+	private documentOnly(): boolean {
+		return this.host.settings().contentDisplay === "linked";
+	}
+
 	/** Freeze the chosen display and terminal now; linked publishes a page or a problem, never a body quote. */
 	private async publishedCard(
 		ctx: ExtensionContext,
@@ -717,10 +721,9 @@ export class BridgeSession {
 			...(this.screen ? { screen: this.screen } : {}),
 		};
 		const at = new Date();
-		const page = notification.documentOnly
-			? ((await this.page.publish(ctx, chat, notification)) ?? { pageProblem: "文档配置已改变，请点「刷新卡片」" })
-			: undefined;
+		const page = notification.documentOnly ? await this.page.publish(ctx, chat, notification) : undefined;
 		if (this.disposed || this.host.context()?.sessionManager.getSessionId() !== this.sessionId) return undefined;
+		if (notification.documentOnly && !page) throw new Error("文档配置已改变，通知未发送");
 		const icon = this.page.icon();
 		const card = sessionControlCard(notification.source, {
 			...view,
@@ -1036,7 +1039,7 @@ export class BridgeSession {
 				throw new Error("pi 会话已停止或切换，已取消通知");
 		};
 		validate();
-		const prepared = { ...notification, documentOnly: this.host.settings().contentDisplay === "linked" };
+		const prepared = { ...notification, documentOnly: this.documentOnly() };
 		const control = await this.publishedCard(ctx, chat, prepared, undefined, options.steps);
 		// A document write may outlive the tool call or the registration: never send after either was cancelled.
 		validate();
