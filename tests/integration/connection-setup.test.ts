@@ -452,7 +452,7 @@ test("config show uses character order without reordering saved keys or user lis
 	assert.equal(h.clients.length, 0);
 });
 
-test("config edit sorts field groups by their first identifier while credentials and the target remain paired", async () => {
+test("config edit groups its Chinese menu by purpose while credentials and the target remain paired", async () => {
 	const h = harness();
 	await h.emit("session_start");
 	let menu: string[] = [];
@@ -467,17 +467,17 @@ test("config edit sorts field groups by their first identifier while credentials
 		assert.deepEqual(
 			menu.map((item) => item.split("：")[0]),
 			[
-				"自动接入",
 				"机器人凭据",
+				"默认推送目标",
+				"自动接入",
+				"自动结束通知范围",
 				"正文展示方式",
 				"控制卡提示词",
-				"默认推送目标",
 				...(scope === "global" ? ["会话文档"] : []),
-				"自动结束通知范围",
 			],
 		);
-		assert.match(menu[1], /BotID.*Secret/);
-		assert.match(menu[4], /old-user.*1（单聊）/);
+		assert.match(menu[0], /BotID.*Secret/);
+		assert.match(menu[1], /old-user.*1（单聊）/);
 	}
 	assert.equal(h.clients.length, 0);
 });

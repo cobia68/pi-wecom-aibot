@@ -30,7 +30,7 @@ import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { pluginDirectory } from "../shared/agent-path.ts";
 import { MAX_PROMPT_LENGTH, MAX_PROMPTS } from "../shared/control-card.ts";
-import { compareNames, errorMessage, sentences } from "../shared/text.ts";
+import { errorMessage, sentences } from "../shared/text.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
 import { docUrlProblem } from "./doc-mcp.ts";
 
@@ -117,31 +117,8 @@ export interface DocumentField extends FieldBase {
 
 export type FieldSpec = ConnectionField | StartupField | SettingField | DocumentField;
 
-/** Field definitions; public lists use the name-ordered FIELDS below, not declaration order. */
-const FIELD_DEFINITIONS: readonly FieldSpec[] = [
-	{ name: "botId", label: "BotID", description: "智能机器人 BotID", effect: "connection" },
-	{
-		name: "secret",
-		label: "Secret",
-		description: "长连接专用 Secret；查看时只显示是否已配置",
-		effect: "connection",
-	},
-	{
-		name: "defaultChatId",
-		label: "默认推送目标",
-		description: "单聊填 userid，群聊填群 chatid，原样保存",
-		effect: "connection",
-	},
-	{
-		name: "defaultChatType",
-		label: "目标类型",
-		description: "与 defaultChatId 成组；只给 defaultChatId 时为 1",
-		choices: [
-			{ value: 1, description: "单聊" },
-			{ value: 2, description: "群聊" },
-		],
-		effect: "connection",
-	},
+/** In character order of name, which help, completion, validation reports and configuration display all show. */
+export const FIELDS: readonly FieldSpec[] = [
 	{
 		name: "autoConnect",
 		label: "自动接入",
@@ -154,17 +131,7 @@ const FIELD_DEFINITIONS: readonly FieldSpec[] = [
 		default: false,
 		effect: "startup",
 	},
-	{
-		name: "notificationScope",
-		label: "自动结束通知范围",
-		description: "哪些运行结束后自动通知；显式发送、部署测试和会话控制卡不受影响",
-		choices: [
-			{ value: "wecom-tasks", description: "仅自动回传企微发起的任务结果" },
-			{ value: "all-runs", description: "已接入会话的每轮完整运行结束后都通知；企微任务不重复发送" },
-		],
-		default: "wecom-tasks",
-		effect: "setting",
-	},
+	{ name: "botId", label: "BotID", description: "智能机器人 BotID", effect: "connection" },
 	{
 		name: "contentDisplay",
 		label: "正文展示方式",
@@ -190,16 +157,46 @@ const FIELD_DEFINITIONS: readonly FieldSpec[] = [
 		effect: "setting",
 	},
 	{
+		name: "defaultChatId",
+		label: "默认推送目标",
+		description: "单聊填 userid，群聊填群 chatid，原样保存",
+		effect: "connection",
+	},
+	{
+		name: "defaultChatType",
+		label: "目标类型",
+		description: "与 defaultChatId 成组；只给 defaultChatId 时为 1",
+		choices: [
+			{ value: 1, description: "单聊" },
+			{ value: 2, description: "群聊" },
+		],
+		effect: "connection",
+	},
+	{
 		name: "docMcpUrl",
 		label: "会话文档",
 		description:
 			"智能机器人「文档」授权后的 streamableHTTP URL（工作台 → 智能机器人 → 可使用权限）。配置且 contentDisplay=linked 时，插件在企业微信里建一份文档，每个 session 一页，写最近的回复和通知，点控制卡的引用区打开。地址含 apikey：只能写在全局配置里，用 /wecom-aibot config edit 填写，查看时只显示是否已配置",
 		effect: "document",
 	},
+	{
+		name: "notificationScope",
+		label: "自动结束通知范围",
+		description: "哪些运行结束后自动通知；显式发送、部署测试和会话控制卡不受影响",
+		choices: [
+			{ value: "wecom-tasks", description: "仅自动回传企微发起的任务结果" },
+			{ value: "all-runs", description: "已接入会话的每轮完整运行结束后都通知；企微任务不重复发送" },
+		],
+		default: "wecom-tasks",
+		effect: "setting",
+	},
+	{
+		name: "secret",
+		label: "Secret",
+		description: "长连接专用 Secret；查看时只显示是否已配置",
+		effect: "connection",
+	},
 ];
-
-/** One character order for help, completion, validation reports and configuration display. */
-export const FIELDS: readonly FieldSpec[] = [...FIELD_DEFINITIONS].sort((a, b) => compareNames(a.name, b.name));
 
 export const SETTING_FIELDS = FIELDS.filter((spec): spec is SettingField => spec.effect === "setting");
 
@@ -289,7 +286,7 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set(["$schema", ...FIELDS.map((spec)
 
 /** The fields a layer's file may hold, as a message about an unknown key lists them. */
 function layerKeys(scope: Scope): readonly string[] {
-	return scope === "global" ? [...ALL, "allowedUserIds"].sort() : ALL.filter((name) => name !== "docMcpUrl");
+	return scope === "global" ? ["allowedUserIds", ...ALL] : ALL.filter((name) => name !== "docMcpUrl");
 }
 
 function parseLayer(raw: Record<string, unknown>, scope: Scope): Layer {

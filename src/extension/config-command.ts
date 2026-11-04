@@ -7,7 +7,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MAX_PROMPTS } from "../shared/control-card.ts";
 import type { ChatIdentity } from "../shared/gateway-protocol.ts";
-import { compareNames, errorMessage, sentences } from "../shared/text.ts";
+import { errorMessage, sentences } from "../shared/text.ts";
 import {
 	type ConfigInvocation,
 	type ConfigScope,
@@ -69,6 +69,17 @@ interface Edit {
 }
 
 /** How each layer is named in the reports; a name ending in a Latin word carries its space before 的. */
+/** `config edit` shows Chinese labels, so it is grouped by purpose rather than by field name. */
+const EDIT_MENU: readonly FieldName[] = [
+	"botId",
+	"defaultChatId",
+	"autoConnect",
+	"notificationScope",
+	"contentDisplay",
+	"controlPrompts",
+	"docMcpUrl",
+];
+
 const LAYER: Record<
 	ConfigScope,
 	{
@@ -189,8 +200,7 @@ class ConfigCommand {
 		const resolved = this.config.read();
 		const rows: [string, string][] = FIELDS.map((spec) => [spec.name, describe(resolved, spec.name)]);
 		if (resolved.allowedUserIds?.length)
-			rows.push(["allowedUserIds", `${resolved.allowedUserIds.join("、")}（全局）`]);
-		rows.sort(([a], [b]) => compareNames(a, b));
+			rows.unshift(["allowedUserIds", `${resolved.allowedUserIds.join("、")}（全局）`]);
 		const adopted = this.host.adopted();
 		const state =
 			adopted === undefined
@@ -216,8 +226,7 @@ class ConfigCommand {
 			spec.name,
 			display(spec.name, layer?.[spec.name]),
 		]);
-		if (layer?.allowedUserIds?.length) rows.push(["allowedUserIds", layer.allowedUserIds.join("、")]);
-		rows.sort(([a], [b]) => compareNames(a, b));
+		if (layer?.allowedUserIds?.length) rows.unshift(["allowedUserIds", layer.allowedUserIds.join("、")]);
 		this.notify(
 			[
 				LAYER[scope].heading,
@@ -493,10 +502,9 @@ class ConfigCommand {
 					]
 				: []),
 		];
-		// Sort groups by their first field, without splitting credential or target editing into separate steps.
 		const edit = await this.choose(
 			`编辑${LAYER[scope].title}`,
-			items.sort(([a], [b]) => compareNames(a, b)).map(([, label, run]) => [label, run]),
+			items.sort(([a], [b]) => EDIT_MENU.indexOf(a) - EDIT_MENU.indexOf(b)).map(([, label, run]) => [label, run]),
 		);
 		return edit?.();
 	}

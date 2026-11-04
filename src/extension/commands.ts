@@ -89,15 +89,8 @@ const CONFIG_COMMAND: CommandSpec = {
 	],
 };
 
-const COMMAND_DEFINITIONS: readonly CommandSpec[] = [
-	{
-		name: "status",
-		usage: "status",
-		description: "查看当前 pi 的接入状态、会话来源和配置路径",
-		maxArgs: 0,
-		options: [],
-		details: [],
-	},
+/** In character order of name, like every public list. */
+const COMMANDS: readonly CommandSpec[] = [
 	CONFIG_COMMAND,
 	{
 		name: "connect",
@@ -126,6 +119,26 @@ const COMMAND_DEFINITIONS: readonly CommandSpec[] = [
 			"autoConnect=true 时，手动断开后也不会立即连回；运行 /wecom-aibot connect 可恢复，下次会话启动仍按 autoConnect 判断",
 		],
 	},
+	{ name: "log", usage: "log", description: "查看最近 20 条日志", maxArgs: 0, options: [], details: [] },
+	{
+		name: "reset",
+		usage: "reset",
+		description: "确认后删除全局配置文件，并停止当前 pi 的接入",
+		maxArgs: 0,
+		options: [],
+		details: [
+			"删除同一 pi 用户目录共用的全局配置文件：BotID、Secret、默认推送目标、通知设置和白名单一起删除。各目录、各 session 的覆盖文件保留",
+			"需要交互确认，没有界面时不删除。只停止当前 pi 的接入；其他 pi 若已连接，仍会继续接收，直到它们各自 disconnect 或退出",
+		],
+	},
+	{
+		name: "status",
+		usage: "status",
+		description: "查看当前 pi 的接入状态、会话来源和配置路径",
+		maxArgs: 0,
+		options: [],
+		details: [],
+	},
 	{
 		name: "test",
 		usage: "test [chatid] [--chat-type <1|2>]",
@@ -149,22 +162,7 @@ const COMMAND_DEFINITIONS: readonly CommandSpec[] = [
 			"需要正式 connect；发一张部署测试用的控制卡，点「刷新卡片」验证按钮回调",
 		],
 	},
-	{ name: "log", usage: "log", description: "查看最近 20 条日志", maxArgs: 0, options: [], details: [] },
-	{
-		name: "reset",
-		usage: "reset",
-		description: "确认后删除全局配置文件，并停止当前 pi 的接入",
-		maxArgs: 0,
-		options: [],
-		details: [
-			"删除同一 pi 用户目录共用的全局配置文件：BotID、Secret、默认推送目标、通知设置和白名单一起删除。各目录、各 session 的覆盖文件保留",
-			"需要交互确认，没有界面时不删除。只停止当前 pi 的接入；其他 pi 若已连接，仍会继续接收，直到它们各自 disconnect 或退出",
-		],
-	},
 ];
-
-/** Public command lists never depend on definition order or the host's locale. */
-const COMMANDS = [...COMMAND_DEFINITIONS].sort((a, b) => compareNames(a.name, b.name));
 
 export type ConfigInvocation =
 	/** No action given: list the forms, all of them or one scope's. */
@@ -182,16 +180,16 @@ export type ConfigSubcommand = { usage: string; description: string } & ({ run: 
 /** Without a target: show and whoami only read, the writes change the global layer. */
 const PLAIN_SUBCOMMANDS: readonly ConfigSubcommand[] = [
 	{
-		usage: "show",
-		description: "查看当前 session 合并后的配置，并标明每项来自 session、全局或内置默认值",
-		run: { action: "show" },
-	},
-	{
 		usage: "edit",
 		description: "交互编辑全局配置；还没有凭据时引导填写 BotID、Secret 和默认推送目标",
 		run: { action: "edit", scope: "global" },
 	},
 	{ usage: "set", args: "字段=值 …", description: "修改全局字段" },
+	{
+		usage: "show",
+		description: "查看当前 session 合并后的配置，并标明每项来自 session、全局或内置默认值",
+		run: { action: "show" },
+	},
 	{ usage: "unset", args: "字段 …", description: "删除全局字段，回到内置默认值" },
 	{
 		usage: "whoami",
@@ -235,9 +233,9 @@ function layerSubcommands(scope: ConfigScope): ConfigSubcommand[] {
 	const text = LAYER_TEXT[scope];
 	const at = `--scope ${scope}`;
 	return [
-		{ usage: `${at} show`, description: text.show, run: { action: "show", scope } },
 		{ usage: `${at} edit`, description: text.edit, run: { action: "edit", scope } },
 		{ usage: `${at} set`, args: "字段=值 …", description: text.set },
+		{ usage: `${at} show`, description: text.show, run: { action: "show", scope } },
 		{ usage: `${at} unset`, args: "字段 …", description: text.unset },
 		{
 			usage: `${at} whoami`,
@@ -248,13 +246,7 @@ function layerSubcommands(scope: ConfigScope): ConfigSubcommand[] {
 }
 
 /** The config actions: their usage and help, and the short description completion shows. */
-const CONFIG_ACTION_DEFINITIONS = [
-	{
-		action: "show",
-		usage: `[${SCOPE_SLOT}] show`,
-		help: "查看配置；不写作用域时显示合并结果并标明来源",
-		short: "查看配置",
-	},
+const CONFIG_ACTION_TABLE = [
 	{
 		action: "edit",
 		usage: `[${SCOPE_SLOT}] edit`,
@@ -266,6 +258,12 @@ const CONFIG_ACTION_DEFINITIONS = [
 		usage: `[${SCOPE_SLOT}] set 字段=值 …`,
 		help: "修改字段，不写作用域时改全局，未给出的字段保持不变；controlPrompts+= / -= 只加或只删几条",
 		short: "修改字段：字段=值",
+	},
+	{
+		action: "show",
+		usage: `[${SCOPE_SLOT}] show`,
+		help: "查看配置；不写作用域时显示合并结果并标明来源",
+		short: "查看配置",
 	},
 	{
 		action: "unset",
@@ -280,7 +278,6 @@ const CONFIG_ACTION_DEFINITIONS = [
 		short: "发验证码识别聊天",
 	},
 ] as const;
-const CONFIG_ACTION_TABLE = [...CONFIG_ACTION_DEFINITIONS].sort((a, b) => compareNames(a.action, b.action));
 const CONFIG_ACTIONS: readonly string[] = CONFIG_ACTION_TABLE.map((item) => item.action);
 
 /**
@@ -288,12 +285,9 @@ const CONFIG_ACTIONS: readonly string[] = CONFIG_ACTION_TABLE.map((item) => item
  * scope: that layer's forms only.
  */
 export function configSubcommands(scope?: ConfigScope): readonly ConfigSubcommand[] {
-	const actions = (scope ? layerSubcommands(scope) : [...PLAIN_SUBCOMMANDS]).sort((a, b) =>
-		compareNames(a.usage, b.usage),
-	);
-	if (scope) return actions;
+	if (scope) return layerSubcommands(scope);
 	return [
-		...actions,
+		...PLAIN_SUBCOMMANDS,
 		...SCOPES.map(
 			(layer): ConfigSubcommand => ({
 				usage: `--scope ${layer} …`,
