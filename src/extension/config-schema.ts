@@ -7,6 +7,7 @@
  * really is the smart robot's is still for `/wecom-aibot config show` to say.
  */
 import { MAX_PROMPT_LENGTH, MAX_PROMPTS } from "../shared/control-card.ts";
+import { compareNames } from "../shared/text.ts";
 import { FIELDS, type FieldName, type FieldSpec } from "./config.ts";
 
 /** Where it is published: the root of the repository mirrored on GitHub. A configuration's `$schema` names it. */
@@ -60,15 +61,17 @@ export function configSchema(): Record<string, unknown> {
 			"~/.pi/agent/wecom-aibot/config.json。用 /wecom-aibot config 查看和修改；allowedUserIds 只能在这里手写",
 		type: "object",
 		additionalProperties: false,
-		properties: {
-			$schema: { description: "这份 JSON Schema 的地址，给编辑器用", type: "string" },
-			...Object.fromEntries(FIELDS.map((spec) => [spec.name, field(spec)])),
-			allowedUserIds: {
-				description: "允许给 pi 发任务的企微 userid；不写或留空时所有人都能用。只能写在全局配置里",
-				type: "array",
-				items: { type: "string", pattern: NOT_BLANK },
-			},
-		},
+		properties: Object.fromEntries(
+			Object.entries({
+				$schema: { description: "这份 JSON Schema 的地址，给编辑器用", type: "string" },
+				...Object.fromEntries(FIELDS.map((spec) => [spec.name, field(spec)])),
+				allowedUserIds: {
+					description: "允许给 pi 发任务的企微 userid；不写或留空时所有人都能用。只能写在全局配置里",
+					type: "array",
+					items: { type: "string", pattern: NOT_BLANK },
+				},
+			}).sort(([a], [b]) => compareNames(a, b)),
+		),
 		// botId 与 secret 成组；defaultChatType 要和 defaultChatId 一起写。
 		dependentRequired: { botId: ["secret"], secret: ["botId"], defaultChatType: ["defaultChatId"] },
 	};

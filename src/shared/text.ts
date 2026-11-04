@@ -3,6 +3,11 @@
  * theirs.
  */
 
+/** Identifier character order, independent of locale and without case folding (all public names are ASCII). */
+export function compareNames(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
 /** The non-empty sentences joined with 。 and none at the end, so composed text follows the rule too. */
 export function sentences(...parts: (string | false | null | undefined)[]): string {
 	return parts

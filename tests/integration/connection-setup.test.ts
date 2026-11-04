@@ -411,6 +411,71 @@ test("config edit offers autoConnect in every scope and can remove an explicit o
 	assert.equal(h.clients.length, 0);
 });
 
+test("config show uses character order without reordering saved keys or user lists", async () => {
+	writeLayer("global", {
+		...config,
+		notificationScope: "all-runs",
+		controlPrompts: ["z", "a"],
+		allowedUserIds: ["z-user", "a-user"],
+		autoConnect: false,
+	});
+	writeLayer({ project: directory }, { notificationScope: "wecom-tasks", autoConnect: false });
+	writeLayer({ session: "session-connect" }, { defaultChatId: "session-user", contentDisplay: "inline" });
+	const files = [CONFIG_FILE, layerFile({ project: directory }), layerFile({ session: "session-connect" })];
+	const saved = files.map((file) => readFileSync(file, "utf8"));
+	const h = harness();
+	await h.emit("session_start");
+	for (const command of [
+		"config show",
+		"config --scope global show",
+		"config --scope project show",
+		"config --scope session show",
+	]) {
+		await h.command(command);
+		const names = [...h.notices.at(-1)!.matchAll(/^ {2}([a-zA-Z]+) {2,}/gm)].map((match) => match[1]);
+		assert.ok(names.length >= 2);
+		assert.deepEqual(names, [...names].sort(), command);
+	}
+	await h.command("config show");
+	assert.match(h.notices.at(-1)!, /controlPrompts\s+「z」、「a」/);
+	assert.match(h.notices.at(-1)!, /allowedUserIds\s+z-user、a-user/);
+	assert.deepEqual(
+		files.map((file) => readFileSync(file, "utf8")),
+		saved,
+	);
+	assert.equal(h.clients.length, 0);
+});
+
+test("config edit sorts field groups by their first identifier while credentials and the target remain paired", async () => {
+	const h = harness();
+	await h.emit("session_start");
+	let menu: string[] = [];
+	Object.assign(h.ctx.ui, {
+		async select(_title: string, choices: string[]) {
+			menu = choices;
+			return undefined;
+		},
+	});
+	for (const scope of ["global", "project", "session"]) {
+		await h.command(`config --scope ${scope} edit`);
+		assert.deepEqual(
+			menu.map((item) => item.split("：")[0]),
+			[
+				"自动接入",
+				"机器人凭据",
+				"正文展示方式",
+				"控制卡提示词",
+				"默认推送目标",
+				...(scope === "global" ? ["会话文档"] : []),
+				"自动结束通知范围",
+			],
+		);
+		assert.match(menu[1], /BotID.*Secret/);
+		assert.match(menu[4], /old-user.*1（单聊）/);
+	}
+	assert.equal(h.clients.length, 0);
+});
+
 test("connect requires a default target but never requires having identified one", async () => {
 	writeLayer("global", { botId: "bot", secret: "secret" });
 	const h = harness();

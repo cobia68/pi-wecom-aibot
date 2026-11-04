@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { sentences } from "../../src/shared/text.ts";
+import { compareNames, sentences } from "../../src/shared/text.ts";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -13,6 +13,22 @@ function sourceFiles(directory: string): string[] {
 		.filter((entry) => entry.isFile() && /\.(?:ts|mjs)$/.test(entry.name))
 		.map((entry) => join(entry.parentPath, entry.name));
 }
+
+test("identifier character order does not fold case, ignore punctuation or use natural numeric order", () => {
+	const names = ["chatid", "content", "chat_type", "a", "A", "session_id", "after_settle", "a2", "a10"];
+	assert.deepEqual([...names].sort(compareNames), [
+		"A",
+		"a",
+		"a10",
+		"a2",
+		"after_settle",
+		"chat_type",
+		"chatid",
+		"content",
+		"session_id",
+	]);
+	assert.equal(compareNames("autoConnect", "autoConnect"), 0);
+});
 
 test("sentences joins the non-empty parts with 。 and ends without one", () => {
 	assert.equal(sentences("配置未改动", ""), "配置未改动");

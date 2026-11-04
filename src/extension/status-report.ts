@@ -5,10 +5,11 @@
  * icons are all East Asian wide, so the state never shifts the text after it by a column.
  */
 import { stripVTControlCharacters } from "node:util";
+import { compareNames } from "../shared/text.ts";
 import type { WeComState } from "../shared/wecom-protocol.ts";
 import type { BridgeSession } from "./bridge-session.ts";
 import { table } from "./commands.ts";
-import { CONFIG_FILE, connectionOf, FIELDS, type Resolved, type Source } from "./config.ts";
+import { CONFIG_FILE, connectionOf, FIELDS, type FieldName, type Resolved, type Source } from "./config.ts";
 import { describe, display } from "./config-display.ts";
 
 export type ReportedBridge = Pick<
@@ -156,13 +157,14 @@ function sessionRows({ source }: StatusSnapshot): [string, string][] {
 
 function settingRows({ resolved }: StatusSnapshot): [string, string][] {
 	if (!resolved) return [];
-	return [
-		["自动接入", describe(resolved, "autoConnect")],
-		["通知范围", describe(resolved, "notificationScope")],
-		["正文展示", describe(resolved, "contentDisplay")],
-		["提示词", describe(resolved, "controlPrompts")],
-		["会话文档", describe(resolved, "docMcpUrl")],
+	const labels: [FieldName, string][] = [
+		["autoConnect", "自动接入"],
+		["notificationScope", "通知范围"],
+		["contentDisplay", "正文展示"],
+		["controlPrompts", "提示词"],
+		["docMcpUrl", "会话文档"],
 	];
+	return labels.sort(([a], [b]) => compareNames(a, b)).map(([name, label]) => [label, describe(resolved, name)]);
 }
 
 /** An override layer's row: the fields it decides now, or its file when the configuration cannot be read. */

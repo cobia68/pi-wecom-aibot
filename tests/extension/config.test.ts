@@ -115,7 +115,7 @@ test("a key the layer does not know makes the file unusable, like a value it can
 		() => readLayer("global"),
 		(error: Error) =>
 			error.message ===
-			`配置文件 ${CONFIG_FILE} 有不认识的字段 notificationMode、NotificationScope；可用字段：botId、secret、defaultChatId、defaultChatType、autoConnect、notificationScope、contentDisplay、controlPrompts、docMcpUrl、allowedUserIds`,
+			`配置文件 ${CONFIG_FILE} 有不认识的字段 notificationMode、NotificationScope；可用字段：allowedUserIds、autoConnect、botId、contentDisplay、controlPrompts、defaultChatId、defaultChatType、docMcpUrl、notificationScope、secret`,
 	);
 	const before = readFileSync(CONFIG_FILE, "utf8");
 	assert.throws(
@@ -129,7 +129,7 @@ test("a key the layer does not know makes the file unusable, like a value it can
 	writeFileSync(layerFile({ session: CHILD }), JSON.stringify({ colour: "red" }));
 	assert.throws(
 		() => readLayer({ session: CHILD }),
-		/有不认识的字段 colour；可用字段：botId、secret、defaultChatId、defaultChatType、autoConnect、notificationScope、contentDisplay、controlPrompts$/,
+		/有不认识的字段 colour；可用字段：autoConnect、botId、contentDisplay、controlPrompts、defaultChatId、defaultChatType、notificationScope、secret$/,
 	);
 	writeFileSync(CONFIG_FILE, JSON.stringify({ $schema: "schema-url", ...bot }));
 	assert.deepEqual(readLayer("global"), bot);
@@ -393,7 +393,7 @@ test("set tokens are checked together: every problem is reported and nothing is 
 	// Field names and values are case-sensitive, as the file writes them.
 	assert.deepEqual(parseAssignments(["NotificationScope=all-runs", "notificationScope=ALL-RUNS"]), {
 		problems: [
-			"未知字段 NotificationScope；可用字段：defaultChatId、defaultChatType、autoConnect、notificationScope、contentDisplay、controlPrompts",
+			"未知字段 NotificationScope；可用字段：autoConnect、contentDisplay、controlPrompts、defaultChatId、defaultChatType、notificationScope",
 			"notificationScope 只能是 wecom-tasks、all-runs",
 		],
 	});
@@ -620,7 +620,7 @@ test("controlPrompts is a list: comma-separated in set, checked the same way in 
 	assert.deepEqual(parseRemovals(["controlPrompts"]), { remove: ["controlPrompts"] });
 	assert.deepEqual(parseRemovals(["controlprompts"]), {
 		problems: [
-			"未知字段 controlprompts；可用字段：botId、secret、defaultChatId、defaultChatType、autoConnect、notificationScope、contentDisplay、controlPrompts、docMcpUrl",
+			"未知字段 controlprompts；可用字段：autoConnect、botId、contentDisplay、controlPrompts、defaultChatId、defaultChatType、docMcpUrl、notificationScope、secret",
 		],
 	});
 	// No built-in prompts; an empty list is a valid override, and the default is a fresh copy each time.

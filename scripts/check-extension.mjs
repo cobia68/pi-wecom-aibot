@@ -29,6 +29,11 @@ await wecom.handler("config --help", {
 assert.ok(help.includes("defaultChatId") && help.includes("notificationScope") && help.includes("config.json"));
 assert.ok(extension.tools.has("wecom_send"));
 assert.equal(extension.tools.get("wecom_send").definition.parameters.properties.screenshot, undefined);
+assert.deepEqual(
+	Object.keys(extension.tools.get("wecom_send").definition.parameters.properties),
+	["after_settle", "chat_type", "chatid", "content", "session_id"],
+	"wecom_send parameters use identifier character order, not locale order",
+);
 assert.ok((await wecom.getArgumentCompletions("co")).some((item) => item.value === "connect "));
 assert.ok(extension.handlers.has("session_shutdown"));
 assert.ok(extension.handlers.has("agent_settled"));

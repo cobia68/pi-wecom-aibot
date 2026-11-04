@@ -45,20 +45,20 @@ export function registerWecomSend(pi: ExtensionAPI, host: WecomSendHost): void {
 			"session_id validates the current session; it does not switch or resume another session. " +
 			'To offer next steps on the card, end content with <!-- wecom_next ["prompt", ...] --> (at most 10); it is removed before sending.',
 		parameters: Type.Object({
-			chatid: Type.Optional(
-				Type.String({
-					minLength: 1,
-					description:
-						"Target userid or group chatid. Omit to use the source chat of the current WeCom task, or configured defaultChatId for local runs.",
-				}),
+			after_settle: Type.Optional(
+				Type.Boolean({ description: "Wait for this run's final answer before sending. Default false." }),
 			),
 			chat_type: Type.Optional(
 				Type.Union([Type.Literal(1), Type.Literal(2)], {
 					description: "1 = single chat, 2 = group chat. Default 1.",
 				}),
 			),
-			session_id: Type.Optional(
-				Type.String({ minLength: 1, description: "Current pi session ID. Omit to read it automatically." }),
+			chatid: Type.Optional(
+				Type.String({
+					minLength: 1,
+					description:
+						"Target userid or group chatid. Omit to use the source chat of the current WeCom task, or configured defaultChatId for local runs.",
+				}),
 			),
 			content: Type.Optional(
 				Type.String({
@@ -67,8 +67,8 @@ export function registerWecomSend(pi: ExtensionAPI, host: WecomSendHost): void {
 						"Markdown body; its first line is the card's headline. Omit to send pi's latest reply of this run.",
 				}),
 			),
-			after_settle: Type.Optional(
-				Type.Boolean({ description: "Wait for this run's final answer before sending. Default false." }),
+			session_id: Type.Optional(
+				Type.String({ minLength: 1, description: "Current pi session ID. Omit to read it automatically." }),
 			),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, toolCtx) {

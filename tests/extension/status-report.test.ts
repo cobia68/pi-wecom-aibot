@@ -79,10 +79,10 @@ test("a session that has not connected reads as one headline and one aligned tab
 			"  工作目录  pi-wecom-aibot",
 			"",
 			"  自动接入  false（内置默认值）",
-			"  通知范围  all-runs（全局）",
 			"  正文展示  inline（内置默认值）",
 			"  提示词    无（内置默认值）",
 			"  会话文档  未配置",
+			"  通知范围  all-runs（全局）",
 			"",
 			`  配置文件  ${CONFIG_FILE}`,
 			"  会话覆盖  无",
@@ -228,7 +228,7 @@ test("settings name the layer they come from, and the override row names the ove
 	assert.ok(lines.includes("  提示词    「继续」（session）"));
 	assert.ok(lines.includes("  通知范围  all-runs（全局）"));
 	assert.ok(lines.includes("  自动接入  true（session）"));
-	assert.ok(lines.includes("  会话覆盖  defaultChatId、defaultChatType、autoConnect、controlPrompts"));
+	assert.ok(lines.includes("  会话覆盖  autoConnect、controlPrompts、defaultChatId、defaultChatType"));
 });
 
 test("the menu title keeps the icon and the state, without the reason or the next step", () => {

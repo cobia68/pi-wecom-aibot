@@ -10,28 +10,13 @@
       "description": "这份 JSON Schema 的地址，给编辑器用",
       "type": "string"
     },
-    "botId": {
-      "description": "智能机器人 BotID",
-      "type": "string",
-      "pattern": "\\S"
-    },
-    "secret": {
-      "description": "长连接专用 Secret；查看时只显示是否已配置",
-      "type": "string",
-      "pattern": "\\S"
-    },
-    "defaultChatId": {
-      "description": "默认推送目标：单聊填 userid，群聊填群 chatid，原样保存",
-      "type": "string",
-      "pattern": "^[^\"'“”‘’`\\s]+$"
-    },
-    "defaultChatType": {
-      "description": "目标类型：与 defaultChatId 成组；只给 defaultChatId 时为 1。1：单聊；2：群聊",
-      "type": "integer",
-      "enum": [
-        1,
-        2
-      ]
+    "allowedUserIds": {
+      "description": "允许给 pi 发任务的企微 userid；不写或留空时所有人都能用。只能写在全局配置里",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "\\S"
+      }
     },
     "autoConnect": {
       "description": "自动接入：会话启动时是否自动接入机器人，包括新建、恢复、分叉及 /reload；需配置有效且凭据、默认推送目标齐全。全局、项目级和 session 都能设；修改不改变当前接入状态，手动 disconnect 后本次运行保持断开，不影响网络断线重连。false：不自动接入，需要时手动运行 /wecom-aibot connect；true：会话启动时按有效配置自动接入",
@@ -42,14 +27,10 @@
       ],
       "default": false
     },
-    "notificationScope": {
-      "description": "自动结束通知范围：哪些运行结束后自动通知；显式发送、部署测试和会话控制卡不受影响。wecom-tasks：仅自动回传企微发起的任务结果；all-runs：已接入会话的每轮完整运行结束后都通知；企微任务不重复发送",
+    "botId": {
+      "description": "智能机器人 BotID",
       "type": "string",
-      "enum": [
-        "wecom-tasks",
-        "all-runs"
-      ],
-      "default": "wecom-tasks"
+      "pattern": "\\S"
     },
     "contentDisplay": {
       "description": "正文展示方式：任务结果和通知正文如何呈现；全局、项目级和 session 都能设，下次使用时生效。inline：卡片内展示（仅三行）；正文开头放文字引用区，不使用文档，Markdown 转为纯文本；linked：文档链接展示；需配置 docMcpUrl，未配置或不可用时在引用区提示原因，不回退正文",
@@ -73,19 +54,38 @@
       },
       "default": []
     },
+    "defaultChatId": {
+      "description": "默认推送目标：单聊填 userid，群聊填群 chatid，原样保存",
+      "type": "string",
+      "pattern": "^[^\"'“”‘’`\\s]+$"
+    },
+    "defaultChatType": {
+      "description": "目标类型：与 defaultChatId 成组；只给 defaultChatId 时为 1。1：单聊；2：群聊",
+      "type": "integer",
+      "enum": [
+        1,
+        2
+      ]
+    },
     "docMcpUrl": {
       "description": "会话文档：智能机器人「文档」授权后的 streamableHTTP URL（工作台 → 智能机器人 → 可使用权限）。配置且 contentDisplay=linked 时，插件在企业微信里建一份文档，每个 session 一页，写最近的回复和通知，点控制卡的引用区打开。地址含 apikey：只能写在全局配置里，用 /wecom-aibot config edit 填写，查看时只显示是否已配置",
       "type": "string",
       "pattern": "^https://",
       "maxLength": 2048
     },
-    "allowedUserIds": {
-      "description": "允许给 pi 发任务的企微 userid；不写或留空时所有人都能用。只能写在全局配置里",
-      "type": "array",
-      "items": {
-        "type": "string",
-        "pattern": "\\S"
-      }
+    "notificationScope": {
+      "description": "自动结束通知范围：哪些运行结束后自动通知；显式发送、部署测试和会话控制卡不受影响。wecom-tasks：仅自动回传企微发起的任务结果；all-runs：已接入会话的每轮完整运行结束后都通知；企微任务不重复发送",
+      "type": "string",
+      "enum": [
+        "wecom-tasks",
+        "all-runs"
+      ],
+      "default": "wecom-tasks"
+    },
+    "secret": {
+      "description": "长连接专用 Secret；查看时只显示是否已配置",
+      "type": "string",
+      "pattern": "\\S"
     }
   },
   "dependentRequired": {

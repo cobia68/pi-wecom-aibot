@@ -1,8 +1,15 @@
 /** Help layout, argument parsing and completion: the invariants every topic shares, and config's own grammar. */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { commandMenu, completeArguments, helpText, parseInvocation } from "../../src/extension/commands.ts";
+import {
+	commandMenu,
+	completeArguments,
+	configSubcommands,
+	helpText,
+	parseInvocation,
+} from "../../src/extension/commands.ts";
 
 function topicHelp(input: string): string {
 	const invocation = parseInvocation(input);
@@ -46,6 +53,64 @@ function sectionRows(help: string, title: string): string[] {
 }
 
 const values = (prefix: string) => completeArguments(prefix)?.map((item) => item.value) ?? null;
+
+test("character order is shared by command help, menus and completion, with options in a separate group", () => {
+	const names = ["config", "connect", "disconnect", "log", "reset", "status", "test"];
+	assert.deepEqual(
+		sectionRows(helpText(), "子命令").map((row) => row.trim().split(/\s+/)[0]),
+		names,
+	);
+	assert.deepEqual(
+		commandMenu().map((item) => item.input),
+		[...names, "--help"],
+	);
+	assert.deepEqual(values(""), [...names.map((name) => `${name} `), "--help"]);
+	const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8").split("### pi 终端")[1];
+	assert.deepEqual(
+		[...readme.matchAll(/^\| `\/wecom-aibot ([a-z]+)` \|/gm)].map((match) => match[1]),
+		names,
+	);
+	const actions = ["edit", "set", "show", "unset", "whoami"];
+	for (const scope of [undefined, "global", "project", "session"] as const) {
+		const prefix = scope ? `--scope ${scope} ` : "";
+		assert.deepEqual(
+			configSubcommands(scope)
+				.slice(0, actions.length)
+				.map((item) => item.usage),
+			actions.map((action) => `${prefix}${action}`),
+		);
+		assert.deepEqual(values(`config ${prefix}`), [
+			...actions.map((action) => `config ${prefix}${action} `),
+			`config ${prefix}--help`,
+			...(scope ? [] : ["config --scope "]),
+		]);
+	}
+	assert.deepEqual(
+		sectionRows(topicHelp("config --help"), "动作").map((row) => /\] (\w+)/.exec(row)?.[1]),
+		actions,
+	);
+	assert.deepEqual(
+		sectionRows(topicHelp("config --help"), "选项").map((row) => row.trim().split(/\s+/)[0]),
+		["--help", "--scope", "--wait"],
+	);
+	assert.deepEqual(values("config whoami "), ["config whoami --help", "config whoami --wait "]);
+});
+
+test("character order applies to field names, not enum values or user-defined prompt order", () => {
+	const names = sectionRows(topicHelp("config --help"), "字段").flatMap(
+		(row) => /^ {2}([a-zA-Z]+) {2,}/.exec(row)?.[1] ?? [],
+	);
+	assert.ok(names.length >= 9);
+	assert.deepEqual(names, [...names].sort());
+	assert.deepEqual(
+		completeArguments("config set controlPrompts-=", () => ["z", "a", "has space", "b"])?.map((item) => item.value),
+		["config set controlPrompts-=z ", "config set controlPrompts-=a ", "config set controlPrompts-=b "],
+	);
+	assert.deepEqual(values("config set notificationScope="), [
+		"config set notificationScope=wecom-tasks ",
+		"config set notificationScope=all-runs ",
+	]);
+});
 
 test("the total help lists its sections in a fixed order and never leaves trailing whitespace", () => {
 	const help = helpText();
@@ -248,30 +313,30 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 		["config --scope everyone set x=1", /--scope 只能是 global、project 或 session/],
 		// Case-sensitive like pi's own command names and the file: a word in the wrong case is not the word.
 		["config --scope GLOBAL show", /^--scope 只能是 global、project 或 session/],
-		["config SHOW", /^未知动作 SHOW；可用 show、edit、set、unset、whoami/],
+		["config SHOW", /^未知动作 SHOW；可用 edit、set、show、unset、whoami/],
 		["CONFIG show", /^未知子命令/],
 		["Status", /^未知子命令/],
-		["config --SCOPE global show", /^未知选项 --SCOPE。.*--scope、--wait、--help/],
+		["config --SCOPE global show", /^未知选项 --SCOPE。.*--help、--scope、--wait/],
 		[
 			"config set notificationscope=all-runs",
-			/^未知字段 notificationscope；可用字段：defaultChatId、defaultChatType、autoConnect、notificationScope、/,
+			/^未知字段 notificationscope；可用字段：autoConnect、contentDisplay、controlPrompts、defaultChatId、/,
 		],
 		["config set notificationScope=ALL-RUNS", /^notificationScope 只能是 wecom-tasks、all-runs/],
 		["config unset NotificationScope", /^未知字段 NotificationScope；/],
 		["test x --CHAT-TYPE 2", /^未知选项 --CHAT-TYPE/],
 		["config --scope global set --scope session x=1", /--scope 重复给出/],
-		["config global set notificationScope=all-runs", /^未知动作 global；可用 show、edit、set、unset、whoami/],
+		["config global set notificationScope=all-runs", /^未知动作 global；可用 edit、set、show、unset、whoami/],
 		["config set session notificationScope=all-runs", /^「session」缺少 =/],
 		["config global", /^未知动作 global/],
 		["config session delete x", /^未知动作 session/],
 		["config --global set x=1", /^未知选项 --global。作用域写成 --scope global$/],
 		["config --show", /show 是动作，不带 --/],
 		["config --scope session set --notificationScope all-runs", /字段写成 notificationScope=…，不用 --/],
-		["config --scope session set --mode text", /未知选项 --mode.*--scope、--wait、--help；字段写成 字段=值/],
+		["config --scope session set --mode text", /未知选项 --mode.*--help、--scope、--wait；字段写成 字段=值/],
 		["config show --wait 30", /--wait 只用于 whoami/],
 		["config whoami --wait 5", /--wait 须为 10～600/],
 		["config whoami x", /不接受参数/],
-		["config everything", /未知动作 everything；可用 show、edit、set、unset、whoami/],
+		["config everything", /未知动作 everything；可用 edit、set、show、unset、whoami/],
 		["config show extra", /不接受参数/],
 		["config --scope global edit now", /不接受参数/],
 		[
@@ -362,7 +427,7 @@ test("a bare action documents no options, yet its completion still offers --help
 });
 
 test("argument completion offers every word that may come next: subcommands, options, actions, fields and values", () => {
-	assert.deepEqual(values(""), ["status ", "config ", "connect ", "disconnect ", "test ", "log ", "reset ", "--help"]);
+	assert.deepEqual(values(""), ["config ", "connect ", "disconnect ", "log ", "reset ", "status ", "test ", "--help"]);
 	assert.deepEqual(values("co"), ["config ", "connect "]);
 	assert.deepEqual(values("--h"), ["--help"]);
 	// test's chatid is free text, so only its options are offered.
@@ -372,20 +437,20 @@ test("argument completion offers every word that may come next: subcommands, opt
 	assert.deepEqual(values("test x --chat-type 2 "), ["test x --chat-type 2 --help"]);
 	// The target comes first; every action may go without it, a write then changes the global layer.
 	assert.deepEqual(values("config "), [
-		"config --scope ",
-		"config show ",
 		"config edit ",
 		"config set ",
+		"config show ",
 		"config unset ",
 		"config whoami ",
 		"config --help",
+		"config --scope ",
 	]);
-	assert.deepEqual(values("config s"), ["config show ", "config set "]);
-	assert.deepEqual(values("config set ")?.slice(0, 2), ["config set defaultChatId=", "config set defaultChatType="]);
+	assert.deepEqual(values("config s"), ["config set ", "config show "]);
+	assert.deepEqual(values("config set ")?.slice(0, 2), ["config set autoConnect=", "config set contentDisplay="]);
 	assert.ok(values("config unset ")?.includes("config unset docMcpUrl "), "without a target unset is global's");
 	assert.ok(!values("config --scope session unset ")?.includes("config --scope session unset docMcpUrl "));
 	assert.deepEqual(values("config edit "), ["config edit --help"]);
-	assert.deepEqual(values("config -"), ["config --scope ", "config --help"]);
+	assert.deepEqual(values("config -"), ["config --help", "config --scope "]);
 	assert.deepEqual(values("config --scope "), [
 		"config --scope global ",
 		"config --scope project ",
@@ -394,34 +459,34 @@ test("argument completion offers every word that may come next: subcommands, opt
 	assert.deepEqual(values("config --scope p"), ["config --scope project "]);
 	assert.deepEqual(values("config --scope s"), ["config --scope session "]);
 	assert.deepEqual(values("config --scope global "), [
-		"config --scope global show ",
 		"config --scope global edit ",
 		"config --scope global set ",
+		"config --scope global show ",
 		"config --scope global unset ",
 		"config --scope global whoami ",
 		"config --scope global --help",
 	]);
-	assert.deepEqual(values("config --scope=global s"), ["config --scope=global show ", "config --scope=global set "]);
+	assert.deepEqual(values("config --scope=global s"), ["config --scope=global set ", "config --scope=global show "]);
 	// After the action there is no --scope: --wait is whoami's and comes after it.
 	assert.deepEqual(values("config show "), ["config show --help"]);
-	assert.deepEqual(values("config whoami "), ["config whoami --wait ", "config whoami --help"]);
+	assert.deepEqual(values("config whoami "), ["config whoami --help", "config whoami --wait "]);
 	assert.deepEqual(values("config whoami --w"), ["config whoami --wait "]);
 	assert.deepEqual(values("config --scope global whoami "), [
-		"config --scope global whoami --wait ",
 		"config --scope global whoami --help",
+		"config --scope global whoami --wait ",
 	]);
 	assert.deepEqual(values("config --scope global show "), ["config --scope global show --help"]);
 	assert.deepEqual(values("config --scope session edit "), ["config --scope session edit --help"]);
 	// Credentials are never offered to set: they only go through edit. A field= takes its value without a space.
 	assert.deepEqual(values("config --scope global set "), [
-		"config --scope global set defaultChatId=",
-		"config --scope global set defaultChatType=",
 		"config --scope global set autoConnect=",
-		"config --scope global set notificationScope=",
 		"config --scope global set contentDisplay=",
 		"config --scope global set controlPrompts=",
 		"config --scope global set controlPrompts+=",
 		"config --scope global set controlPrompts-=",
+		"config --scope global set defaultChatId=",
+		"config --scope global set defaultChatType=",
+		"config --scope global set notificationScope=",
 		"config --scope global set --help",
 	]);
 	// A field already given is not offered again, whichever of =, += or -= it was given with.
@@ -543,7 +608,7 @@ test("every completion level and the menu put the descriptions in one column, wh
 	const menu = commandMenu();
 	assert.deepEqual(
 		menu.map((item) => item.input),
-		["status", "config", "connect", "disconnect", "test", "log", "reset", "--help"],
+		["config", "connect", "disconnect", "log", "reset", "status", "test", "--help"],
 	);
 	assert.equal(new Set(menu.map((item) => labelColumn(item.label))).size, 1);
 	for (const item of menu) assert.ok(item.label.startsWith(`${item.input} `), item.label);
@@ -554,7 +619,7 @@ test("WeCom aliases do not change pi terminal commands: -h and s remain unknown"
 	assert.match(errorOf("-h"), /^未知选项 -h。查看用法：\/wecom-aibot --help/);
 	assert.match(errorOf("connect -h"), /^未知选项 -h。\/wecom-aibot connect 不接受选项/);
 	assert.match(errorOf("test -h"), /支持的选项：--chat-type、--help/);
-	assert.match(errorOf("config --scope global edit -h"), /^未知选项 -h。.*--scope、--wait、--help；字段写成 字段=值$/);
+	assert.match(errorOf("config --scope global edit -h"), /^未知选项 -h。.*--help、--scope、--wait；字段写成 字段=值$/);
 	assert.deepEqual(values("-"), ["--help"]);
 	assert.equal(topicHelp("--help connect"), topicHelp("connect --help"));
 });
@@ -597,6 +662,6 @@ test("error messages never end in a full stop, also when composed from several s
 		assert.ok(!errorOf(input).endsWith("。"), errorOf(input));
 	assert.equal(
 		errorOf("config --scope session set notificationScope=all-runs bogus=1 x"),
-		"未知字段 bogus；可用字段：defaultChatId、defaultChatType、autoConnect、notificationScope、contentDisplay、controlPrompts；「x」缺少 =，写成 字段=值。未做任何修改。查看帮助：/wecom-aibot config --help",
+		"未知字段 bogus；可用字段：autoConnect、contentDisplay、controlPrompts、defaultChatId、defaultChatType、notificationScope；「x」缺少 =，写成 字段=值。未做任何修改。查看帮助：/wecom-aibot config --help",
 	);
 });

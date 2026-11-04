@@ -31,7 +31,7 @@ import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { pluginDirectory } from "../shared/agent-path.ts";
 import { MAX_PROMPT_LENGTH, MAX_PROMPTS } from "../shared/control-card.ts";
-import { errorMessage, sentences } from "../shared/text.ts";
+import { compareNames, errorMessage, sentences } from "../shared/text.ts";
 import type { ChatRef } from "../shared/wecom-protocol.ts";
 import { docUrlProblem } from "./doc-mcp.ts";
 
@@ -118,8 +118,8 @@ export interface DocumentField extends FieldBase {
 
 export type FieldSpec = ConnectionField | StartupField | SettingField | DocumentField;
 
-/** Every managed field, in display order. */
-export const FIELDS: readonly FieldSpec[] = [
+/** Field definitions; public lists use the name-ordered FIELDS below, not declaration order. */
+const FIELD_DEFINITIONS: readonly FieldSpec[] = [
 	{ name: "botId", label: "BotID", description: "智能机器人 BotID", effect: "connection" },
 	{
 		name: "secret",
@@ -198,6 +198,9 @@ export const FIELDS: readonly FieldSpec[] = [
 		effect: "document",
 	},
 ];
+
+/** One character order for help, completion, validation reports and configuration display. */
+export const FIELDS: readonly FieldSpec[] = [...FIELD_DEFINITIONS].sort((a, b) => compareNames(a.name, b.name));
 
 export const SETTING_FIELDS = FIELDS.filter((spec): spec is SettingField => spec.effect === "setting");
 
@@ -292,7 +295,7 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set(["$schema", ...FIELDS.map((spec)
 
 /** The fields a layer's file may hold, as a message about an unknown key lists them. */
 function layerKeys(scope: Scope): readonly string[] {
-	return scope === "global" ? [...ALL, "allowedUserIds"] : ALL.filter((name) => name !== "docMcpUrl");
+	return scope === "global" ? [...ALL, "allowedUserIds"].sort() : ALL.filter((name) => name !== "docMcpUrl");
 }
 
 function parseLayer(raw: Record<string, unknown>, scope: Scope): Layer {

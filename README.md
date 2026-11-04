@@ -226,13 +226,13 @@ pi install npm:@cobia/pi-wecom-aibot
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/cobia68/pi-wecom-aibot/main/config.schema.json",
+  "allowedUserIds": ["your-userid"],
+  "autoConnect": false,
   "botId": "your-bot-id",
-  "secret": "your-secret",
   "defaultChatId": "your-userid",
   "defaultChatType": 1,
-  "autoConnect": false,
   "notificationScope": "wecom-tasks",
-  "allowedUserIds": ["your-userid"]
+  "secret": "your-secret"
 }
 ```
 
@@ -240,14 +240,16 @@ pi install npm:@cobia/pi-wecom-aibot
 
 | 字段 | 含义 |
 | :--- | :--- |
-| `botId` / `secret` | 机器人凭据 |
-| `defaultChatId` / `defaultChatType` | 默认目标：userid + `1` 单聊，群 chatid + `2` 群聊；省略类型时为单聊 |
+| `allowedUserIds` | 用户白名单，仅限全局；不写或留空表示不限制 |
 | `autoConnect` | `false`（默认）手动接入；`true` 在会话启动时自动接入，含新建、恢复、分叉和 `/reload`；不改变当前连接或网络重连策略 |
-| `notificationScope` | `wecom-tasks`（默认）只自动回传企微任务；`all-runs` 也通知本地运行结果 |
+| `botId` | 机器人 BotID，与 `secret` 在同一层成组配置 |
 | `contentDisplay` | `inline`（默认）显示摘要，可按需查看全文／长图；`linked` 仅使用[会话文档](#会话文档)，不可用时在引用区提示原因，不回退正文 |
 | `controlPrompts` | 「发提示词」候选，默认空，最多 10 条、每条最多 500 字 |
+| `defaultChatId` | 默认推送目标：单聊填 userid，群聊填 chatid |
+| `defaultChatType` | 默认目标的类型：`1` 单聊、`2` 群聊；与 `defaultChatId` 成组，省略时为单聊 |
 | `docMcpUrl` | 会话文档的 streamableHTTP URL，仅限全局，含密钥 |
-| `allowedUserIds` | 用户白名单，仅限全局；不写或留空表示不限制 |
+| `notificationScope` | `wecom-tasks`（默认）只自动回传企微任务；`all-runs` 也通知本地运行结果 |
+| `secret` | 长连接专用 Secret，与 `botId` 在同一层成组配置 |
 
 `controlPrompts` 用英文逗号分隔，`=` 替换整份，`+=` 追加，`-=` 按原文删除。含空格或英文逗号的提示词用 `edit` 一行一条填写。项目或 session 首次用 `+=`、`-=` 时会复制继承来的列表，此后不再跟随上层变化，`unset` 后恢复继承
 
@@ -261,6 +263,10 @@ pi install npm:@cobia/pi-wecom-aibot
 Secret 以明文保存，编辑时也会显示在屏幕上，请勿分享或提交到仓库。项目配置随项目目录一起删除；删除 pi 会话不会清理用户目录里的 session 覆盖，不需要时手动删除 `sessions/` 中的对应文件
 
 ## 🧰 命令速查
+
+菜单、帮助、Tab 补全、配置字段展示、Schema 和 `wecom_send` 参数按英文标识符的字符序排列，不依赖系统语言。子命令／字段在前，`--选项` 在后，各组内部排序；`--` 是结束选项的分隔符，单独列在末尾
+
+`config edit` 中 BotID/Secret、默认目标/类型仍作为一组，以首字段名排序；首次配置仍按填写流程引导。排序不改变参数含义、默认值、配置优先级、枚举值顺序或用户提示词列表；查看配置不会重排配置文件
 
 ### 企业微信
 
@@ -278,13 +284,13 @@ Secret 以明文保存，编辑时也会显示在屏幕上，请勿分享或提�
 | 命令 | 作用 |
 | :--- | :--- |
 | `/wecom-aibot` | 打开子命令菜单 |
-| `/wecom-aibot status` | 查看连接状态、默认目标和配置位置 |
 | `/wecom-aibot config` | 查看、编辑配置或识别聊天，详见上节 |
 | `/wecom-aibot connect` | 接入当前会话，或确认切换接入配置 |
 | `/wecom-aibot disconnect` | 断开当前会话，不影响其他 pi |
-| `/wecom-aibot test` | 向默认目标发部署测试卡 |
 | `/wecom-aibot log` | 查看最近 20 条日志 |
 | `/wecom-aibot reset` | 确认后删除全局配置和本机登记的文档页，断开当前会话 |
+| `/wecom-aibot status` | 查看连接状态、默认目标和配置位置 |
+| `/wecom-aibot test` | 向默认目标发部署测试卡 |
 | `/wecom-aibot --help` | 查看完整用法；配置帮助用 `config --help` |
 
 `disconnect` 不修改配置，会取消当前会话的排队任务和待发通知；已开始的任务继续在电脑上运行，但不再回传结果

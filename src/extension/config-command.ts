@@ -7,7 +7,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MAX_PROMPTS } from "../shared/control-card.ts";
 import type { ChatIdentity } from "../shared/gateway-protocol.ts";
-import { errorMessage, sentences } from "../shared/text.ts";
+import { compareNames, errorMessage, sentences } from "../shared/text.ts";
 import {
 	type ConfigInvocation,
 	type ConfigScope,
@@ -168,7 +168,8 @@ class ConfigCommand {
 	private async chooseSubcommand(scope: ConfigScope | undefined): Promise<void> {
 		const choices = configSubcommands(scope);
 		if (!this.ctx.hasUI) {
-			const example = `/wecom-aibot config ${subcommandUsage(choices[0])}`;
+			// Alphabetical menus start with edit, but non-interactive users need a usable read-only example.
+			const example = `/wecom-aibot config ${scope ? `--scope ${scope} ` : ""}show`;
 			this.notify(
 				[`/wecom-aibot config 需要写明动作，例如 ${example}：`, ...configSubcommandLines(scope)].join("\n"),
 			);
@@ -189,6 +190,7 @@ class ConfigCommand {
 		const rows: [string, string][] = FIELDS.map((spec) => [spec.name, describe(resolved, spec.name)]);
 		if (resolved.allowedUserIds?.length)
 			rows.push(["allowedUserIds", `${resolved.allowedUserIds.join("、")}（全局）`]);
+		rows.sort(([a], [b]) => compareNames(a, b));
 		const adopted = this.host.adopted();
 		const state =
 			adopted === undefined
@@ -215,6 +217,7 @@ class ConfigCommand {
 			display(spec.name, layer?.[spec.name]),
 		]);
 		if (layer?.allowedUserIds?.length) rows.push(["allowedUserIds", layer.allowedUserIds.join("、")]);
+		rows.sort(([a], [b]) => compareNames(a, b));
 		this.notify(
 			[
 				LAYER[scope].heading,
@@ -446,12 +449,15 @@ class ConfigCommand {
 			const change = await edit;
 			return change && { change };
 		};
-		const edit = await this.choose<() => Promise<Edit | undefined>>(`编辑${LAYER[scope].title}`, [
+		type Item = [name: FieldName, label: string, edit: () => Promise<Edit | undefined>];
+		const items: Item[] = [
 			[
+				"botId",
 				`机器人凭据：BotID ${describe(resolved, "botId")}，Secret ${display("secret", secret)}`,
 				() => plain(this.editCredentials(botId, overridden("botId") && LAYER[scope].from)),
 			],
 			[
+				"defaultChatId",
 				`默认推送目标：${defaultChatId ? `${defaultChatId}，${describe(resolved, "defaultChatType")}` : "未设置"}`,
 				() =>
 					this.askTarget(scope, defaultChatId, {
@@ -460,7 +466,8 @@ class ConfigCommand {
 					}),
 			],
 			...FIELDS.filter((spec) => spec.effect === "setting" || spec.effect === "startup").map(
-				(spec): [string, () => Promise<Edit | undefined>] => [
+				(spec): Item => [
+					spec.name,
 					`${spec.label}：${describe(resolved, spec.name)}`,
 					() =>
 						plain(
@@ -479,12 +486,18 @@ class ConfigCommand {
 			...(scope === "global"
 				? [
 						[
+							"docMcpUrl",
 							`会话文档：${display("docMcpUrl", resolved.values.docMcpUrl)}`,
 							() => plain(this.editDocument(resolved.values.docMcpUrl !== undefined)),
-						] as [string, () => Promise<Edit | undefined>],
+						] as Item,
 					]
 				: []),
-		]);
+		];
+		// Sort groups by their first field, without splitting credential or target editing into separate steps.
+		const edit = await this.choose(
+			`编辑${LAYER[scope].title}`,
+			items.sort(([a], [b]) => compareNames(a, b)).map(([, label, run]) => [label, run]),
+		);
 		return edit?.();
 	}
 

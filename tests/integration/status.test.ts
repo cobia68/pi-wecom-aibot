@@ -339,7 +339,7 @@ test("a bare /wecom-aibot opens the subcommand menu under the connection state; 
 	assert.equal(menu.title, "💤 企业微信智能机器人：未接入");
 	assert.deepEqual(
 		menu.options.map((option) => option.split(/ {2,}/)[0]),
-		["status", "config", "connect", "disconnect", "test", "log", "reset", "--help"],
+		["config", "connect", "disconnect", "log", "reset", "status", "test", "--help"],
 	);
 	assert.deepEqual(h.notices, [], "Esc says nothing");
 	assert.equal(h.clients.length, 0, "opening the menu never connects");
@@ -385,7 +385,7 @@ test("without an interactive UI a bare /wecom-aibot lists the subcommands instea
 	await h.command("");
 	assert.equal(h.dialogs.menus.length, 0);
 	assert.equal(h.notices.length, 1);
-	assert.match(h.notices[0], /^\/wecom-aibot 需要写明子命令，例如 \/wecom-aibot status：\n {2}status {2,}查看/);
+	assert.match(h.notices[0], /^\/wecom-aibot 需要写明子命令，例如 \/wecom-aibot status：\n {2}config {2,}查看/);
 	assert.match(h.notices[0], /^ {2}--help {2,}显示帮助$/m);
 	assert.equal(h.clients.length, 0);
 });

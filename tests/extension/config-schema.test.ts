@@ -22,6 +22,29 @@ test("the committed config.schema.json is the one the field table builds; run np
 	assert.equal(schema.$id, SCHEMA_URL);
 });
 
+test("character order is used by managed fields and the generated schema, including the global allowlist", () => {
+	const managed = FIELDS.map((spec) => spec.name);
+	assert.deepEqual(managed, [...managed].sort());
+	const keys = Object.keys(schema.properties);
+	assert.deepEqual(keys, [...keys].sort());
+	const committed = JSON.parse(readFileSync(new URL("../../config.schema.json", import.meta.url), "utf8"));
+	assert.deepEqual(Object.keys(committed.properties), keys);
+});
+
+test("README field reference and configuration examples keep the schema's character order", () => {
+	const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+	const table = readme.split("| 字段 | 含义 |\n")[1].split("\n\n")[0];
+	const names = [...table.matchAll(/^\| `([a-zA-Z]+)` \|/gm)].map((match) => match[1]);
+	assert.deepEqual(
+		names,
+		Object.keys(schema.properties).filter((name) => name !== "$schema"),
+	);
+	for (const match of readme.matchAll(/```json\n([\s\S]*?)\n```/g)) {
+		const keys = Object.keys(JSON.parse(match[1]));
+		assert.deepEqual(keys, [...keys].sort());
+	}
+});
+
 test("the keys are the file's: every field, allowedUserIds and $schema, and nothing else", () => {
 	assert.deepEqual(Object.keys(schema.properties).sort(), [
 		...[...FIELDS.map((spec) => spec.name), "allowedUserIds", "$schema"].sort(),

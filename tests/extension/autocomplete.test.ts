@@ -102,7 +102,7 @@ test("Tab keeps completing deeper argument levels", async () => {
 		signal: new AbortController().signal,
 		force: true,
 	});
-	assert.deepEqual(values(suggestions), ["config --scope global show ", "config --scope global set "]);
+	assert.deepEqual(values(suggestions), ["config --scope global set ", "config --scope global show "]);
 });
 
 test("a chosen word that can be followed gets its space, so the next Tab goes a level deeper", async () => {
@@ -111,15 +111,19 @@ test("a chosen word that can be followed gets its space, so the next Tab goes a 
 	const deeper = await pressTab("/wecom-aibot conf", 2);
 	assert.equal(deeper.text, "/wecom-aibot config ");
 	assert.equal(deeper.listed, true);
-	assert.match(deeper.rendered, /→ --scope <global\|project\|session> /);
+	assert.match(deeper.rendered, /→ edit {2,}/);
 	assert.match(deeper.rendered, /^ {2}show {2,}/m);
 	assert.match(deeper.rendered, /^ {2}set {2,}/m, "a write without a target changes the global layer");
 	// Two matches: the first Tab lists them, the second applies the selected one with its space.
 	assert.equal((await pressTab("/wecom-aibot c", 2)).text, "/wecom-aibot config ");
 	assert.equal(
 		(await pressTab("/wecom-aibot config --scope global s", 2)).text,
-		"/wecom-aibot config --scope global show ",
+		"/wecom-aibot config --scope global set ",
 	);
+	// Options follow actions in the list, but filtering still completes --scope and then its values.
+	const scope = await pressTab("/wecom-aibot config --s", 2);
+	assert.equal(scope.text, "/wecom-aibot config --scope ");
+	assert.match(scope.rendered, /→ global {2,}/);
 	// --help ends the command, so it gets no space.
 	assert.equal((await pressTab("/wecom-aibot --h")).text, "/wecom-aibot --help");
 	assert.equal((await pressTab("/wecom-aibot status ")).text, "/wecom-aibot status --help");

@@ -5,7 +5,7 @@
  */
 import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { sentences } from "../shared/text.ts";
+import { compareNames, sentences } from "../shared/text.ts";
 import {
 	CONFIG_FILE,
 	chatIdProblem,
@@ -89,7 +89,7 @@ const CONFIG_COMMAND: CommandSpec = {
 	],
 };
 
-const COMMANDS: CommandSpec[] = [
+const COMMAND_DEFINITIONS: readonly CommandSpec[] = [
 	{
 		name: "status",
 		usage: "status",
@@ -162,6 +162,9 @@ const COMMANDS: CommandSpec[] = [
 		],
 	},
 ];
+
+/** Public command lists never depend on definition order or the host's locale. */
+const COMMANDS = [...COMMAND_DEFINITIONS].sort((a, b) => compareNames(a.name, b.name));
 
 export type ConfigInvocation =
 	/** No action given: list the forms, all of them or one scope's. */
@@ -245,7 +248,7 @@ function layerSubcommands(scope: ConfigScope): ConfigSubcommand[] {
 }
 
 /** The config actions: their usage and help, and the short description completion shows. */
-const CONFIG_ACTION_TABLE = [
+const CONFIG_ACTION_DEFINITIONS = [
 	{
 		action: "show",
 		usage: `[${SCOPE_SLOT}] show`,
@@ -277,6 +280,7 @@ const CONFIG_ACTION_TABLE = [
 		short: "发验证码识别聊天",
 	},
 ] as const;
+const CONFIG_ACTION_TABLE = [...CONFIG_ACTION_DEFINITIONS].sort((a, b) => compareNames(a.action, b.action));
 const CONFIG_ACTIONS: readonly string[] = CONFIG_ACTION_TABLE.map((item) => item.action);
 
 /**
@@ -284,9 +288,12 @@ const CONFIG_ACTIONS: readonly string[] = CONFIG_ACTION_TABLE.map((item) => item
  * scope: that layer's forms only.
  */
 export function configSubcommands(scope?: ConfigScope): readonly ConfigSubcommand[] {
-	if (scope) return layerSubcommands(scope);
+	const actions = (scope ? layerSubcommands(scope) : [...PLAIN_SUBCOMMANDS]).sort((a, b) =>
+		compareNames(a.usage, b.usage),
+	);
+	if (scope) return actions;
 	return [
-		...PLAIN_SUBCOMMANDS,
+		...actions,
 		...SCOPES.map(
 			(layer): ConfigSubcommand => ({
 				usage: `--scope ${layer} …`,
@@ -313,6 +320,11 @@ export type Invocation =
 	| { kind: "error"; message: string };
 
 const HELP_OPTION: OptionSpec = { name: "help", value: "", description: "显示帮助", example: "<子命令> --help" };
+
+/** Ordinary options, including --help, use the same order in help, completion and diagnostics. */
+function commandOptions(command: CommandSpec): OptionSpec[] {
+	return [...command.options, HELP_OPTION].sort((a, b) => compareNames(a.name, b.name));
+}
 
 /** Option names are checked against every command; values are validated later. */
 function scanArgs(input: string): {
@@ -554,10 +566,11 @@ function orList(words: readonly string[]): string {
 }
 
 function supportedOptions(command: CommandSpec): string {
-	const names = command.options.map((option) => `--${option.name}`);
 	const usage = `/wecom-aibot ${command.name}`;
-	return names.length
-		? `${usage} 支持的选项：${[...names, "--help"].join("、")}`
+	return command.options.length
+		? `${usage} 支持的选项：${commandOptions(command)
+				.map((option) => `--${option.name}`)
+				.join("、")}`
 		: `${usage} 不接受选项，用法：${usage}`;
 }
 
@@ -647,11 +660,11 @@ function totalHelpText(): string {
 }
 
 function optionRows(command: CommandSpec): string[] {
-	const rows: [string, string][] = command.options.map((option) => [
+	const rows: [string, string][] = commandOptions(command).map((option) => [
 		`--${option.name} ${option.value}`.trim(),
-		option.description,
+		option.name === "help" ? "显示当前命令的帮助，不执行动作" : option.description,
 	]);
-	rows.push(["--help", "显示当前命令的帮助，不执行动作"]);
+	// -- is syntax, not a named option: keep the end-of-options separator last.
 	if (command.maxArgs) rows.push(["--", "结束选项解析，后面的值都作为位置参数"]);
 	return table(rows);
 }
@@ -745,7 +758,7 @@ export function completeArguments(
 	return shown.map(({ item, label }) => ({ value: `${head}${item.value}${spaced(item) ? " " : ""}`, label }));
 }
 
-/** The words that may follow `tokens`: config's target, positionals, options, then --help. */
+/** Names first, options second; each group uses character order. Value lists keep their own order. */
 function candidatesAt(
 	tokens: string[],
 	current: string,
@@ -781,10 +794,10 @@ function candidatesAt(
 		description: item.description,
 		takesValue: !!item.value,
 	});
-	const help = option(HELP_OPTION);
+	const options = commandOptions(command).filter((item) => !used.has(item.name));
 	if (command !== CONFIG_COMMAND) {
 		if (words.length > command.maxArgs) return [];
-		return [...command.options.filter((item) => !used.has(item.name)).map(option), help];
+		return options.map(option);
 	}
 	const [action] = words;
 	const scoped = used.has("scope");
@@ -793,20 +806,21 @@ function candidatesAt(
 		scopeAt < 0 ? undefined : rest[scopeAt].startsWith("--scope=") ? rest[scopeAt].slice(8) : rest[scopeAt + 1];
 	// The layer a write without a target changes.
 	const scope = scoped ? given : "global";
-	const configOption = (name: string) => option(command.options.find((item) => item.name === name)!);
-	// The target goes before the action: offered until an action is written.
-	if (action === undefined)
-		return [...(scoped ? [] : [configOption("scope")]), ...configCandidates(words, current, scope, prompts), help];
+	const configOptions = options
+		.filter(
+			(item) =>
+				item.name === "help" ||
+				(action === undefined ? item.name === "scope" : action === "whoami" && item.name === "wait"),
+		)
+		.map(option);
+	// --scope still goes before the action when typed; its position in this list does not change the grammar.
+	if (action === undefined) return [...configCandidates(words, current, scope, prompts), ...configOptions];
 	// A target after the action or a --wait before it is refused when run: offer nothing.
 	if (!CONFIG_ACTIONS.includes(action) || (scoped && !early.has("scope")) || early.has("wait")) return [];
 	if (action !== "set" && action !== "unset" && words.length > 1) return [];
 	// A word that running the command would refuse, a field in the wrong case among them: offer nothing after it.
 	if (!words.slice(1).every((word) => fieldWord(action, word))) return [];
-	return [
-		...configCandidates(words, current, scope, prompts),
-		...(action === "whoami" && !used.has("wait") ? [configOption("wait")] : []),
-		help,
-	];
+	return [...configCandidates(words, current, scope, prompts), ...configOptions];
 }
 
 /** A word after set or unset that running the command takes: a settable field=value, or a field's name. */

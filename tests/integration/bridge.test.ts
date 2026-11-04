@@ -2220,9 +2220,9 @@ test("config without an action lists the subcommands and runs only the one chose
 	assert.deepEqual(
 		menus.at(-1)?.options.map((option) => option.split(/ {2,}/)[0]),
 		[
-			"show",
 			"edit",
 			"set 字段=值 …",
+			"show",
 			"unset 字段 …",
 			"whoami",
 			"--scope global …",
@@ -2247,9 +2247,9 @@ test("config without an action lists the subcommands and runs only the one chose
 	assert.deepEqual(
 		menus.at(-1)?.options.map((option) => option.split(/ {2,}/)[0]),
 		[
-			"--scope session show",
 			"--scope session edit",
 			"--scope session set 字段=值 …",
+			"--scope session show",
 			"--scope session unset 字段 …",
 			"--scope session whoami",
 		],
@@ -2329,13 +2329,13 @@ test("argument completion through pi offers subcommands, options and config's gr
 		"a write without a target changes the global layer",
 	);
 	assert.deepEqual(values("config "), [
-		"config --scope ",
-		"config show ",
 		"config edit ",
 		"config set ",
+		"config show ",
 		"config unset ",
 		"config whoami ",
 		"config --help",
+		"config --scope ",
 	]);
 	assert.deepEqual(values("config show "), ["config show --help"]);
 	// A bare action still offers --help, so the list is complete at every position.
