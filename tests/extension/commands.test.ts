@@ -128,8 +128,18 @@ test("the total help describes the commands it lists; names it does not list are
 test("config help documents scopes, every field with its default, and no retired name", () => {
 	const help = topicHelp("config --help");
 	assert.equal(topicHelp("config --scope session set --help"), help, "help inside config is config's own help");
-	for (const field of ["botId", "secret", "defaultChatId", "defaultChatType", "notificationScope", "controlPrompts"])
+	for (const field of [
+		"botId",
+		"secret",
+		"defaultChatId",
+		"defaultChatType",
+		"autoConnect",
+		"notificationScope",
+		"controlPrompts",
+	])
 		assert.match(help, new RegExp(`^ {2}${field} `, "m"), field);
+	assert.match(help, /false：不自动接入.*（默认）/);
+	assert.match(help, /autoConnect 在下次会话启动（含 \/reload）时生效/);
 	assert.match(help, /wecom-tasks：.*（默认）/);
 	assert.doesNotMatch(help, /screenshotTheme|截图/);
 	assert.match(help, /^用法：\/wecom-aibot config \[--scope <global\|project\|session>\] <动作> \[字段=值 …\]$/m);
@@ -153,17 +163,15 @@ test("config help documents scopes, every field with its default, and no retired
 	);
 });
 
-test("connection help never promises persisted consent or recommends the old start action", () => {
-	for (const help of [
-		helpText(),
-		topicHelp("config --help"),
-		topicHelp("connect --help"),
-		topicHelp("disconnect --help"),
-	]) {
+test("connection help defaults to manual connect, documents the startup opt-in, and never recommends start", () => {
+	for (const help of [helpText(), topicHelp("config --help"), topicHelp("connect --help")]) {
 		assert.match(help, /当前 (?:pi|session)/);
-		assert.match(help, /每个 session.*手动.*\/wecom-aibot connect/);
-		assert.doesNotMatch(help, /enabled 设为|开启自动接入|会打开|\bstart\b/);
+		assert.match(help, /默认.*每个 session.*手动.*\/wecom-aibot connect/);
+		assert.match(help, /autoConnect=true.*自动接入/);
+		assert.doesNotMatch(help, /enabled 设为|会打开|\bstart\b/);
 	}
+	assert.match(topicHelp("disconnect --help"), /autoConnect=true.*手动断开后也不会立即连回/);
+	assert.match(topicHelp("disconnect --help"), /下次会话启动仍按 autoConnect 判断/);
 });
 
 test("help says saving configuration never connects, and whoami only listens through a temporary connection", () => {
@@ -173,7 +181,7 @@ test("help says saving configuration never connects, and whoami only listens thr
 	assert.match(config, /whoami 只识别不保存/);
 	const connect = topicHelp("connect --help");
 	assert.match(connect, /默认推送目标必须齐全/);
-	assert.match(connect, /创建或复用本 session 的控制卡/);
+	assert.match(connect, /手动或自动接入.*发一张新的 session 控制卡/);
 	assert.match(connect, /控制卡只在点击后刷新/);
 	assert.match(connect, /没有交互界面且有待处理工作时拒绝切换/);
 	assert.doesNotMatch(helpText(), /wecom-aibot use/);
@@ -246,7 +254,7 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 		["config --SCOPE global show", /^未知选项 --SCOPE。.*--scope、--wait、--help/],
 		[
 			"config set notificationscope=all-runs",
-			/^未知字段 notificationscope；可用字段：defaultChatId、defaultChatType、notificationScope、/,
+			/^未知字段 notificationscope；可用字段：defaultChatId、defaultChatType、autoConnect、notificationScope、/,
 		],
 		["config set notificationScope=ALL-RUNS", /^notificationScope 只能是 wecom-tasks、all-runs/],
 		["config unset NotificationScope", /^未知字段 NotificationScope；/],
@@ -283,6 +291,35 @@ test("config takes its target before the action: --scope, action, 字段=值; re
 		assert.equal(invocation.kind, "error", input);
 		assert.match(invocation.kind === "error" ? invocation.message : "", message, input);
 	}
+});
+
+test("autoConnect commands and completion use exact booleans in all scopes", () => {
+	assert.deepEqual(parseInvocation("config set autoConnect=true"), {
+		kind: "config",
+		config: { action: "set", scope: "global", set: { autoConnect: true } },
+	});
+	for (const scope of ["global", "project", "session"]) {
+		const prefix = `config --scope ${scope}`;
+		for (const autoConnect of [false, true])
+			assert.deepEqual(parseInvocation(`${prefix} set autoConnect=${autoConnect}`), {
+				kind: "config",
+				config: { action: "set", scope, set: { autoConnect } },
+			});
+		assert.deepEqual(values(`${prefix} set autoConnect=`), [
+			`${prefix} set autoConnect=false `,
+			`${prefix} set autoConnect=true `,
+		]);
+		assert.deepEqual(values(`${prefix} unset auto`), [`${prefix} unset autoConnect `]);
+		assert.deepEqual(parseInvocation(`${prefix} unset autoConnect`), {
+			kind: "config",
+			config: { action: "unset", scope, remove: ["autoConnect"] },
+		});
+	}
+	assert.match(
+		errorOf("config set defaultChatId=new-user autoConnect=1"),
+		/autoConnect 只能是 false、true.*未做任何修改/,
+	);
+	assert.equal(values("config set AutoConnect="), null);
 });
 
 test("the target goes right after config and before the action; --wait goes after whoami", () => {
@@ -379,6 +416,7 @@ test("argument completion offers every word that may come next: subcommands, opt
 	assert.deepEqual(values("config --scope global set "), [
 		"config --scope global set defaultChatId=",
 		"config --scope global set defaultChatType=",
+		"config --scope global set autoConnect=",
 		"config --scope global set notificationScope=",
 		"config --scope global set contentDisplay=",
 		"config --scope global set controlPrompts=",
@@ -487,6 +525,7 @@ test("every completion level and the menu put the descriptions in one column, wh
 		"config --scope ",
 		"config --scope global ",
 		"config --scope global set ",
+		"config --scope session set autoConnect=",
 		"config --scope session set notificationScope=",
 		"config --scope session unset ",
 	]) {
@@ -558,6 +597,6 @@ test("error messages never end in a full stop, also when composed from several s
 		assert.ok(!errorOf(input).endsWith("。"), errorOf(input));
 	assert.equal(
 		errorOf("config --scope session set notificationScope=all-runs bogus=1 x"),
-		"未知字段 bogus；可用字段：defaultChatId、defaultChatType、notificationScope、contentDisplay、controlPrompts；「x」缺少 =，写成 字段=值。未做任何修改。查看帮助：/wecom-aibot config --help",
+		"未知字段 bogus；可用字段：defaultChatId、defaultChatType、autoConnect、notificationScope、contentDisplay、controlPrompts；「x」缺少 =，写成 字段=值。未做任何修改。查看帮助：/wecom-aibot config --help",
 	);
 });

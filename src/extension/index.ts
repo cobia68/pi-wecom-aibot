@@ -295,6 +295,51 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 		);
 	}
 
+	/** Manual connect and the startup opt-in use the same validation and registration path. */
+	async function connectSession(ctx: ExtensionContext, resolved: Resolved): Promise<void> {
+		const sessionId = ctx.sessionManager.getSessionId();
+		const connection = connectionOf(resolved);
+		if (!connection) {
+			ctx.ui.notify("尚未配置机器人凭据，请先运行 /wecom-aibot config edit", "warning");
+			return;
+		}
+		if (bridge?.identifyOnly) {
+			ctx.ui.notify("config whoami 正在识别聊天，请完成或取消后再运行 /wecom-aibot connect", "warning");
+			return;
+		}
+		if (!connection.target) {
+			ctx.ui.notify(
+				sentences(
+					`默认推送目标未配置，请先运行 /wecom-aibot config ${SCOPE_SLOT} whoami 识别保存，或用 /wecom-aibot config set defaultChatId=<ID> 填写`,
+					bridge ? "本次未更新当前接入" : "尚未接入",
+				),
+				"warning",
+			);
+			return;
+		}
+		const key = connectionKey(connection);
+		if (bridge && (bridge.sessionId !== sessionId || bridge.configKey !== key)) {
+			const owner = bridge;
+			if (!(await confirmSwitch(ctx, owner))) return;
+			if (bridge !== owner || sessionCtx?.sessionManager.getSessionId() !== sessionId) {
+				ctx.ui.notify("当前 session 或接入已改变，未重新连接，请再次运行 /wecom-aibot connect", "warning");
+				return;
+			}
+			const confirmed = readResolved(ctx);
+			if (!confirmed) return;
+			if (connectionKey(connectionOf(confirmed)) !== key) {
+				ctx.ui.notify("配置在确认期间再次改变，未重新连接，请再次运行 /wecom-aibot connect", "warning");
+				return;
+			}
+			stopBridge("session or configuration changed");
+		}
+		ensureClient(ctx, connection);
+		bridge?.resume();
+		// Each manual or automatic connect publishes a new control card; network recovery reuses it.
+		bridge?.announce();
+		observe(resolved);
+	}
+
 	// ---------------------------------------------------------------- pi events
 	pi.on("session_start", async (_event, ctx) => {
 		stopBridge("session changed");
@@ -326,9 +371,10 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 			() => ctx.isProjectTrusted?.() ?? true,
 		);
 		// An unreadable file is reported now, never taken for “not configured” later.
-		readResolved(ctx);
+		const resolved = readResolved(ctx);
 		stopReason = undefined;
-		// Connection consent is never persisted or inherited by a new/resumed/reloaded session.
+		// Check only at startup: config saves and manual disconnect never trigger another attempt.
+		if (resolved?.values.autoConnect) await connectSession(ctx, resolved);
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -463,54 +509,13 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 				return;
 			}
 			const { args, options, command } = invocation;
-			const commandSessionId = ctx.sessionManager.getSessionId();
 			const sub = command.name;
 
 			switch (sub) {
 				case "connect": {
 					// Only the files count: after a reset in another pi, this window's snapshot must not recreate it.
 					const resolved = readResolved(ctx);
-					if (!resolved) return;
-					const connection = connectionOf(resolved);
-					if (!connection) {
-						ctx.ui.notify("尚未配置机器人凭据，请先运行 /wecom-aibot config edit", "warning");
-						return;
-					}
-					if (bridge?.identifyOnly) {
-						ctx.ui.notify("config whoami 正在识别聊天，请完成或取消后再运行 /wecom-aibot connect", "warning");
-						return;
-					}
-					if (!connection.target) {
-						ctx.ui.notify(
-							sentences(
-								`默认推送目标未配置，请先运行 /wecom-aibot config ${SCOPE_SLOT} whoami 识别保存，或用 /wecom-aibot config set defaultChatId=<ID> 填写`,
-								bridge ? "本次未更新当前接入" : "尚未接入",
-							),
-							"warning",
-						);
-						return;
-					}
-					const key = connectionKey(connection);
-					if (bridge && (bridge.sessionId !== commandSessionId || bridge.configKey !== key)) {
-						const owner = bridge;
-						if (!(await confirmSwitch(ctx, owner))) return;
-						if (bridge !== owner || sessionCtx?.sessionManager.getSessionId() !== commandSessionId) {
-							ctx.ui.notify("当前 session 或接入已改变，未重新连接，请再次运行 /wecom-aibot connect", "warning");
-							return;
-						}
-						const confirmed = readResolved(ctx);
-						if (!confirmed) return;
-						if (connectionKey(connectionOf(confirmed)) !== key) {
-							ctx.ui.notify("配置在确认期间再次改变，未重新连接，请再次运行 /wecom-aibot connect", "warning");
-							return;
-						}
-						stopBridge("session or configuration changed");
-					}
-					ensureClient(ctx, connection);
-					bridge?.resume();
-					// Every connect publishes a new control card in the default chat; reconnects reuse it.
-					bridge?.announce();
-					observe(resolved);
+					if (resolved) await connectSession(ctx, resolved);
 					return;
 				}
 				case "disconnect": {

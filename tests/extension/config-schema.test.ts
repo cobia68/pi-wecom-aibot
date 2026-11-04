@@ -42,6 +42,12 @@ test("the keys are the file's: every field, allowedUserIds and $schema, and noth
 	});
 });
 
+test("autoConnect is a boolean defaulting to false, not a string or number", () => {
+	assert.equal(property("autoConnect").type, "boolean");
+	assert.equal(property("autoConnect").default, false);
+	assert.deepEqual(property("autoConnect").enum, [false, true]);
+});
+
 test("a value the schema refuses is one reading the file refuses too", () => {
 	for (const chatId of ["me", "wrk_abc-1", '"me"', "a b", "a\tb"])
 		assert.equal(matches("defaultChatId", chatId), chatIdProblem(chatId) === undefined, chatId);

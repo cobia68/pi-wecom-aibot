@@ -44,6 +44,8 @@ export interface ManagedFields {
 	secret: string;
 	defaultChatId: string;
 	defaultChatType: 1 | 2;
+	/** Opt in at session startup only, never while a live session's configuration is being refreshed. */
+	autoConnect: boolean;
 	notificationScope: NotificationScope;
 	contentDisplay: ContentDisplay;
 	/** The smart robot's document MCP address (streamableHTTP URL); it carries an apikey. */
@@ -74,7 +76,7 @@ interface FieldBase {
 /** Part of the registration: adopted by /wecom-aibot connect, never applied to a live one. */
 export interface ConnectionField extends FieldBase {
 	effect: "connection";
-	name: Exclude<FieldName, keyof Settings>;
+	name: Exclude<FieldName, keyof Settings | "autoConnect">;
 	choices?: readonly Choice<ManagedFields[FieldName]>[];
 	default?: undefined;
 }
@@ -98,6 +100,14 @@ export interface PromptsField extends FieldBase {
 
 export type SettingField = ChoiceField | PromptsField;
 
+/** A startup policy, not a live setting or part of an adopted registration. */
+export interface StartupField extends FieldBase {
+	effect: "startup";
+	name: "autoConnect";
+	choices: readonly Choice<boolean>[];
+	default: boolean;
+}
+
 /** Global only, typed only in `config edit`: the address is a credential, shown as set or not set. */
 export interface DocumentField extends FieldBase {
 	effect: "document";
@@ -106,7 +116,7 @@ export interface DocumentField extends FieldBase {
 	default?: undefined;
 }
 
-export type FieldSpec = ConnectionField | SettingField | DocumentField;
+export type FieldSpec = ConnectionField | StartupField | SettingField | DocumentField;
 
 /** Every managed field, in display order. */
 export const FIELDS: readonly FieldSpec[] = [
@@ -132,6 +142,18 @@ export const FIELDS: readonly FieldSpec[] = [
 			{ value: 2, description: "群聊" },
 		],
 		effect: "connection",
+	},
+	{
+		name: "autoConnect",
+		label: "自动接入",
+		description:
+			"会话启动时是否自动接入机器人，包括新建、恢复、分叉及 /reload；需配置有效且凭据、默认推送目标齐全。全局、项目级和 session 都能设；修改不改变当前接入状态，手动 disconnect 后本次运行保持断开，不影响网络断线重连",
+		choices: [
+			{ value: false, description: "不自动接入，需要时手动运行 /wecom-aibot connect" },
+			{ value: true, description: "会话启动时按有效配置自动接入" },
+		],
+		default: false,
+		effect: "startup",
 	},
 	{
 		name: "notificationScope",
@@ -437,7 +459,7 @@ export function writeJson(file: string, value: object, privateDirectory: boolean
 export type Source = LayerName | "default";
 
 export interface Resolved {
-	values: Partial<ManagedFields> & Settings;
+	values: Partial<ManagedFields> & Pick<ManagedFields, "autoConnect"> & Settings;
 	sources: Partial<Record<FieldName, Source>>;
 	allowedUserIds?: string[];
 }
@@ -446,7 +468,8 @@ export interface Resolved {
 export function mergeLayers(layers: Partial<Record<LayerName, Layer>>): Resolved {
 	const values: Record<string, unknown> = {};
 	const sources: Partial<Record<FieldName, Source>> = {};
-	for (const spec of SETTING_FIELDS) {
+	for (const spec of FIELDS) {
+		if (spec.default === undefined) continue;
 		values[spec.name] = Array.isArray(spec.default) ? [...spec.default] : spec.default;
 		sources[spec.name] = "default";
 	}

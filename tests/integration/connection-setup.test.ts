@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, beforeEach, test } from "node:test";
@@ -15,7 +15,7 @@ const directory = mkdtempSync(join(tmpdir(), "pi-wecom-connect-test-"));
 const previousDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = directory;
 const { default: extension } = await import("../../src/extension/index.ts");
-const { CONFIG_FILE, readLayer, writeLayer } = await import("../../src/extension/config.ts");
+const { CONFIG_FILE, SESSIONS_DIR, layerFile, readLayer, writeLayer } = await import("../../src/extension/config.ts");
 const config = { botId: "bot", secret: "secret", defaultChatId: "old-user", defaultChatType: 1 as const };
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
 let cleanup: (() => Promise<void>)[];
@@ -154,8 +154,8 @@ function harness(entries: unknown[] = []) {
 			return client.client;
 		},
 	});
-	async function emit(name: string) {
-		for (const handler of handlers.get(name) ?? []) await handler({ type: name }, ctx);
+	async function emit(name: string, event: Record<string, unknown> = {}) {
+		for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx);
 	}
 	cleanup.push(() => emit("session_shutdown"));
 	return {
@@ -178,6 +178,8 @@ function harness(entries: unknown[] = []) {
 
 beforeEach(() => {
 	cleanup = [];
+	rmSync(SESSIONS_DIR, { recursive: true, force: true });
+	rmSync(layerFile({ project: directory }), { force: true });
 	writeLayer("global", config);
 });
 afterEach(async () => {
@@ -197,6 +199,217 @@ async function connected(h: ReturnType<typeof harness>) {
 	await flush();
 	return c;
 }
+
+for (const reason of ["startup", "new", "resume", "fork", "reload"]) {
+	test(`autoConnect opts a ${reason} session in, without waiting for readiness or inheriting a connection`, async () => {
+		writeLayer("global", { ...config, autoConnect: true, allowedUserIds: ["trusted-user"] });
+		const saved = readFileSync(CONFIG_FILE, "utf8");
+		const h = harness();
+		assert.equal(h.clients.length, 0, "loading the extension alone never opens a connection");
+		await h.emit("session_start", { reason });
+		assert.equal(h.clients.length, 1);
+		const c = h.clients[0];
+		assert.equal(c.options.identifyOnly, false);
+		assert.deepEqual(c.options.config.allowedUserIds, ["trusted-user"]);
+		assert.equal(c.controls.length, 0, "session startup does not wait for the network");
+		c.publish();
+		await flush();
+		assert.equal(c.controls.length, 1);
+		assert.equal(c.controls[0].chat.chatId, "old-user");
+		c.publish(false);
+		c.publish();
+		await flush();
+		assert.equal(c.controls.length, 1, "network recovery does not repeat the startup card");
+		assert.deepEqual(h.confirms, [], "the saved opt-in needs no interactive confirmation");
+		assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved);
+	});
+}
+
+test("autoConnect=false still permits manual connect, and queries or agent events never opt in", async () => {
+	writeLayer("global", { ...config, autoConnect: false });
+	const h = harness();
+	await h.emit("session_start");
+	await h.command("status");
+	await h.command("config show");
+	await h.emit("model_select");
+	await h.emit("agent_start");
+	assert.equal(h.clients.length, 0);
+	await h.command("connect");
+	assert.equal(h.clients.length, 1);
+});
+
+for (const [global, project, session, expected] of [
+	[true, false, undefined, false],
+	[false, true, undefined, true],
+	[false, true, false, false],
+	[true, false, true, true],
+] as const) {
+	test(`autoConnect startup resolves global=${global}, project=${project}, session=${session} to ${expected}`, async () => {
+		writeLayer("global", { ...config, autoConnect: global });
+		writeLayer({ project: directory }, { autoConnect: project });
+		if (session !== undefined) writeLayer({ session: "session-connect" }, { autoConnect: session });
+		const h = harness();
+		await h.emit("session_start");
+		assert.equal(h.clients.length, expected ? 1 : 0);
+	});
+}
+
+for (const autoConnect of [false, true]) {
+	test(`an untrusted project's autoConnect cannot override the global ${autoConnect}`, async () => {
+		writeLayer("global", { ...config, autoConnect });
+		writeLayer({ project: directory }, { autoConnect: !autoConnect });
+		const h = harness();
+		Object.assign(h.ctx, { isProjectTrusted: () => false });
+		await h.emit("session_start");
+		assert.equal(h.clients.length, autoConnect ? 1 : 0);
+	});
+
+	test(`a fork snapshots autoConnect=${autoConnect} from its parent, including on a later resume`, async () => {
+		writeLayer("global", { ...config, autoConnect: !autoConnect });
+		writeLayer({ session: "parent-connect" }, { autoConnect });
+		const parentSession = join(directory, "parent.jsonl");
+		writeFileSync(parentSession, `${JSON.stringify({ type: "session", id: "parent-connect" })}\n`);
+		const h = harness();
+		Object.assign(h.ctx.sessionManager, { getHeader: () => ({ parentSession }) });
+		await h.emit("session_start", { reason: "fork" });
+		assert.equal(h.clients.length, autoConnect ? 1 : 0);
+		assert.deepEqual(readLayer({ session: "session-connect" }), { autoConnect });
+		writeLayer({ session: "parent-connect" }, { autoConnect: !autoConnect });
+		await h.emit("session_shutdown");
+		const restored = harness([...h.entries]);
+		Object.assign(restored.ctx.sessionManager, { getHeader: () => ({ parentSession }) });
+		await restored.emit("session_start", { reason: "resume" });
+		assert.equal(restored.clients.length, autoConnect ? 1 : 0, "a resume does not copy the parent again");
+	});
+}
+
+for (const [name, raw, problem] of [
+	["missing credentials", JSON.stringify({ autoConnect: true }), /尚未配置机器人凭据/],
+	["missing target", JSON.stringify({ botId: "bot", secret: "secret", autoConnect: true }), /默认推送目标未配置/],
+	["invalid boolean", JSON.stringify({ ...config, autoConnect: "true" }), /autoConnect 无效/],
+	["broken JSON", "{ broken", /不是有效的 JSON/],
+] as const) {
+	test(`autoConnect never registers with ${name}; repairing configuration still waits for connect`, async () => {
+		writeFileSync(CONFIG_FILE, raw);
+		const h = harness();
+		await h.emit("session_start");
+		assert.equal(h.clients.length, 0);
+		assert.match(h.notices.at(-1)!, problem);
+		writeLayer("global", { ...config, autoConnect: true });
+		await h.command("status");
+		assert.equal(h.clients.length, 0, "configuration reads are not startup attempts");
+		await h.command("connect");
+		assert.equal(h.clients.length, 1);
+	});
+}
+
+test("manual disconnect wins over autoConnect until connect or the next session startup", async () => {
+	writeLayer("global", { ...config, autoConnect: true });
+	const saved = readFileSync(CONFIG_FILE, "utf8");
+	const h = harness();
+	await h.emit("session_start");
+	const c = h.clients[0];
+	c.publish();
+	await flush();
+	await h.command("disconnect");
+	assert.deepEqual(c.stops, ["disconnected by user"]);
+	assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved, "disconnect never persists an opt-out");
+	for (const event of ["model_select", "agent_start", "agent_settled"]) await h.emit(event);
+	await h.command("config set autoConnect=false");
+	await h.command("config set autoConnect=true");
+	await h.command("status");
+	c.publish();
+	await flush();
+	assert.equal(h.clients.length, 1, "neither config saves nor late callbacks revive a disconnected session");
+	assert.equal(c.controls.length, 1);
+	await assert.rejects(h.push(), /缺少 chatid|未正式接入/);
+	await h.command("connect");
+	assert.equal(h.clients.length, 2, "manual connect can resume immediately");
+	await h.command("disconnect");
+	await h.emit("session_shutdown", { reason: "reload" });
+	const reloaded = harness([...h.entries]);
+	await reloaded.emit("session_start", { reason: "reload" });
+	assert.equal(reloaded.clients.length, 1, "reload reevaluates the saved opt-in, not the previous connection state");
+});
+
+test("changing autoConnect does not disconnect a live session or change network recovery", async () => {
+	const h = harness();
+	const c = await connected(h);
+	for (const autoConnect of [true, false]) {
+		await h.command(`config set autoConnect=${autoConnect}`);
+		assert.match(h.notices.at(-1)!, /autoConnect.*下次会话启动.*当前接入状态不变/);
+		assert.doesNotMatch(h.notices.at(-1)!, /热更新|待重新接入/);
+	}
+	c.publish(false);
+	c.publish();
+	await flush();
+	assert.equal(h.clients.length, 1);
+	assert.deepEqual(c.stops, []);
+	assert.equal(c.controls.length, 1);
+	await h.push();
+	assert.equal(c.pushes.at(-1)!.chat.chatId, "old-user");
+});
+
+test("autoConnect does not restart a failed registration outside session startup", async () => {
+	writeLayer("global", { ...config, autoConnect: true });
+	const h = harness();
+	await h.emit("session_start");
+	h.clients[0].options.onError?.("registration rejected");
+	await h.emit("model_select");
+	await h.command("status");
+	assert.equal(h.clients.length, 1);
+	assert.match(h.notices.at(-1)!, /已停止.*registration rejected/);
+	await h.command("connect");
+	assert.equal(h.clients.length, 2);
+});
+
+test("a replacement session uses its own autoConnect override rather than the old registration", async () => {
+	writeLayer("global", { ...config, autoConnect: true });
+	writeLayer({ session: "replacement" }, { autoConnect: false });
+	const h = harness();
+	await h.emit("session_start");
+	const c = h.clients[0];
+	c.publish();
+	await h.emit("session_shutdown", { reason: "new" });
+	Object.assign(h.ctx.sessionManager, { getSessionId: () => "replacement" });
+	await h.emit("session_start", { reason: "new" });
+	assert.deepEqual(c.stops, ["session shutdown"]);
+	assert.equal(h.clients.length, 1);
+	await h.command("connect");
+	assert.equal(h.clients.length, 2);
+});
+
+test("config edit offers autoConnect in every scope and can remove an explicit override without connecting", async () => {
+	const h = harness();
+	await h.emit("session_start");
+	const picks: RegExp[] = [];
+	Object.assign(h.ctx.ui, {
+		async select(_title: string, choices: string[]) {
+			const wanted = picks.shift();
+			const picked = wanted && choices.find((choice) => wanted.test(choice));
+			assert.ok(picked, `missing choice ${wanted}: ${choices.join(" | ")}`);
+			return picked;
+		},
+	});
+	for (const [scope, autoConnect] of [
+		["global", true],
+		["project", false],
+		["session", true],
+	] as const) {
+		picks.push(/^自动接入：/, new RegExp(`^${autoConnect}：`));
+		await h.command(`config --scope ${scope} edit`);
+		const target =
+			scope === "global" ? "global" : scope === "project" ? { project: directory } : { session: "session-connect" };
+		assert.equal(readLayer(target)?.autoConnect, autoConnect);
+		assert.match(h.notices.at(-1)!, /autoConnect.*下次会话启动/);
+	}
+	picks.push(/^自动接入：/, /^取消覆盖/);
+	await h.command("config --scope session edit");
+	assert.equal(readLayer({ session: "session-connect" })?.autoConnect, undefined);
+	await h.command("config show");
+	assert.match(h.notices.at(-1)!, /autoConnect\s+false（项目级）/);
+	assert.equal(h.clients.length, 0);
+});
 
 test("connect requires a default target but never requires having identified one", async () => {
 	writeLayer("global", { botId: "bot", secret: "secret" });

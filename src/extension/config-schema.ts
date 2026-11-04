@@ -22,6 +22,7 @@ const VALUES: Record<FieldName, Record<string, unknown>> = {
 	// A userid or chatid never holds quotes or whitespace (chatIdProblem).
 	defaultChatId: { type: "string", pattern: "^[^\"'“”‘’`\\s]+$" },
 	defaultChatType: { type: "integer" },
+	autoConnect: { type: "boolean" },
 	notificationScope: { type: "string" },
 	contentDisplay: { type: "string" },
 	controlPrompts: {

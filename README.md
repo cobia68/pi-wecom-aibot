@@ -39,9 +39,24 @@ pi install npm:@cobia/pi-wecom-aibot
 
 收到「🧪 部署测试」控制卡后，点「刷新卡片」验证按钮回调
 
-**每个会话都要手动 `connect`**，新建、恢复、分叉和 `/reload` 后也一样。修改配置不会自动接入；退出或切换会话时自动断开
+**默认每个会话都要手动 `connect`**（`autoConnect=false`），新建、恢复、分叉和 `/reload` 后也一样。修改配置不会立即接入；退出或切换会话时自动断开
 
 同一个机器人同一时间只能在一台电脑、一个系统用户下连接。多个 pi 会话共用网关，无需单独启动；最后一个 pi 断开后，网关约 1.5 秒自动退出
+
+### 自动接入（可选）
+
+不想每次手动 `connect`，可以开启：
+
+```text
+/wecom-aibot config set autoConnect=true
+```
+
+- **默认关闭**：`autoConnect` 是布尔值，只接受 `true` / `false`。全局、项目和 session 都能设，沿用[配置优先级](#作用域与位置)；上面的命令修改全局，只改当前目录时用 `/wecom-aibot config --scope project set autoConnect=true`
+- **只在会话启动时判断**：新建、恢复、分叉和 `/reload` 都会按当时的有效配置尝试接入，仍要求 BotID、Secret 和默认推送目标齐全。配置缺失或无效时不接入，修复后请手动 `connect` 或 `/reload`
+- **保存不改变当前连接**：改为 `true` 不会立即接入，改为 `false` 也不会断开已接入的会话。想立即接入或断开，仍用 `connect` / `disconnect`
+- **手动断开优先**：`disconnect` 后不会自动连回，直到手动 `connect` 或下次会话启动；它不修改 `autoConnect`。此参数不控制网络断线后的自动重连
+
+开启前建议先配置下方白名单，避免会话自动接入后被非预期用户操作
 
 ## 🔐 设置白名单
 
@@ -96,7 +111,7 @@ pi install npm:@cobia/pi-wecom-aibot
 - **切换会话**：在下拉框选另一个会话，再点任一按钮。这次只切换卡片，不执行按钮动作；确认会话后再操作
 - **找回控制卡**：在企微发 `/wa s`，选会话后点「打开会话」。列表每页 5 个，可刷新和翻页；当天首次进入机器人单聊时也会收到这张列表，只显示白名单允许访问的会话
 - **候选太多**：任务选择卡最多列最近使用的 10 个会话。需要的会话不在其中时，先用 `/wa s` 打开它的控制卡，再重新发送任务；打开控制卡不会自动定向后续消息
-- **发送与刷新**：每次 `connect`、任务完成和通知都发新卡，旧卡不撤回。网络重连、网关替换不重发；卡片内容是快照，不会自动刷新，新接入的会话也要点按钮才出现在旧卡列表里
+- **发送与刷新**：每次手动或自动接入、任务完成和通知都发新卡，旧卡不撤回。网络重连、网关替换不重发；卡片内容是快照，不会自动刷新，新接入的会话也要点按钮才出现在旧卡列表里
 
 结果可以在末尾附上 `<!-- wecom_next ["运行测试", "提交改动"] -->`，作为本卡「发提示词」的优先候选，最多 10 条、每条最多 500 字。注释不会出现在企业微信正文或长图中。下一步、正文摘要和可查看的正文快照仅在当前接入期间保留最近 50 张卡，断开或重启后不保留；配置的 `controlPrompts` 不受影响
 
@@ -215,6 +230,7 @@ pi install npm:@cobia/pi-wecom-aibot
   "secret": "your-secret",
   "defaultChatId": "your-userid",
   "defaultChatType": 1,
+  "autoConnect": false,
   "notificationScope": "wecom-tasks",
   "allowedUserIds": ["your-userid"]
 }
@@ -226,6 +242,7 @@ pi install npm:@cobia/pi-wecom-aibot
 | :--- | :--- |
 | `botId` / `secret` | 机器人凭据 |
 | `defaultChatId` / `defaultChatType` | 默认目标：userid + `1` 单聊，群 chatid + `2` 群聊；省略类型时为单聊 |
+| `autoConnect` | `false`（默认）手动接入；`true` 在会话启动时自动接入，含新建、恢复、分叉和 `/reload`；不改变当前连接或网络重连策略 |
 | `notificationScope` | `wecom-tasks`（默认）只自动回传企微任务；`all-runs` 也通知本地运行结果 |
 | `contentDisplay` | `inline`（默认）显示摘要，可按需查看全文／长图；`linked` 仅使用[会话文档](#会话文档)，不可用时在引用区提示原因，不回退正文 |
 | `controlPrompts` | 「发提示词」候选，默认空，最多 10 条、每条最多 500 字 |
@@ -236,6 +253,7 @@ pi install npm:@cobia/pi-wecom-aibot
 
 ### 修改何时生效
 
+- `autoConnect`：下次会话启动（含 `/reload`）时生效，保存不连接也不断开当前会话
 - `notificationScope`、`contentDisplay`、`controlPrompts`、`docMcpUrl`：下次使用时生效，无需重连；已经生成的待发通知保留原快照
 - 凭据、默认目标、白名单：**各窗口重新 `connect` 后生效**，此前继续用旧配置。切换会清除当前接入的排队任务和待发通知；已开始的任务继续运行，但结果不再回传。没有交互界面且有待处理工作时拒绝切换
 - 未知字段或无效值会报错，不会静默忽略；已接入的会话继续使用上一次有效配置

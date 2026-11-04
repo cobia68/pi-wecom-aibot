@@ -43,6 +43,7 @@ import {
 	readLayer,
 	SETTING_FIELDS,
 	type SessionConfig,
+	type StartupField,
 } from "./config.ts";
 import { describe, display, maskBotId } from "./config-display.ts";
 import { docUrlProblem } from "./doc-mcp.ts";
@@ -458,20 +459,22 @@ class ConfigCommand {
 						bot: this.bot(scope),
 					}),
 			],
-			...SETTING_FIELDS.map((spec): [string, () => Promise<Edit | undefined>] => [
-				`${spec.label}：${describe(resolved, spec.name)}`,
-				() =>
-					plain(
-						spec.name === "controlPrompts"
-							? this.editPrompts(
-									spec,
-									scope,
-									resolved.values.controlPrompts,
-									overridden(spec.name) && LAYER[scope].from,
-								)
-							: this.editChoice(spec, resolved.values[spec.name], overridden(spec.name) && LAYER[scope].from),
-					),
-			]),
+			...FIELDS.filter((spec) => spec.effect === "setting" || spec.effect === "startup").map(
+				(spec): [string, () => Promise<Edit | undefined>] => [
+					`${spec.label}：${describe(resolved, spec.name)}`,
+					() =>
+						plain(
+							spec.name === "controlPrompts"
+								? this.editPrompts(
+										spec,
+										scope,
+										resolved.values.controlPrompts,
+										overridden(spec.name) && LAYER[scope].from,
+									)
+								: this.editChoice(spec, resolved.values[spec.name], overridden(spec.name) && LAYER[scope].from),
+						),
+				],
+			),
 			// The document belongs to the bot, not to a session: it is global only.
 			...(scope === "global"
 				? [
@@ -600,7 +603,11 @@ class ConfigCommand {
 		return { change: { set: { defaultChatId: chatId, defaultChatType: chatType } } };
 	}
 
-	private editChoice(spec: ChoiceField, current: unknown, inherit: string | false): Promise<LayerChange | undefined> {
+	private editChoice(
+		spec: ChoiceField | StartupField,
+		current: unknown,
+		inherit: string | false,
+	): Promise<LayerChange | undefined> {
 		const options = spec.choices.map((choice): [string, LayerChange] => [
 			`${choice.value}：${choice.description}${choice.value === current ? "（当前）" : ""}`,
 			{ set: { [spec.name]: choice.value } },
@@ -678,16 +685,18 @@ class ConfigCommand {
 	}
 
 	private conclusion(before: Resolved, after: Resolved): string {
+		const startup = before.values.autoConnect !== after.values.autoConnect;
 		const settings = SETTING_FIELDS.some((spec) => !same(before.values[spec.name], after.values[spec.name]));
 		const document = before.values.docMcpUrl !== after.values.docMcpUrl;
 		const connection = connectionKey(connectionOf(before)) !== connectionKey(connectionOf(after));
 		const adopted = this.host.adopted();
 		const pending = pendingReconnect(after, adopted);
-		if (!settings && !document && !connection)
+		if (!startup && !settings && !document && !connection)
 			return pending
 				? "当前 session 的合并结果不变；之前的修改仍待重新接入，运行 /wecom-aibot connect 后生效"
 				: "当前 session 的合并结果不变，无需操作";
 		const parts: string[] = [];
+		if (startup) parts.push("autoConnect 在下次会话启动（含 /reload）时生效；当前接入状态不变");
 		if (settings) parts.push(adopted === undefined ? "设置下次使用时生效" : "设置已热更新");
 		if (document) parts.push("会话文档地址在下次发卡或点「刷新卡片」时生效");
 		if (connection || pending)

@@ -186,7 +186,7 @@ after(async () => {
 	await rm(sandbox, { recursive: true, force: true });
 });
 
-test("a stored configuration never opts a session into receiving tasks; querying never connects", async () => {
+test("credentials alone never opt a session into receiving tasks; querying never connects", async () => {
 	const saved = readFileSync(CONFIG_FILE, "utf8");
 	const h = harness();
 	assert.equal(h.clients.length, 0);
@@ -196,9 +196,13 @@ test("a stored configuration never opts a session into receiving tasks; querying
 	await h.command("--help");
 	await h.emit("model_select");
 	await h.emit("agent_start");
-	assert.equal(h.clients.length, 0, "the configuration cannot opt a session into receiving tasks");
+	assert.equal(
+		h.clients.length,
+		0,
+		"without autoConnect, credentials alone do not opt a session into receiving tasks",
+	);
 	assert.deepEqual(h.changes, []);
-	assert.match(h.notices[0], /^💤 企业微信智能机器人：未接入，每个 session 需运行 \/wecom-aibot connect\n/);
+	assert.match(h.notices[0], /^💤 企业微信智能机器人：未接入，需要时运行 \/wecom-aibot connect\n/);
 	assert.doesNotMatch(h.notices[0], /自动连接：开|已启动/);
 	assert.equal(readFileSync(CONFIG_FILE, "utf8"), saved);
 });
@@ -316,10 +320,7 @@ test("status names each connection state with its own icon, driven by the real s
 	client.publish({ state: "disconnected", sessions: 2, detail: "outage" });
 	assert.equal(await headline(), "⏳ 企业微信智能机器人：正在重连（outage）");
 	await h.command("disconnect");
-	assert.equal(
-		await headline(),
-		"💤 企业微信智能机器人：未接入（已由用户断开），每个 session 需运行 /wecom-aibot connect",
-	);
+	assert.equal(await headline(), "💤 企业微信智能机器人：未接入（已由用户断开），需要时运行 /wecom-aibot connect");
 	await h.command("connect");
 	h.clients[1].fail("registration rejected");
 	assert.equal(
@@ -496,6 +497,28 @@ for (const mode of ["rpc", "json", "print"] as const) {
 		assert.equal(client.client.isReady(), true);
 		await h.command("disconnect");
 		assert.deepEqual(h.changes, []);
+	});
+}
+
+for (const mode of ["tui", "rpc", "json", "print"] as const) {
+	test(`autoConnect works in ${mode} mode and only a ready TUI connection gets a footer`, async () => {
+		writeLayer("global", { ...config, autoConnect: true });
+		const h = harness(mode);
+		await h.emit("session_start", { reason: "startup" });
+		assert.equal(h.clients.length, 1);
+		assert.deepEqual(h.changes, [], "startup does not announce readiness before subscription");
+		h.clients[0].publish({ state: "subscribed", sessions: 1 });
+		assert.equal(h.clients[0].client.isReady(), true);
+		assert.deepEqual(h.changes, mode === "tui" ? [label("success")] : []);
+		assert.equal(h.dialogs.confirms, 0);
+		assert.equal(h.dialogs.menus.length, 0);
+		await h.command("config set autoConnect=false");
+		assert.deepEqual(
+			h.changes,
+			mode === "tui" ? [label("success")] : [],
+			"a startup policy is not pending reconnect",
+		);
+		assert.equal(h.clients[0].stopped.length, 0);
 	});
 }
 

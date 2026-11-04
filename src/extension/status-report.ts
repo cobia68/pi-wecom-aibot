@@ -125,7 +125,7 @@ function nextStep(resolved: Resolved | undefined): string | undefined {
 	const connection = connectionOf(resolved);
 	if (!connection) return "先运行 /wecom-aibot config edit 填写凭据";
 	if (!connection.target) return "先运行 /wecom-aibot config --scope global whoami 识别默认推送目标";
-	return "每个 session 需运行 /wecom-aibot connect";
+	return "需要时运行 /wecom-aibot connect";
 }
 
 /** The bot and target in use: the registration's own while connected, otherwise what connect would use. */
@@ -157,6 +157,7 @@ function sessionRows({ source }: StatusSnapshot): [string, string][] {
 function settingRows({ resolved }: StatusSnapshot): [string, string][] {
 	if (!resolved) return [];
 	return [
+		["自动接入", describe(resolved, "autoConnect")],
 		["通知范围", describe(resolved, "notificationScope")],
 		["正文展示", describe(resolved, "contentDisplay")],
 		["提示词", describe(resolved, "controlPrompts")],

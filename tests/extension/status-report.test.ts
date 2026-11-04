@@ -69,7 +69,7 @@ test("a session that has not connected reads as one headline and one aligned tab
 	assert.equal(
 		text,
 		[
-			"💤 企业微信智能机器人：未接入，每个 session 需运行 /wecom-aibot connect",
+			"💤 企业微信智能机器人：未接入，需要时运行 /wecom-aibot connect",
 			"",
 			"  机器人    aibf****mO（Secret 已配置）",
 			"  默认推送  private-user（单聊）",
@@ -78,6 +78,7 @@ test("a session that has not connected reads as one headline and one aligned tab
 			"  模型      cline · deepseek",
 			"  工作目录  pi-wecom-aibot",
 			"",
+			"  自动接入  false（内置默认值）",
 			"  通知范围  all-runs（全局）",
 			"  正文展示  inline（内置默认值）",
 			"  提示词    无（内置默认值）",
@@ -124,11 +125,11 @@ test("a registration adds the gateway and task rows and shows what it uses, not 
 test("each connection state has its own icon, and the headline names the next step only when one is needed", () => {
 	const noTarget = mergeLayers({ global: { botId: "bot-id-1234", secret: "s" } });
 	const cases: [string, Partial<StatusSnapshot>, string][] = [
-		["fresh session", {}, "💤 企业微信智能机器人：未接入，每个 session 需运行 /wecom-aibot connect"],
+		["fresh session", {}, "💤 企业微信智能机器人：未接入，需要时运行 /wecom-aibot connect"],
 		[
 			"user disconnect",
 			{ stopReason: "disconnected by user" },
-			"💤 企业微信智能机器人：未接入（已由用户断开），每个 session 需运行 /wecom-aibot connect",
+			"💤 企业微信智能机器人：未接入（已由用户断开），需要时运行 /wecom-aibot connect",
 		],
 		[
 			"no credentials",
@@ -220,13 +221,14 @@ test("files that cannot be used keep the session, the paths and no guessed setti
 test("settings name the layer they come from, and the override row names the overridden fields", () => {
 	const resolved = mergeLayers({
 		global: GLOBAL,
-		session: { defaultChatId: "group-id", defaultChatType: 2, controlPrompts: ["继续"] },
+		session: { defaultChatId: "group-id", defaultChatType: 2, autoConnect: true, controlPrompts: ["继续"] },
 	});
 	const lines = statusReport(snapshot({ resolved })).split("\n");
 	assert.ok(lines.includes("  默认推送  group-id（群聊）"));
 	assert.ok(lines.includes("  提示词    「继续」（session）"));
 	assert.ok(lines.includes("  通知范围  all-runs（全局）"));
-	assert.ok(lines.includes("  会话覆盖  defaultChatId、defaultChatType、controlPrompts"));
+	assert.ok(lines.includes("  自动接入  true（session）"));
+	assert.ok(lines.includes("  会话覆盖  defaultChatId、defaultChatType、autoConnect、controlPrompts"));
 });
 
 test("the menu title keeps the icon and the state, without the reason or the next step", () => {

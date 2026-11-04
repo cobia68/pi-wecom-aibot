@@ -79,6 +79,10 @@ test("every stored field is validated with its name and file, groups as groups",
 		[{ defaultChatId: 42 }, /defaultChatId/],
 		[{ defaultChatId: "boss with space" }, /defaultChatId.*含引号或空格/],
 		[{ defaultChatType: 2 }, /defaultChatType.*defaultChatId/],
+		...["true", "false", 0, 1, null, [], {}].map((autoConnect): [Record<string, unknown>, RegExp] => [
+			{ autoConnect },
+			/autoConnect.*false.*true/,
+		]),
 		[{ notificationScope: true }, /notificationScope/],
 		[{ contentDisplay: "text" }, /contentDisplay.*inline.*linked/],
 		[{ contentDisplay: "quote" }, /contentDisplay.*inline.*linked/],
@@ -111,7 +115,7 @@ test("a key the layer does not know makes the file unusable, like a value it can
 		() => readLayer("global"),
 		(error: Error) =>
 			error.message ===
-			`配置文件 ${CONFIG_FILE} 有不认识的字段 notificationMode、NotificationScope；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、contentDisplay、controlPrompts、docMcpUrl、allowedUserIds`,
+			`配置文件 ${CONFIG_FILE} 有不认识的字段 notificationMode、NotificationScope；可用字段：botId、secret、defaultChatId、defaultChatType、autoConnect、notificationScope、contentDisplay、controlPrompts、docMcpUrl、allowedUserIds`,
 	);
 	const before = readFileSync(CONFIG_FILE, "utf8");
 	assert.throws(
@@ -125,7 +129,7 @@ test("a key the layer does not know makes the file unusable, like a value it can
 	writeFileSync(layerFile({ session: CHILD }), JSON.stringify({ colour: "red" }));
 	assert.throws(
 		() => readLayer({ session: CHILD }),
-		/有不认识的字段 colour；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、contentDisplay、controlPrompts$/,
+		/有不认识的字段 colour；可用字段：botId、secret、defaultChatId、defaultChatType、autoConnect、notificationScope、contentDisplay、controlPrompts$/,
 	);
 	writeFileSync(CONFIG_FILE, JSON.stringify({ $schema: "schema-url", ...bot }));
 	assert.deepEqual(readLayer("global"), bot);
@@ -208,6 +212,7 @@ test("built-in default < global < session, and a group comes whole from one laye
 	};
 	const merged = mergeLayers({ global, session: { notificationScope: "wecom-tasks", defaultChatId: "boss" } });
 	assert.deepEqual(merged.values, {
+		autoConnect: false,
 		notificationScope: "wecom-tasks",
 		contentDisplay: "inline",
 		controlPrompts: [],
@@ -217,6 +222,7 @@ test("built-in default < global < session, and a group comes whole from one laye
 		defaultChatType: 1,
 	});
 	assert.deepEqual(merged.sources, {
+		autoConnect: "default",
 		notificationScope: "session",
 		contentDisplay: "default",
 		controlPrompts: "default",
@@ -242,7 +248,12 @@ test("the connection key covers credentials, target and allowlist, never the set
 			connectionOf(
 				mergeLayers({
 					global: { ...bot, ...target, allowedUserIds: ["boss"] },
-					session: { notificationScope: "all-runs", contentDisplay: "linked", controlPrompts: ["继续"] },
+					session: {
+						autoConnect: true,
+						notificationScope: "all-runs",
+						contentDisplay: "linked",
+						controlPrompts: ["继续"],
+					},
 				}),
 			),
 		),
@@ -382,7 +393,7 @@ test("set tokens are checked together: every problem is reported and nothing is 
 	// Field names and values are case-sensitive, as the file writes them.
 	assert.deepEqual(parseAssignments(["NotificationScope=all-runs", "notificationScope=ALL-RUNS"]), {
 		problems: [
-			"未知字段 NotificationScope；可用字段：defaultChatId、defaultChatType、notificationScope、contentDisplay、controlPrompts",
+			"未知字段 NotificationScope；可用字段：defaultChatId、defaultChatType、autoConnect、notificationScope、contentDisplay、controlPrompts",
 			"notificationScope 只能是 wecom-tasks、all-runs",
 		],
 	});
@@ -454,6 +465,39 @@ test("clearConfig removes the global file only, and never hides a real deletion 
 	t.after(() => rmSync(CONFIG_FILE, { recursive: true, force: true }));
 	assert.throws(() => clearConfig());
 	assert.equal(readFileSync(join(CONFIG_FILE, "kept"), "utf8"), "must not be removed recursively");
+});
+
+test("autoConnect defaults to false and preserves explicit booleans through all three layers and unset", () => {
+	const { config } = sessionConfig(CHILD);
+	assert.equal(config.read().values.autoConnect, false);
+	assert.equal(config.read().sources.autoConnect, "default");
+	for (const [scope, autoConnect] of [
+		["global", true],
+		["project", false],
+		["session", true],
+	] as const) {
+		config.patch(scope, { set: { autoConnect } });
+		assert.equal(config.read().values.autoConnect, autoConnect);
+		assert.equal(config.read().sources.autoConnect, scope);
+		assert.equal(config.layer(scope)?.autoConnect, autoConnect);
+	}
+	for (const [scope, expected, source] of [
+		["session", false, "project"],
+		["project", true, "global"],
+		["global", false, "default"],
+	] as const) {
+		config.patch(scope, { remove: ["autoConnect"] });
+		assert.equal(config.read().values.autoConnect, expected);
+		assert.equal(config.read().sources.autoConnect, source);
+		assert.equal(config.layer(scope)?.autoConnect, undefined);
+	}
+	for (const value of [false, true])
+		assert.deepEqual(parseAssignments([`autoConnect=${value}`]), { set: { autoConnect: value } });
+	for (const value of ["1", "0", "yes", "no", "on", "off", "TRUE", "False", '"true"', "null"])
+		assert.deepEqual(parseAssignments([`autoConnect=${value}`]), {
+			problems: ["autoConnect 只能是 false、true"],
+		});
+	assert.deepEqual(parseRemovals(["autoConnect"]), { remove: ["autoConnect"] });
 });
 
 test("contentDisplay is a hot setting inherited across all three layers, with exact inline and linked values", () => {
@@ -576,7 +620,7 @@ test("controlPrompts is a list: comma-separated in set, checked the same way in 
 	assert.deepEqual(parseRemovals(["controlPrompts"]), { remove: ["controlPrompts"] });
 	assert.deepEqual(parseRemovals(["controlprompts"]), {
 		problems: [
-			"未知字段 controlprompts；可用字段：botId、secret、defaultChatId、defaultChatType、notificationScope、contentDisplay、controlPrompts、docMcpUrl",
+			"未知字段 controlprompts；可用字段：botId、secret、defaultChatId、defaultChatType、autoConnect、notificationScope、contentDisplay、controlPrompts、docMcpUrl",
 		],
 	});
 	// No built-in prompts; an empty list is a valid override, and the default is a fresh copy each time.

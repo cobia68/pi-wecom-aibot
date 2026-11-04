@@ -83,7 +83,8 @@ const CONFIG_COMMAND: CommandSpec = {
 		"set 写成 字段=值，可一次给多个：先全部校验再一次保存，有错误时一项都不写。controlPrompts 还能写 controlPrompts+=新提示、controlPrompts-=旧提示，只加或只删几条",
 		"botId 与 secret、defaultChatId 与 defaultChatType 各为一组，成组保存、成组删除。botId、secret 只能用 edit 输入（命令会留在输入历史中）；输入时屏幕上会显示 Secret",
 		"whoami：在要识别的聊天里把 pi 显示的 6 位验证码发给机器人（群聊需 @机器人）。识别不受白名单限制；没有接入时临时连接，不出现在在线会话列表，也不接收任务",
-		"保存配置不会断开或重连：通知范围、控制卡提示词等设置下次使用时生效，凭据、默认目标或白名单要运行 /wecom-aibot connect 才切换；每个 session 都需手动 /wecom-aibot connect",
+		"保存配置不会断开或重连：通知范围、控制卡提示词等设置下次使用时生效，凭据、默认目标或白名单要运行 /wecom-aibot connect 才切换；autoConnect 在下次会话启动（含 /reload）时生效",
+		"默认每个 session 都需手动 /wecom-aibot connect；autoConnect=true 时，新建、恢复、分叉或重载会话会按有效配置自动接入",
 		"allowedUserIds（允许发任务的企微 userid 列表）不由 config 管理，请直接编辑全局配置文件",
 	],
 };
@@ -107,9 +108,9 @@ const COMMANDS: CommandSpec[] = [
 		details: [
 			"重新读取配置，仅连接当前 session，不修改配置；接入配置不变时保留当前任务和待发通知",
 			`BotID、Secret 和默认推送目标必须齐全；目标可用 /wecom-aibot config ${SCOPE_SLOT} whoami 识别保存，也可用 /wecom-aibot config set defaultChatId=<ID> 填写`,
-			"注册与企微订阅均成功后，为默认聊天创建或复用本 session 的控制卡；重复接入、恢复同一 session 或网络重连不重发，卡片失败不撤销连接",
+			"注册与企微订阅均成功后，手动或自动接入都会向默认聊天发一张新的 session 控制卡；网络重连不重发，卡片失败不撤销连接",
 			"控制卡只在点击后刷新；找不到旧卡时，在企微发 /wa s，选择会话后点「打开会话」补发",
-			"每个 session 都需手动 /wecom-aibot connect，包括新建、恢复、分叉和重载；退出或切换会话时自动断开",
+			"默认每个 session 都需手动 /wecom-aibot connect；autoConnect=true 时会在启动时自动接入，包括新建、恢复、分叉和重载；退出或切换会话时自动断开",
 			"凭据、白名单或默认目标变化后，connect 经确认撤销旧注册及其待处理工作；没有交互界面且有待处理工作时拒绝切换",
 		],
 	},
@@ -122,7 +123,7 @@ const COMMANDS: CommandSpec[] = [
 		details: [
 			"取消当前 pi 的转发队列和待发通知，已开始的本地任务继续运行",
 			"不修改配置；其他 pi 继续接入",
-			"连接状态不会保存或继承；每个 session 都需手动 /wecom-aibot connect",
+			"autoConnect=true 时，手动断开后也不会立即连回；运行 /wecom-aibot connect 可恢复，下次会话启动仍按 autoConnect 判断",
 		],
 	},
 	{
@@ -636,8 +637,11 @@ function totalHelpText(): string {
 		...section("生命周期", [
 			"  connect、disconnect 只控制当前 session，不修改配置",
 			"  config 只保存配置，不正式接入也不断开；whoami 识别时会临时连接",
-			"  每个 session 都需手动 /wecom-aibot connect",
-			"  退出、切换、新建、恢复、分叉或重载会话时自动断开，连接状态不继承",
+			"  默认每个 session 手动 /wecom-aibot connect",
+			"  autoConnect=true 时，会话启动后自动接入",
+			"  新建、恢复、分叉及 /reload 均按当时配置判断",
+			"  手动 disconnect 后保持断开，直到 connect 或下次启动",
+			"  退出或切换会话时断开；连接状态不继承",
 		]),
 	].join("\n");
 }
@@ -691,6 +695,7 @@ function configHelpText(): string {
 		...section("选项", optionRows(command)),
 		...section("示例", [
 			"  /wecom-aibot config edit",
+			"  /wecom-aibot config set autoConnect=true",
 			"  /wecom-aibot config set notificationScope=all-runs",
 			"  /wecom-aibot config --scope session set controlPrompts=继续,运行测试,总结进度",
 			"  /wecom-aibot config set controlPrompts+=部署到测试环境",
