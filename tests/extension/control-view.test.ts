@@ -17,21 +17,22 @@ function buttons(card: ReturnType<typeof sessionControlCard>): [string, string, 
 	});
 }
 
-test("an inline reply adds a reading pair without hiding controls or exceeding WeCom's six buttons", () => {
-	const card = sessionControlCard(source, { status: "done", bodyQuote: "摘要", readable: true });
-	assert.deepEqual(buttons(card), [
-		["refresh", "刷新卡片", 1],
-		["send", "发提示词", 2],
-		["full-text", "查看全文", 2],
-		["reply-image", "查看图片", 2],
-		["model", "切换模型", 2],
-		["abort", "中止任务", 3],
-	]);
-	const rendered = renderCard(card, "card");
-	assert.equal((rendered.button_list as unknown[]).length, 6);
+test("normal inline controls always append the reading pair after model and abort", () => {
+	for (const status of ["idle", "running", "done", "aborted", "failed"] as const) {
+		const card = sessionControlCard(source, { status, inline: true });
+		assert.deepEqual(buttons(card), [
+			["refresh", "刷新卡片", 1],
+			["send", "发提示词", 2],
+			["model", "切换模型", 2],
+			["abort", "中止任务", 3],
+			["full-text", "查看全文", 2],
+			["reply-image", "查看图片", 2],
+		]);
+		assert.equal((renderCard(card, "card").button_list as unknown[]).length, 6);
+	}
 	for (const view of [
 		{ status: "done" as const, pageProblem: "文档不可用" },
-		{ status: "idle" as const },
+		{ status: "idle" as const, inline: false },
 		{ status: "done" as const, pageUrl: "https://doc.weixin.qq.com/page" },
 	]) {
 		assert.equal(sessionControlCard(source, view).actions.length, 4);
@@ -39,14 +40,14 @@ test("an inline reply adds a reading pair without hiding controls or exceeding W
 	for (const choosing of ["prompt", "model"] as const) {
 		const selected = sessionControlCard(source, {
 			status: "done",
-			readable: true,
+			inline: true,
 			choosing,
 			prompts: ["继续"],
 			models: [{ provider: "p", id: "m" }],
 		});
 		assert.equal(selected.actions.length, 2, "reading does not crowd the confirmation step");
 	}
-	assert.equal(sessionControlCard(source, { status: "confirming", readable: true, queued: 2 }).actions.length, 4);
+	assert.equal(sessionControlCard(source, { status: "confirming", inline: true, queued: 2 }).actions.length, 4);
 });
 
 test("the source line counts waiting tasks while live; a finished run's copy says only how it ended", () => {
@@ -94,7 +95,7 @@ test("body quotes use the first three non-empty plain-text lines, without next s
 	assert.ok(long.endsWith("🙂…"));
 });
 
-test("before any refresh the card names the session; its four buttons are always there, in two rows", () => {
+test("a non-inline control keeps the four base actions and session metadata before any refresh", () => {
 	const card = sessionControlCard(source, { status: "idle" });
 	assert.equal(card.label, "空闲");
 	assert.equal(card.tone, "neutral");
@@ -195,7 +196,7 @@ test("a document problem replaces body and terminal quotes and removes the stale
 			pageProblem,
 			pageUrl: "https://doc.weixin.qq.com/stale",
 			bodyQuote: "PRIVATE-BODY",
-			readable: true,
+			inline: true,
 			screen: { at: new Date(), lines: ["PRIVATE-SCREEN"] },
 		});
 		assert.equal(card.quote, pageProblem);
@@ -206,6 +207,48 @@ test("a document problem replaces body and terminal quotes and removes the stale
 		assert.doesNotMatch(JSON.stringify(rendered), /PRIVATE-BODY|PRIVATE-SCREEN|https:\/\/doc/);
 		assert.deepEqual(rendered.quote_area, { quote_text: pageProblem });
 	}
+});
+
+test("an inline session control guides by state instead of previewing a body or the terminal", () => {
+	const screen = { at: new Date(), lines: ["PRIVATE-SCREEN"] };
+	const guide = (view: Partial<Parameters<typeof sessionControlCard>[1]>) =>
+		sessionControlCard(source, { status: "idle", inline: true, screen, ...view }).quote;
+	assert.equal(guide({ reading: "reply" }), "点「查看全文」或「查看图片」阅读最近一条回复\n点「发提示词」继续任务");
+	assert.equal(guide({ reading: "empty" }), "这个会话还没有回复\n点「发提示词」开始任务");
+	assert.equal(
+		guide({ status: "running", reading: "reply" }),
+		"任务执行中，完成后点「刷新卡片」更新状态\n点「查看全文」或「查看图片」阅读上一条回复",
+	);
+	assert.equal(
+		guide({ status: "running", reading: "empty" }),
+		"任务执行中，完成后点「刷新卡片」更新状态\n这个会话还没有回复",
+	);
+	assert.match(guide({ reading: "expired" })!, /^本卡记录已过期\n.*\/wa s/);
+	assert.match(guide({ status: "confirming", reading: "reply" })!, /确认后中止/);
+	assert.match(guide({ choosing: "prompt", prompts: ["继续"], reading: "reply" })!, /选择提示词/);
+	assert.match(
+		guide({ choosing: "model", models: [], reading: "reply" })!,
+		/查看全文/,
+		"nothing to choose keeps the guide",
+	);
+	for (const reading of ["reply", "empty", "expired"] as const) {
+		for (const status of ["idle", "running", "confirming"] as const) {
+			const quote = guide({ status, reading })!;
+			assert.doesNotMatch(quote, /PRIVATE-SCREEN/);
+			assert.ok(quote.split("\n").length <= 3, quote);
+		}
+	}
+	assert.equal(guide({ reading: "reply", bodyQuote: "THE BODY" }), "THE BODY", "a result card keeps its own body");
+	assert.equal(
+		guide({ reading: "reply", pageProblem: "文档不可用" }),
+		"文档不可用",
+		"a document problem still explains itself",
+	);
+	assert.equal(
+		sessionControlCard(source, { status: "idle", screen }).quote,
+		"PRIVATE-SCREEN",
+		"without a guide (linked), the terminal stays",
+	);
 });
 
 test("a prompt's option shows ten characters, sends all of it, and keeps its ID wherever it moves in the list", () => {

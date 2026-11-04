@@ -554,6 +554,96 @@ test("one control card shows any session online: choosing B on A's card has B re
 	assert.deepEqual(aborts, ["B"]);
 });
 
+test("selecting another inline session reads that session without replacing the original card's frozen reply", async () => {
+	const { a, b } = await pair();
+	const ws = FakeWebSocket.instances[0];
+	await a.notification({ chatid: "user", content: "FROZEN-A-NOTICE" });
+	const card = ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.template_card;
+	await result(a, "NEWER-A-REPLY");
+	await result(b, "VISIBLE-B-REPLY");
+	const press = (shown: string, chosen = shown) => {
+		const id = randomUUID();
+		ws.receive({
+			cmd: "aibot_event_callback",
+			headers: { req_id: id },
+			body: {
+				msgid: id,
+				chattype: "single",
+				from: { userid: "user" },
+				msgtype: "event",
+				event: {
+					eventtype: "template_card_event",
+					template_card_event: {
+						task_id: card.task_id,
+						event_key: `full-text@${sessionFingerprint(`session-${shown}`)}`,
+						selected_items: {
+							selected_item: [
+								{
+									question_key: "session",
+									option_ids: { option_id: [sessionFingerprint(`session-${chosen}`)] },
+								},
+							],
+						},
+					},
+				},
+			},
+		});
+		return id;
+	};
+	const updated = async (id: string) => {
+		await until(
+			() => ws.sent.some((frame) => frame.cmd === "aibot_respond_update_msg" && frame.headers.req_id === id),
+			"selected session redrawn",
+		);
+		return ws.sent.find((frame) => frame.cmd === "aibot_respond_update_msg" && frame.headers.req_id === id).body
+			.template_card;
+	};
+	const switched = await updated(press("A", "B"));
+	assert.equal(switched.main_title.title, "📁 project-B");
+	assert.equal(
+		switched.quote_area.quote_text,
+		"点「查看全文」或「查看图片」阅读最近一条回复\n点「发提示词」继续任务",
+		"a live control guides; it does not preview a reply the click might no longer read",
+	);
+	assert.deepEqual(
+		switched.button_list.map((button: { text: string }) => button.text),
+		["刷新卡片", "发提示词", "切换模型", "中止任务", "查看全文", "查看图片"],
+	);
+	assert.equal(
+		ws.sent.filter((frame) => frame.body?.msgtype === "markdown").length,
+		0,
+		"selecting changes the view; reading needs another click",
+	);
+	press("B");
+	await until(
+		() => ws.sent.some((frame) => frame.body?.markdown?.content?.includes("VISIBLE-B-REPLY")),
+		"B's latest reply sent",
+	);
+	const bText = ws.sent.filter((frame) => frame.body?.msgtype === "markdown").at(-1).body.markdown.content;
+	assert.match(bText, /^🆔 session: session-B/);
+	assert.doesNotMatch(bText, /FROZEN-A|NEWER-A/);
+
+	const original = await updated(press("B", "A"));
+	assert.equal(original.quote_area.quote_text, "FROZEN-A-NOTICE", "switching back retains A's original publication");
+	press("A");
+	await until(
+		() => ws.sent.some((frame) => frame.body?.markdown?.content?.includes("FROZEN-A-NOTICE")),
+		"A's frozen notice sent",
+	);
+	const aText = ws.sent.filter((frame) => frame.body?.msgtype === "markdown").at(-1).body.markdown.content;
+	assert.match(aText, /^🆔 session: session-A/);
+	assert.doesNotMatch(aText, /NEWER-A-REPLY|VISIBLE-B/);
+	// An expired original publication must not turn into a live reader merely by switching away and back.
+	for (let index = 0; index < 50; index++) await a.notification({ chatid: "user", content: `LATER-NOTICE-${index}` });
+	await updated(press("A", "B"));
+	await updated(press("B", "A"));
+	const beforeExpiredRead = ws.sent.filter((frame) => frame.body?.msgtype === "markdown").length;
+	const expired = await updated(press("A"));
+	assert.match(expired.horizontal_content_list.at(-1).value, /本卡记录已过期/);
+	assert.equal(ws.sent.filter((frame) => frame.body?.msgtype === "markdown").length, beforeExpiredRead);
+	assert.equal(a.state.sent.length + b.state.sent.length, 0, "reading never dispatches pi work");
+});
+
 test("one pi exiting cannot clear another pi's pending notification or relabel its reconnect snapshot", async () => {
 	const { a, b } = await pair();
 	inbound("session-B", "remote B");

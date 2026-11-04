@@ -12,9 +12,10 @@ import type {
 	MessageStartEvent,
 	MessageUpdateEvent,
 } from "@earendil-works/pi-coding-agent";
-import { type CardModel, clamp, firstLine, withNote } from "../shared/card.ts";
+import { type CardModel, clamp, clock, firstLine, withNote } from "../shared/card.ts";
 import {
 	CONTROL_KEYS,
+	controlCardFor,
 	controlCardId,
 	MAX_PROMPTS,
 	MODEL_QUESTION,
@@ -33,18 +34,32 @@ import type {
 	GatewayTask,
 	TaskState,
 } from "../shared/gateway-protocol.ts";
-import { ABORTED_SUFFIX, NO_REPLY_TEXT, sessionMarkdownParts, sessionNote } from "../shared/notification.ts";
+import {
+	ABORTED_SUFFIX,
+	NO_REPLY_TEXT,
+	notificationPayload,
+	sessionMarkdownParts,
+	sessionNote,
+} from "../shared/notification.ts";
 import type { GatewayNotification, ReplySnapshot, SessionSource } from "../shared/notification-types.ts";
 import { errorMessage, sentences } from "../shared/text.ts";
 import type { ChatRef, WeComState } from "../shared/wecom-protocol.ts";
 import { type Connection, connectionKey, type Settings } from "./config.ts";
 import { type BridgeConnectionStatus, ConnectionNotices } from "./connection-notices.ts";
 import type { ControlReceipts } from "./control-receipts.ts";
-import { type ControlStatus, type ControlView, promptOptions, quoteHead, sessionControlCard } from "./control-view.ts";
+import {
+	type ControlReading,
+	type ControlStatus,
+	type ControlView,
+	promptOptions,
+	quoteHead,
+	sessionControlCard,
+} from "./control-view.ts";
 import { type GatewayClientOptions, whoamiCancelled } from "./gateway-client.ts";
 import { InboundContentPreparer, type PreparedInboundContent } from "./inbound/content.ts";
 import type { MessageSource } from "./message-source.ts";
 import { type ModelChoice, modelOptions, modelPage } from "./model-options.ts";
+import { withoutNextSteps } from "./next-steps.ts";
 import {
 	type CompletionRequest,
 	completionTitle,
@@ -71,7 +86,7 @@ const DISPATCH_REJECTED =
 const ABORT_CONFIRM_MS = 60_000;
 /** Pages of models remembered at once, one per viewer's copy of a card. */
 const MODEL_PAGES = 50;
-/** Published snapshots remembered at once; older cards keep controls but can no longer reveal their replies. */
+/** Reading targets and reply snapshots remembered at once; older cards keep their other controls. */
 const CARD_CONTENTS = 50;
 /** A task's first line in its result card's 窗口记录. */
 const SUBJECT_LENGTH = 24;
@@ -89,8 +104,8 @@ interface CardContent {
 	/** An inline card's bounded, masked opening; linked never retains a preview to fall back to. */
 	quote?: string;
 	steps: readonly string[];
-	/** Only an inline publication retains an on-demand reply. */
-	reply?: ReplySnapshot;
+	/** Result/notice cards retain their own body; an explicitly opened session control reads its latest reply. */
+	reply?: ReplySnapshot | "session";
 }
 
 interface BridgeTask {
@@ -413,11 +428,14 @@ export class BridgeSession {
 				case CONTROL_KEYS.refresh:
 					return { note: await this.refreshControl(ctx, click.userid) };
 				case CONTROL_KEYS.show:
+					// A switch may create a live view of another session, never reinterpret this session's
+					// expired original publication as permission to substitute its newest reply.
+					if (!controlCardFor(click.cardId, this.sessionId)) this.rememberSessionCard(click.cardId);
 					return { note: `已切换到本会话；${await this.refreshControl(ctx, click.userid)}`, only: true };
 				case CONTROL_KEYS.fullText:
-					return this.readReply(click, "text");
+					return this.readReply(ctx, click, "text");
 				case CONTROL_KEYS.image:
-					return this.readReply(click, "image");
+					return this.readReply(ctx, click, "image");
 				case CONTROL_KEYS.send:
 					return this.choosePrompt(click);
 				case CONTROL_KEYS.confirmSend:
@@ -462,12 +480,17 @@ export class BridgeSession {
 
 	// ---------------------------------------------------------------- the control card
 
-	private readReply(click: CardClick, format: "text" | "image"): ClickAnswer {
+	private readReply(ctx: ExtensionContext, click: CardClick, format: "text" | "image"): ClickAnswer {
 		if (this.host.settings().contentDisplay !== "inline")
 			return { note: "仅 inline 模式可用；当前为 linked", only: true };
-		const reply = click.cardId && this.cardContents.get(click.cardId)?.reply;
-		if (!reply) return { note: "本卡正文未保存或已过期，请使用新的 inline 结果卡", only: true };
+		const saved = click.cardId && this.cardContents.get(click.cardId)?.reply;
+		if (!saved) return { note: "本卡记录已过期，请发 /wa s 从会话列表重新打开会话", only: true };
 		if (this.readingReply) return { note: "已有全文或长图正在发送，请稍候再点", only: true };
+		const live = saved === "session" ? this.sessionReply(ctx) : undefined;
+		const reply = saved === "session" ? live?.snapshot : saved;
+		if (!reply) return { note: "这个会话还没有可查看的文本回复", only: true };
+		// A live control names the reply it froze: its guide promised "the latest", the note says which one.
+		const which = live?.at ? `（${clock(live.at)} 的回复）` : "";
 		this.readingReply = true;
 		void this.sendReply(click.chat, reply, format)
 			.catch((error: unknown) => {
@@ -480,9 +503,32 @@ export class BridgeSession {
 				this.readingReply = false;
 			});
 		return {
-			note: format === "text" ? "已请求全文，将分段发到本聊天" : "已请求生成长图，请稍候查看本聊天",
+			note: format === "text" ? `已请求全文${which}，将分段发到本聊天` : `已请求生成长图${which}，请稍候查看本聊天`,
 			only: true,
 		};
+	}
+
+	/** Freeze one visible reply when reading a live control, using the notification limits and producing model. */
+	private sessionReply(ctx: ExtensionContext): { snapshot: ReplySnapshot; at?: Date } | undefined {
+		const branch = ctx.sessionManager.getBranch();
+		const reply = latestAssistantReply(branch);
+		const text = reply && withoutNextSteps(reply.text);
+		if (!reply || !text?.trim()) return undefined;
+		const bounded = notificationPayload("notice", captureSessionSource(ctx, reply), this.host.maskText(text));
+		const entry = branch.find((item) => item.id === reply.entryId);
+		const at = entry ? new Date(entry.timestamp) : undefined;
+		return {
+			snapshot: { source: bounded.source, text: bounded.text },
+			...(at && !Number.isNaN(at.getTime()) ? { at } : {}),
+		};
+	}
+
+	/** What 查看全文 would read on this card now; a result card keeps its body preview instead. */
+	private reading(ctx: ExtensionContext, cardId: string | undefined): ControlReading {
+		const reply = cardId ? this.cardContents.get(cardId)?.reply : undefined;
+		if (reply !== "session") return "expired";
+		const latest = latestAssistantReply(ctx.sessionManager.getBranch());
+		return latest && withoutNextSteps(latest.text).trim() ? "reply" : "empty";
 	}
 
 	/** Acknowledge the click before slow work. Each send rechecks the registration and never retries uncertain delivery. */
@@ -621,7 +667,8 @@ export class BridgeSession {
 			status: options.status ?? this.controlStatus(options.viewer, options.chat),
 			prompts: this.promptsFor(options.cardId),
 			queued: this.waiting,
-			readable: !!content?.reply && !linked,
+			inline: !linked,
+			...(!linked && bodyQuote === undefined ? { reading: this.reading(ctx, options.cardId) } : {}),
 			...(options.choosing ? { choosing: options.choosing } : {}),
 			...(options.choosing === "model"
 				? {
@@ -664,7 +711,7 @@ export class BridgeSession {
 		this.rememberCard(cardId, content);
 		const view: ControlView = {
 			status: outcome ?? (this.busy ? "running" : "idle"),
-			readable: !!content.reply,
+			inline: !notification.documentOnly,
 			prompts: this.promptsFor(cardId),
 			queued: this.waiting,
 			...(this.screen ? { screen: this.screen } : {}),
@@ -683,6 +730,11 @@ export class BridgeSession {
 		});
 		const note = notification.kind === "result" ? (notification.title ?? "本轮结果") : noteOf(notification);
 		return { cardId, card: withNote(card, note, at) };
+	}
+
+	/** A newly opened control or a foreign card switched here reads live, without overwriting a frozen body. */
+	private rememberSessionCard(cardId: string): void {
+		if (!this.cardContents.has(cardId)) this.rememberCard(cardId, { steps: [], reply: "session" });
 	}
 
 	private rememberCard(cardId: string, content: CardContent): void {
@@ -837,10 +889,11 @@ export class BridgeSession {
 					await this.page.publish(before, chat);
 					// Writing the page may take seconds: the registration is checked again.
 					const ctx = live();
+					this.rememberSessionCard(cardId);
 					await this.client.push(chat, {
 						kind: "control",
 						cardId,
-						card: withNote(this.controlCard(ctx), "已补发控制卡"),
+						card: withNote(this.controlCard(ctx, { cardId }), "已补发控制卡"),
 					});
 				},
 				true,

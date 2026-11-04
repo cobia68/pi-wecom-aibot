@@ -9,7 +9,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { MESSAGE_SOURCE_ENTRY } from "../../src/extension/message-source.ts";
 import { ReplyImageRenderer } from "../../src/extension/reply-image/index.ts";
-import { clamp } from "../../src/shared/card.ts";
+import { clamp, clock as clockText } from "../../src/shared/card.ts";
 import {
 	CONTROL_KEYS,
 	controlCardFor,
@@ -1192,7 +1192,7 @@ test("an extracted reply's first three lines are quoted, never its thinking or t
 	ws.acknowledge(frame);
 	await pending;
 	// The controls remain available; no second message is pushed until a read button is clicked.
-	assert.deepEqual(buttons(frame), ["refresh", "send", "full-text", "reply-image", "model", "abort"]);
+	assert.deepEqual(buttons(frame), ["refresh", "send", "model", "abort", "full-text", "reply-image"]);
 });
 
 test("explicit content is headed by its first line on the card, which pushes nothing more into the chat", async () => {
@@ -1205,7 +1205,7 @@ test("explicit content is headed by its first line on the card, which pushes not
 	assertCard(card);
 	assert.equal(noteOf(card), "📣 部署成功", "窗口记录 names the notice");
 	assert.equal(card.body.template_card.source.desc, "空闲", "the session's live state");
-	assert.deepEqual(buttons(card), ["refresh", "send", "full-text", "reply-image", "model", "abort"]);
+	assert.deepEqual(buttons(card), ["refresh", "send", "model", "abort", "full-text", "reply-image"]);
 	assert.equal(notified.at(-1)!.text, body, "the whole body goes with it, for a refused card's Markdown");
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
 });
@@ -2468,7 +2468,11 @@ test("an earlier control card still refreshes the owning pi's live state after g
 	assert.equal(update.body.template_card.task_id, initialControl.body.template_card.task_id);
 	assert.equal(update.body.template_card.main_title.desc, "🤖 Model B · another-provider");
 	assert.equal(update.body.template_card.source.desc, "执行中");
-	assert.equal(update.body.template_card.quote_area.quote_text, "initial screen");
+	assert.equal(
+		update.body.template_card.quote_area.quote_text,
+		"本卡记录已过期\n请在企微发 /wa s，从会话列表重新打开会话",
+		"inline guides instead of the terminal; a replaced connection keeps no reading record",
+	);
 	assert.equal(update.body.template_card.quote_area.type, undefined, "no document, so no link");
 	assert.match(
 		update.body.template_card.horizontal_content_list.at(-1).value,
@@ -2502,7 +2506,7 @@ test("opening a session's card republishes a control copy without selecting a ta
 	await drain();
 	const redrawn = ws.sent.filter((frame) => frame.cmd === "aibot_respond_update_msg").at(-1);
 	assert.equal(redrawn.body.template_card.task_id, first.body.template_card.task_id);
-	assert.deepEqual(buttons(redrawn), ["refresh", "send", "model", "abort"]);
+	assert.deepEqual(buttons(redrawn), ["refresh", "send", "model", "abort", "full-text", "reply-image"]);
 	assert.match(noteOf(redrawn), /^画面读取失败/, "a refresh, which here has no terminal to read");
 	plain("still no target", { chattype: "group", chatid: "control-group" });
 	await drain();
@@ -2564,7 +2568,7 @@ test("the test card is the control card; its abort acts on the live session", as
 	const card = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").at(-1);
 	assertCard(card);
 	assert.equal(noteOf(card), "🧪 部署测试：点任一按钮验证回调");
-	assert.deepEqual(buttons(card), ["refresh", "send", "full-text", "reply-image", "model", "abort"]);
+	assert.deepEqual(buttons(card), ["refresh", "send", "model", "abort", "full-text", "reply-image"]);
 	ws.sent.length = 0;
 	clickCard(card, "refresh");
 	await drain();
@@ -2587,7 +2591,7 @@ test("the test card is the control card; its abort acts on the live session", as
 	await drain();
 	assert.equal(aborts.length, 0);
 	assert.match(note(), /当前没有运行中的任务$/);
-	assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort"]);
+	assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort", "full-text", "reply-image"]);
 	idle = false;
 	clickCard(entry, "abort");
 	await drain();
@@ -2600,7 +2604,7 @@ test("the test card is the control card; its abort acts on the live session", as
 	await drain();
 	assert.equal(aborts.length, 0);
 	assert.match(note(), /已取消中止$/);
-	assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort"]);
+	assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort", "full-text", "reply-image"]);
 	clickCard(entry, "abort");
 	await drain();
 	clock.tick(60_000);
@@ -2614,7 +2618,7 @@ test("the test card is the control card; its abort acts on the live session", as
 	await drain();
 	assert.equal(aborts.length, 1);
 	assert.match(note(), /已请求中止当前运行$/);
-	assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort"]);
+	assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort", "full-text", "reply-image"]);
 });
 
 test("an automatic task result quotes its final answer when no document is configured", async () => {
@@ -2657,6 +2661,85 @@ test("without a document a notification quotes its body, and button redraws keep
 		assert.equal(lastUpdate().body.template_card.quote_area.url, undefined, action);
 	}
 	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1, "no extra Markdown message");
+});
+
+test("an opened inline control appends reading actions and reads the session's latest visible reply", async (t) => {
+	await emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "OLDER-REPLY" }] } });
+	const card = await openControl();
+	assert.deepEqual(buttons(card), ["refresh", "send", "model", "abort", "full-text", "reply-image"]);
+	assert.equal(
+		card.body.template_card.quote_area.quote_text,
+		"点「查看全文」或「查看图片」阅读最近一条回复\n点「发提示词」继续任务",
+		"a guide, not the terminal or a body preview",
+	);
+	clock.tick(60_000 * 7);
+	ctx.model = { ...ctx.model!, ...modelB };
+	await emit("message_end", {
+		message: {
+			role: "assistant",
+			model: "model-a",
+			provider: "test-provider",
+			content: [
+				{ type: "thinking", thinking: "PRIVATE-THINKING" },
+				{ type: "text", text: 'LATEST-VISIBLE\n\n正文 test-secret\n<!-- wecom_next ["PRIVATE-STEP"] -->' },
+				{ type: "toolCall", name: "bash", arguments: { command: "PRIVATE-COMMAND" } },
+			],
+		},
+	});
+	await emit("message_end", {
+		message: { role: "toolResult", content: [{ type: "text", text: "PRIVATE-TOOL-OUTPUT" }] },
+	});
+	ws.sent.length = 0;
+	clickCard(card, "full-text");
+	await until(() => ws.sent.some((frame) => frame.body?.markdown?.content?.includes("LATEST-VISIBLE")));
+	await drain();
+	const latestAt = new Date(
+		[...sessionEntries].reverse().find((entry: any) => entry.message?.role === "assistant").timestamp,
+	);
+	assert.match(
+		noteOf(ws.sent[0]),
+		new RegExp(`已请求全文（${clockText(latestAt)} 的回复）`),
+		"the note names the reply read at the click, which may be newer than the card",
+	);
+	const text = ws.sent
+		.filter((frame) => frame.body?.msgtype === "markdown")
+		.map((frame) => frame.body.markdown.content)
+		.join("\n");
+	assert.match(text, /test-provider · Model A/);
+	assert.match(text, /正文 \*+/);
+	assert.doesNotMatch(text, /OLDER-REPLY|PRIVATE-|test-secret|Model B/);
+
+	const png = await readFile(new URL("../../src/extension/assets/pi-logo.png", import.meta.url));
+	const rendered: ReplySnapshot[] = [];
+	t.mock.method(ReplyImageRenderer.prototype, "render", async function* (reply: ReplySnapshot) {
+		rendered.push(reply);
+		yield { png, index: 0, total: 1 };
+	});
+	ws.sent.length = 0;
+	clickCard(card, "reply-image");
+	await until(() => ws.sent.some((frame) => frame.body?.msgtype === "image"));
+	await drain();
+	assert.equal(rendered.length, 1);
+	assert.match(rendered[0].text, /LATEST-VISIBLE/);
+	assert.equal(rendered[0].source.modelName, "Model A");
+	assert.doesNotMatch(rendered[0].text, /OLDER-REPLY|PRIVATE-|test-secret/);
+	assert.equal(sent.length, 0, "reading a control never starts a model task");
+});
+
+test("an empty inline control keeps both reading buttons and reports no visible reply without sending content", async (t) => {
+	t.mock.method(ReplyImageRenderer.prototype, "render", () => assert.fail("an empty reply must not render an image"));
+	const card = await openControl();
+	assert.deepEqual(buttons(card), ["refresh", "send", "model", "abort", "full-text", "reply-image"]);
+	assert.equal(card.body.template_card.quote_area.quote_text, "这个会话还没有回复\n点「发提示词」开始任务");
+	ws.sent.length = 0;
+	for (const action of ["full-text", "reply-image"]) {
+		clickCard(card, action);
+		await drain();
+		assert.match(noteOf(lastUpdate()), /还没有可查看的文本回复/);
+		assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort", "full-text", "reply-image"]);
+	}
+	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+	assert.equal(sent.length, 0);
 });
 
 test("查看全文 sends the clicked card's complete masked reply and original model, not the latest reply", async () => {
@@ -2765,7 +2848,7 @@ test("linked without a document never enables reading or accepts forged read cal
 	await command("config --scope session set contentDisplay=inline", ctx);
 	clickCard(linked, "full-text");
 	await drain();
-	assert.match(noteOf(lastUpdate()), /本卡正文未保存或已过期/);
+	assert.match(noteOf(lastUpdate()), /本卡记录已过期/);
 	assert.equal(
 		ws.sent.some((frame) => frame.cmd === "aibot_send_msg"),
 		false,
@@ -2800,7 +2883,7 @@ test("an expired card cannot reveal a newer reply, while the newest of 50 retain
 	ws.sent.length = 0;
 	clickCard(cards[0], "full-text");
 	await drain();
-	assert.match(noteOf(lastUpdate()), /本卡正文未保存或已过期/);
+	assert.match(noteOf(lastUpdate()), /本卡记录已过期/);
 	assert.equal(
 		ws.sent.some((frame) => frame.cmd === "aibot_send_msg"),
 		false,
@@ -2882,7 +2965,7 @@ test("disconnect during slow image generation cancels the upload and old cards c
 	ws.sent.length = 0;
 	clickCard(card, "full-text");
 	await drain();
-	assert.match(noteOf(lastUpdate()), /本卡正文未保存或已过期/);
+	assert.match(noteOf(lastUpdate()), /本卡记录已过期/);
 	assert.equal(
 		ws.sent.some((frame) => frame.cmd === "aibot_send_msg"),
 		false,
@@ -4012,7 +4095,11 @@ test("切换模型 lists pi's models, the one in use first; 确认切换 switche
 	assert.equal(ctx.model!.id, "model-b");
 	assert.match(noteOf(lastUpdate()), /^已切换到 Model B$/);
 	assert.equal(lastUpdate().body.template_card.main_title.desc, "🤖 Model B · another-provider");
-	assert.deepEqual(buttons(lastUpdate()), ["refresh", "send", "model", "abort"], "back to the controls");
+	assert.deepEqual(
+		buttons(lastUpdate()),
+		["refresh", "send", "model", "abort", "full-text", "reply-image"],
+		"back to the controls",
+	);
 	// The one in use again: nothing changes.
 	clickCard(initialControl, "model-confirm", "default-user", { model: modelB });
 	await drain();

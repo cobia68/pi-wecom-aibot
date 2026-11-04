@@ -43,14 +43,22 @@ export interface ControlView {
 	pageProblem?: string;
 	/** This card's already-masked plain-text body preview, instead of the terminal; never linked to a page. */
 	bodyQuote?: string;
-	/** Only an inline publication with its own retained reply offers these read-only actions. */
-	readable?: boolean;
+	/** Inline controls always expose reading actions; an empty/expired reply is explained when clicked. */
+	inline?: boolean;
+	/**
+	 * An inline session control's guide instead of the terminal: what 查看全文 would read when drawn. It never
+	 * previews a body, so a reply that changes before the click cannot contradict the card.
+	 */
+	reading?: ControlReading;
 	/** The session document's copy of pi's logo; the gateway draws a public one without it. */
 	icon?: string;
 	prompts?: readonly string[];
 	/** Tasks waiting behind the current run, counted when the card is drawn; a finished run's copy leaves it out. */
 	queued?: number;
 }
+
+/** reply: a visible reply to read; empty: none yet; expired: this card's record is gone. */
+export type ControlReading = "reply" | "empty" | "expired";
 
 export interface PromptOption {
 	/** The prompt's own fingerprint: a moved prompt is still found, an edited one is not. */
@@ -75,8 +83,8 @@ const QUOTE_LINES = 3;
 const QUOTE_LIMIT = 1500;
 
 /**
- * Buttons by step, always in pairs (three in a row are cut): the frequent pair first, 中止任务 last; a
- * second step confirms on the left and cancels on the right. Inline replies add a reading pair in between.
+ * Buttons by step, always in pairs (three in a row are cut): frequent actions, model/abort, then inline
+ * reading. A second step confirms on the left and cancels on the right.
  */
 const BUTTONS = {
 	normal: [
@@ -134,8 +142,8 @@ export function sessionControlCard(source: SessionSource, view: ControlView): Ca
 	const paged = mode === "model" && models.pages > 1;
 	const buttons = paged
 		? [...BUTTONS.model, ...BUTTONS.pages]
-		: mode === "normal" && view.readable && !pageProblem
-			? [...BUTTONS.normal.slice(0, 2), ...BUTTONS.read, ...BUTTONS.normal.slice(2)]
+		: mode === "normal" && view.inline && !pageProblem
+			? [...BUTTONS.normal, ...BUTTONS.read]
 			: BUTTONS[mode];
 	const options = (items: readonly { id: string; text: string }[]) => items.map(({ id, text }) => ({ id, text }));
 	const own = sessionOption(source.sessionId, source.directoryName);
@@ -199,9 +207,29 @@ export function quoteHead(markdown: string): string {
 	return clamp(lines.join("\n"), QUOTE_LIMIT) || "（正文没有可显示的文字）";
 }
 
-/** A body's preview stays on this card through every button redraw; otherwise show the terminal. */
+/** A body's preview stays on this card through every button redraw; an inline control guides; linked shows the terminal. */
 function quoteOf(view: ControlView): string {
 	if (view.bodyQuote !== undefined) return view.bodyQuote;
+	if (view.reading) return guideOf(view, view.reading);
 	if (view.screen) return quoteTail(view.screen.lines).join("\n") || "（终端画面为空）";
 	return view.pageUrl ? "没有终端画面；点这里看最近回复" : "点「刷新卡片」读取画面";
+}
+
+/** What to do next, by the step shown; at most three lines, each a whole sentence on a phone. */
+function guideOf(view: ControlView, reading: ControlReading): string {
+	if (view.status === "confirming") return "确认后中止这个会话的任务\n点「取消中止」则不中止";
+	if (view.choosing === "prompt" && view.prompts?.length)
+		return "在下拉框选择提示词\n点「确认发送」发给这个会话，忙时排队";
+	if (view.choosing === "model" && view.models?.length)
+		return "在下拉框选择模型\n点「确认切换」，只影响这个会话的后续运行";
+	if (reading === "expired") return "本卡记录已过期\n请在企微发 /wa s，从会话列表重新打开会话";
+	const running = view.status === "running";
+	const lines = running ? ["任务执行中，完成后点「刷新卡片」更新状态"] : [];
+	if (reading === "reply")
+		lines.push(
+			running ? "点「查看全文」或「查看图片」阅读上一条回复" : "点「查看全文」或「查看图片」阅读最近一条回复",
+		);
+	else lines.push("这个会话还没有回复");
+	if (!running) lines.push(reading === "reply" ? "点「发提示词」继续任务" : "点「发提示词」开始任务");
+	return lines.join("\n");
 }
