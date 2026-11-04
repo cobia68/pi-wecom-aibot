@@ -108,8 +108,8 @@ const COMMAND_DEFINITIONS: readonly CommandSpec[] = [
 		details: [
 			"重新读取配置，仅连接当前 session，不修改配置；接入配置不变时保留当前任务和待发通知",
 			`BotID、Secret 和默认推送目标必须齐全；目标可用 /wecom-aibot config ${SCOPE_SLOT} whoami 识别保存，也可用 /wecom-aibot config set defaultChatId=<ID> 填写`,
-			"注册与企微订阅均成功后，手动或自动接入都会向默认聊天发一张新的 session 控制卡；网络重连不重发，卡片失败不撤销连接",
-			"控制卡只在点击后刷新；找不到旧卡时，在企微发 /wa s，选择会话后点「打开会话」补发",
+			"注册与企微订阅均成功后，手动或自动接入都只向默认聊天发一张在线会话列表，默认选中本次接入的 session；网络重连不重发，列表失败不撤销连接",
+			"只有一个会话也不自动打开；选好后点「打开会话」才发送它的控制卡。列表和控制卡只在点击后刷新；找不到旧列表时，在企微发 /wa s",
 			"默认每个 session 都需手动 /wecom-aibot connect；autoConnect=true 时会在启动时自动接入，包括新建、恢复、分叉和重载；退出或切换会话时自动断开",
 			"凭据、白名单或默认目标变化后，connect 经确认撤销旧注册及其待处理工作；没有交互界面且有待处理工作时拒绝切换",
 		],

@@ -1,7 +1,8 @@
 /**
  * The online sessions as a card: one row each, a dropdown of the same ones, and 打开会话, which publishes
  * the chosen session's control card as a new message. The list stays, so one list opens many sessions; every
- * action is done on the control card. No session is singled out: the dropdown starts at the first row.
+ * action is done on the control card. Connect selects its requesting session; other lists start at the first
+ * row unless an existing selection is being kept.
  */
 import { type CardAction, type CardModel, clock } from "../shared/card.ts";
 import { CONTROL_KEYS, controlCardId, sessionFingerprint } from "../shared/control-card.ts";

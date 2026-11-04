@@ -184,8 +184,9 @@ export class BridgeSession {
 	/** One on-demand send at a time per registration, so repeated clicks cannot flood chats or rasterisers. */
 	private readingReply = false;
 	private readonly replyImages = new ReplyImageRenderer();
-	/** /wecom-aibot connect before the registration is ready: the first ready state publishes a card. */
+	/** Each connect requests one list, now or when the registration is ready; network recovery alone requests none. */
 	private announceOnReady = false;
+	private announcing = false;
 
 	constructor(
 		host: BridgeHost,
@@ -275,12 +276,17 @@ export class BridgeSession {
 		return !!this.currentTask || this.host.settling() || (ctx !== undefined && !ctx.isIdle());
 	}
 	get pendingNotifications(): number {
-		return this.outbox.size + (this.identifyOnly ? 0 : this.host.receipts().pending);
+		return (
+			this.outbox.size +
+			(this.identifyOnly ? 0 : this.host.receipts().pending) +
+			Number(this.announcing || this.announceOnReady)
+		);
 	}
 
 	dispose(reason: string): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.announceOnReady = false;
 		this.lifetime.abort();
 		clearTimeout(this.drainTimer);
 		this.drainTimer = undefined;
@@ -363,12 +369,40 @@ export class BridgeSession {
 		this.client.resume();
 	}
 
-	/** /wecom-aibot connect: a new control card in the default chat, now or once the registration is ready. */
+	/** /wecom-aibot connect: list the online sessions, with this one selected; never open its control card. */
 	announce(): void {
+		if (this.disposed || this.identifyOnly || !this.connection.target || this.announcing) return;
+		this.announceOnReady = true;
+		this.announceWhenReady();
+	}
+
+	/** Coalesce requests in flight; only a definitely unsent list may wait for network recovery. */
+	private announceWhenReady(): void {
 		const target = this.connection.target;
-		if (this.disposed || this.identifyOnly || !target) return;
-		if (this.ready) this.ensureControl(target, true);
-		else this.announceOnReady = true;
+		if (!target || !this.announceOnReady || this.announcing || !this.ready || this.identifyOnly) return;
+		const subscription = this.subscription;
+		this.announceOnReady = false;
+		this.announcing = true;
+		void Promise.resolve()
+			.then(() => {
+				if (!this.ready) throw new DeliveryError("接入已停止或连接未就绪，会话列表尚未发送", "not_sent");
+				return this.client.push(target, { kind: "sessions" });
+			})
+			.catch((error: unknown) => {
+				if (this.disposed) return;
+				const outcome = deliveryFailure(error);
+				this.host.log(`session list failed (${outcome}): ${errorMessage(error)}`);
+				if (outcome === "not_sent") this.announceOnReady = true;
+				else
+					this.host.notify(
+						`在线会话列表${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errorMessage(error)}；未自动重发，可发 /wa s 查看`,
+						"warning",
+					);
+			})
+			.finally(() => {
+				this.announcing = false;
+				if (this.subscription !== subscription) this.announceWhenReady();
+			});
 	}
 
 	/** A button on one of this session's cards; WeCom takes the card update within 5 seconds. */
@@ -418,7 +452,7 @@ export class BridgeSession {
 		}
 		// Without a card ID, the only key is the one that publishes a new copy of this session's card.
 		if (key !== PUBLISH_KEY) return { note: "不支持的按钮" };
-		void this.sendControl(chat, true, "已补发控制卡").catch((error: unknown) => {
+		void this.sendControl(chat).catch((error: unknown) => {
 			const outcome = deliveryFailure(error);
 			const status = outcome === "unknown" ? "发送结果未知" : outcome === "rejected" ? "被拒绝" : "尚未发出";
 			this.pushNote(chat, `控制卡${status}：${errorMessage(error)}`);
@@ -779,8 +813,8 @@ export class BridgeSession {
 		return dropped.length;
 	}
 
-	/** pi chooses the ID, journals the delivery and draws the card; `note` says why the card is here. */
-	private async sendControl(chat: ChatRef, force = false, note = "已接入"): Promise<void> {
+	/** Only 打开会话 publishes a plain control card; pi journals its receipt and coalesces clicks in flight. */
+	private async sendControl(chat: ChatRef): Promise<void> {
 		const subscription = this.subscription;
 		try {
 			const sent = await this.host.receipts().ensure(
@@ -803,9 +837,13 @@ export class BridgeSession {
 					await this.page.publish(before, chat);
 					// Writing the page may take seconds: the registration is checked again.
 					const ctx = live();
-					await this.client.push(chat, { kind: "control", cardId, card: withNote(this.controlCard(ctx), note) });
+					await this.client.push(chat, {
+						kind: "control",
+						cardId,
+						card: withNote(this.controlCard(ctx), "已补发控制卡"),
+					});
 				},
-				force,
+				true,
 			);
 			if (sent && !this.disposed) this.host.log(`control card delivered for session ${this.sessionId}`);
 		} catch (error) {
@@ -815,22 +853,9 @@ export class BridgeSession {
 				this.ready &&
 				this.subscription !== subscription
 			)
-				return this.sendControl(chat, force, note);
+				return this.sendControl(chat);
 			throw error;
 		}
-	}
-
-	private ensureControl(chat: ChatRef, force = false): void {
-		void this.sendControl(chat, force).catch((error: unknown) => {
-			if (this.disposed) return;
-			const outcome = deliveryFailure(error);
-			this.host.log(`control card failed (${outcome}): ${errorMessage(error)}`);
-			if (outcome !== "not_sent")
-				this.host.notify(
-					`控制卡${outcome === "rejected" ? "被拒绝" : "未确认送达"}：${errorMessage(error)}；可发 /wa s 后点「打开会话」补发`,
-					"warning",
-				);
-		});
 	}
 
 	private pushNote(chat: ChatRef, text: string): void {
@@ -1013,12 +1038,7 @@ export class BridgeSession {
 			for (const wake of [...this.readyWaiters]) wake();
 			if (becameReady) {
 				this.subscription++;
-				if (!this.identifyOnly) {
-					const announce = this.announceOnReady;
-					this.announceOnReady = false;
-					if (this.connection.target) this.ensureControl(this.connection.target, announce);
-					for (const chat of this.host.receipts().retryable(this.connection.botId)) this.ensureControl(chat);
-				}
+				this.announceWhenReady();
 				if (this.currentTask?.result !== undefined) this.finishTask();
 				this.deliverOutbox();
 				this.scheduleDrain();
@@ -1060,7 +1080,6 @@ export class BridgeSession {
 		}
 		// Reserve a FIFO position before any asynchronous download begins.
 		this.queue.push(queued);
-		this.ensureControl(message.chat);
 		const signal = this.lifetime.signal;
 		try {
 			const prepared = await this.contentPreparer.prepare(ctx.cwd, message, signal);

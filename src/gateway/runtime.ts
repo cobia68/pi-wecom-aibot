@@ -68,7 +68,7 @@ import { helpText, parseWeComCommand, type WeComCommand } from "./command.ts";
 import { readReplyImage } from "./reply-image.ts";
 import { PICKER_QUESTION, type PickerAction, pageOf, pickerAction, sessionPicker } from "./session-picker.ts";
 import { SessionPoller } from "./session-poller.ts";
-import { sessionsText, withSessions } from "./session-view.ts";
+import { type SessionState, sessionsText, withSessions } from "./session-view.ts";
 import { WeComClient, type WeComClientOptions, type WeComInbound } from "./wecom-client.ts";
 
 const MAX_SESSIONS = 100;
@@ -114,6 +114,7 @@ interface Task {
  * in a group); `deadline`: WeCom takes the welcome or the update only until then.
  */
 type PickerReply =
+	| { kind: "push"; chat: ChatRef }
 	| { kind: "message"; reqId: string; chat: ChatRef }
 	| { kind: "welcome"; reqId: string; chat: ChatRef; deadline: number }
 	| { kind: "update"; reqId: string; chat: ChatRef; cardId: string; userids?: string[]; deadline: number };
@@ -325,10 +326,29 @@ export class WeComGateway {
 		await this.publishCard(client, member, chat, notification);
 	}
 
-	/** A session's control card, or a click's follow-up text/image; each is a new message. */
+	/** A connection's session list, a control card, or a click's follow-up; each is an acknowledged message. */
 	async push(instanceId: string, chat: ChatRef, item: PushItem): Promise<void> {
 		const { member, client } = this.publisher(instanceId);
 		member.active = ++this.activity;
+		if (item.kind === "sessions") {
+			// Like a control card, an explicit push may show its own session; other private-chat candidates
+			// must admit the recipient. Group cards list all formal sessions, with permission checked on click.
+			const eligible =
+				chat.chatType === 1
+					? this.permitted(chat.chatId)
+					: [...this.members.values()].filter((candidate) => !candidate.identifyOnly);
+			if (!eligible.includes(member)) eligible.push(member);
+			const states = await new Promise<SessionState[]>((resolve) =>
+				this.poller.poll(eligible, (_online, sessions) => resolve(sessions)),
+			);
+			if (this.members.get(instanceId) !== member)
+				throw new DeliveryError("会话已离线或重新接入，列表尚未发送", "not_sent");
+			const selected = sessionFingerprint(member.source.sessionId);
+			const list = sessionPicker(states, pageOf(states, selected), new Date(), selected);
+			if (!list) throw new DeliveryError("没有可显示的在线会话", "not_sent");
+			await this.sendPicker({ kind: "push", chat }, list.cardId, list.card, sessionsText(states));
+			return;
+		}
 		if (item.kind === "control") {
 			if (!controlCardFor(item.cardId, member.source.sessionId))
 				throw new DeliveryError("控制卡不属于发送 pi 的 session", "rejected");
@@ -720,7 +740,7 @@ export class WeComGateway {
 
 	/** The session list, asking each pi whether it is busy; `page` may be the page a session is listed on. */
 	private showPicker(
-		reply: PickerReply,
+		reply: Exclude<PickerReply, { kind: "push" }>,
 		eligible: Member[],
 		page: number | { fingerprint?: string } = 0,
 		note?: string,
@@ -765,6 +785,9 @@ export class WeComGateway {
 			const outcome = deliveryFailure(error);
 			if (shared && outcome !== "unknown" && this.cards.get(cardId) === model) this.cards.delete(cardId);
 			this.log(`会话列表发送失败（${outcome}）：${errorMessage(error)}`);
+			// A proactive connect request has an IPC caller: preserve its outcome, never claim delivery or
+			// send another message after an unconfirmed/rejected list. The caller decides whether to retry.
+			if (reply.kind === "push") throw error;
 			if (outcome !== "rejected") return;
 			if (reply.kind === "message") this.reply(reply.reqId, fallback);
 			else if (reply.kind === "welcome") {

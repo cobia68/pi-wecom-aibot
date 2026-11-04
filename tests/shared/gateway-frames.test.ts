@@ -173,6 +173,8 @@ test("every client frame the gateway consumes is validated before use", () => {
 	assert.equal(parseClientFrame({ type: "response", id: "1", response: { ok: true, note: 1 } }).ok, false);
 	const push = (item: unknown) =>
 		parseClientFrame({ type: "push", id: "1", chat: { chatId: "user", chatType: 1 }, item }).ok;
+	assert.equal(push({ kind: "sessions" }), true);
+	assert.equal(push({ kind: "session-list" }), false, "only the supported list request crosses IPC");
 	assert.equal(push({ kind: "markdown", text: "全文" }), true);
 	const image = { mime: "image/png", filename: "a.png", path: join(tmpdir(), "a.png") };
 	assert.equal(push({ kind: "image", image }), true);

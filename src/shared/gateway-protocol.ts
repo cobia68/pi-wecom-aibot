@@ -15,7 +15,7 @@ import type { DeliveryFailure } from "./delivery.ts";
 import type { GatewayNotification, SessionSource } from "./notification-types.ts";
 import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComState } from "./wecom-protocol.ts";
 
-export const GATEWAY_PROTOCOL_VERSION = 16;
+export const GATEWAY_PROTOCOL_VERSION = 17;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;
 const IPC_MAX_BYTES = 1_048_576;
@@ -89,8 +89,9 @@ export interface GatewayImage {
 	path: string;
 }
 
-/** A control card, or a click's follow-up. The gateway owns rendering and acknowledged delivery. */
+/** An online-session list, a control card, or a click's follow-up. The gateway owns rendering and delivery. */
 export type PushItem =
+	| { kind: "sessions" }
 	| { kind: "markdown"; text: string }
 	| { kind: "image"; image: GatewayImage }
 	| { kind: "control"; cardId: string; card: CardModel };
@@ -261,6 +262,7 @@ function validNotification(value: unknown): value is GatewayNotification {
 function validPushItem(value: unknown): value is PushItem {
 	const item = value as PushItem | undefined;
 	if (!item || typeof item !== "object") return false;
+	if (item.kind === "sessions") return true;
 	if (item.kind === "markdown") return typeof item.text === "string" && Buffer.byteLength(item.text) <= 512 * 1024;
 	if (item.kind === "image") {
 		const image = item.image;

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { sessionControlCard } from "../../src/extension/control-view.ts";
 import { type GatewayPeer, WeComGateway } from "../../src/gateway/runtime.ts";
 import { controlCardFor, controlCardId, controlKey, sessionFingerprint } from "../../src/shared/control-card.ts";
+import { deliveryFailure } from "../../src/shared/delivery.ts";
 import { type GatewayRegistration, type ServerFrame, sessionTarget } from "../../src/shared/gateway-protocol.ts";
 import { formatProcessingStatus, notificationPayload } from "../../src/shared/notification.ts";
 import { FakeWebSocket } from "../support/fake-websocket.ts";
@@ -329,6 +330,105 @@ test("an unknown quoted session asks for a choice rather than guessing a target"
 		[sessionFingerprint(SESSION_A), sessionFingerprint(SESSION_B)],
 	);
 });
+
+test("a proactive list selects its requesting session even when it is on a later page", async () => {
+	const members = Array.from({ length: 7 }, (_, index) => add(`S${index}`));
+	const owner = members[6];
+	await gateway.push("S6", { chatId: "user", chatType: 1 }, { kind: "sessions" });
+	const card = picker();
+	assert.equal(card.main_title.title, "7 个在线会话");
+	assert.equal(card.button_selection.question_key, "pick");
+	assert.equal(card.button_selection.title, "会话 2/2");
+	assert.equal(card.button_selection.selected_id, sessionFingerprint("S6"));
+	assert.deepEqual(
+		card.button_selection.option_list.map((option: { id: string }) => option.id),
+		[sessionFingerprint("S5"), sessionFingerprint("S6")],
+	);
+	assert.equal(card.button_list[0].text, "打开会话");
+	assert.equal(owner.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
+	assert.ok(members.every((member) => requests(member.peer).length === 0 && member.peer.messages().length === 0));
+});
+
+test("a private connection list retains its publisher and filters other candidates by the recipient's access", async () => {
+	const owner = add("A", SESSION_A, (value) => {
+		value.config.allowedUserIds = ["operator"];
+	});
+	add("B", SESSION_B, (value) => {
+		value.config.allowedUserIds = ["user"];
+	});
+	const hidden = add("C", "hidden-session", (value) => {
+		value.config.allowedUserIds = ["operator"];
+	});
+	const identifying = add("I", "identity-session", (value) => {
+		value.identifyOnly = true;
+	});
+	await gateway.push("A", { chatId: "user", chatType: 1 }, { kind: "sessions" });
+	const card = picker();
+	assert.equal(card.main_title.title, "2 个在线会话");
+	assert.equal(card.button_selection.selected_id, sessionFingerprint(SESSION_A));
+	assert.doesNotMatch(JSON.stringify(card), /project-C|project-I|hidden-session|identity-session/);
+	assert.equal(hidden.peer.frames.filter((frame) => frame.type === "request").length, 0);
+	assert.equal(identifying.peer.frames.filter((frame) => frame.type === "request").length, 0);
+	click(card.task_id, card.button_list[0].key);
+	assert.equal(requests(owner.peer).length, 0, "receiving the publisher's list does not grant permission to open it");
+	await assert.rejects(gateway.push("I", { chatId: "user", chatType: 1 }, { kind: "sessions" }), /临时识别连接/);
+	await assert.rejects(gateway.push("missing", { chatId: "user", chatType: 1 }, { kind: "sessions" }), /尚未注册/);
+});
+
+test("a group connection list lists all formal sessions but still checks the clicker's access", async () => {
+	const a = add("A", SESSION_A);
+	const b = add("B", SESSION_B, (value) => {
+		value.config.allowedUserIds = ["operator"];
+	});
+	add("I", "identity-session", (value) => {
+		value.identifyOnly = true;
+	});
+	await gateway.push("B", { chatId: "team", chatType: 2 }, { kind: "sessions" });
+	const frame = a.ws.sent.find((item) => item.cmd === "aibot_send_msg");
+	assert.equal(frame.body.chatid, "team");
+	assert.equal(frame.body.chat_type, 2);
+	assert.equal(picker().main_title.title, "2 个在线会话");
+	assert.equal(picker().button_selection.selected_id, sessionFingerprint(SESSION_B));
+	click(picker().task_id, picker().button_list[0].key, { chattype: "group", chatid: "team" });
+	assert.equal(requests(b.peer).length, 0);
+});
+
+for (const end of ["disconnect", "replace", "shutdown"] as const) {
+	test(`a pending connection list cannot send after its requester ${end}`, async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const owner = add("A", SESSION_A);
+		owner.peer.busy = undefined;
+		const pending = gateway.push("A", { chatId: "user", chatType: 1 }, { kind: "sessions" });
+		const rejected = assert.rejects(pending, (error: unknown) => deliveryFailure(error) === "not_sent");
+		if (end === "disconnect") gateway.unregister("A", owner.peer);
+		else if (end === "replace") {
+			add("A", SESSION_A);
+			t.mock.timers.tick(2_000);
+		} else gateway.stop();
+		await rejected;
+		assert.equal(owner.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 0);
+	});
+}
+
+for (const outcome of ["rejected", "unknown", "not_sent"] as const) {
+	test(`a connection list preserves a ${outcome} delivery outcome without sending a fallback`, async () => {
+		const owner = add("A", SESSION_A);
+		owner.ws.onSend = (frame) => {
+			if (frame.cmd !== "aibot_send_msg") return;
+			if (outcome === "rejected") owner.ws.acknowledge(frame, 40014);
+			else owner.ws.receive({ headers: frame.headers, errmsg: "malformed acknowledgement" });
+		};
+		if (outcome === "not_sent") owner.ws.readyState = 2;
+		await assert.rejects(
+			gateway.push("A", { chatId: "user", chatType: 1 }, { kind: "sessions" }),
+			(error: unknown) => deliveryFailure(error) === outcome,
+		);
+		const pushes = owner.ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+		assert.equal(pushes.length, outcome === "not_sent" ? 0 : 1);
+		assert.ok(pushes.every((frame) => frame.body.template_card?.button_selection?.question_key === "pick"));
+		assert.equal(owner.ws.sent.filter((frame) => frame.cmd === "aibot_respond_msg").length, 0);
+	});
+}
 
 test("sessions lists each session's directory, state and model; its buttons are a control card's", () => {
 	add("A", SESSION_A);

@@ -223,6 +223,85 @@ function noteOf(frame: any): string {
 	return frame.body.template_card.horizontal_content_list.at(-1).value.replace(/^\d\d:\d\d /, "");
 }
 
+for (const autoConnect of [false, true]) {
+	test(`${autoConnect ? "autoConnect" : "manual connect"} publishes only a session list with its own session selected`, async () => {
+		writeLayer("global", { ...readLayer("global"), autoConnect });
+		const a = piHarness("A");
+		const b = piHarness("B");
+		harnesses.push(a, b);
+		const connect = async (pi: ReturnType<typeof piHarness>) => {
+			Object.assign(pi.ctx, { hasUI: true });
+			await pi.emit("session_start");
+			if (!autoConnect) await pi.command("connect");
+			await until(pi.ready, "session registered");
+		};
+		await connect(a);
+		const ws = FakeWebSocket.instances[0];
+		const pushes = () => ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+		await until(() => pushes().length === 1, "A's one connection list");
+		const first = pushes()[0].body.template_card;
+		assert.equal(first.button_selection.question_key, "pick", "connect must not publish a control card");
+		assert.equal(first.main_title.title, "1 个在线会话");
+		assert.equal(first.button_selection.selected_id, sessionFingerprint("session-A"));
+		assert.equal(first.button_selection.option_list.length, 1, "even one session still requires 打开会话");
+
+		await connect(b);
+		await until(() => pushes().length === 2, "B's one connection list");
+		const second = pushes()[1].body.template_card;
+		assert.equal(second.button_selection.question_key, "pick");
+		assert.equal(second.main_title.title, "2 个在线会话");
+		assert.deepEqual(
+			second.button_selection.option_list.map((option: { id: string }) => option.id),
+			[sessionFingerprint("session-A"), sessionFingerprint("session-B")],
+		);
+		assert.equal(second.button_selection.selected_id, sessionFingerprint("session-B"));
+		assert.equal(a.state.sent.length + b.state.sent.length, 0, "listing does not start a task");
+
+		const eventId = randomUUID();
+		ws.receive({
+			cmd: "aibot_event_callback",
+			headers: { req_id: eventId },
+			body: {
+				msgid: eventId,
+				from: { userid: "default-user" },
+				chattype: "single",
+				msgtype: "event",
+				event: {
+					eventtype: "template_card_event",
+					template_card_event: {
+						task_id: second.task_id,
+						event_key: second.button_list.find((button: { text: string }) => button.text === "打开会话").key,
+						selected_items: {
+							selected_item: [
+								{ question_key: "pick", option_ids: { option_id: [sessionFingerprint("session-A")] } },
+							],
+						},
+					},
+				},
+			},
+		});
+		await until(() => pushes().length === 3, "only the selected session's control is opened");
+		const opened = pushes()[2].body.template_card;
+		assert.ok(controlCardFor(opened.task_id, "session-A"));
+		assert.equal(opened.button_selection.question_key, "session");
+		assert.equal(opened.button_selection.selected_id, sessionFingerprint("session-A"));
+		assert.equal(a.state.sent.length + b.state.sent.length, 0, "opening a control card does not start a task");
+
+		inbound("session-B", "FIRST-TASK");
+		await until(
+			() => b.state.sent.length === 1,
+			"a first task in another chat starts without a control introduction",
+		);
+		await result(b, "FINAL-B");
+		const taskPushes = pushes().filter((frame) => frame.body.chatid === "user");
+		assert.equal(taskPushes.length, 1, "a task sends its result, not an unsolicited control card");
+		assert.ok(controlCardFor(taskPushes[0].body.template_card.task_id, "session-B"));
+		assert.match(taskPushes[0].body.template_card.quote_area.quote_text, /FINAL-B/);
+		const reading = taskPushes[0].body.template_card.button_list.map((button: { text: string }) => button.text);
+		assert.ok(reading.includes("查看全文") && reading.includes("查看图片"), "result reading remains available");
+	});
+}
+
 test("/wecom-aibot connect registers only that session; repeating connect or disconnecting never changes shared config or other pi", async () => {
 	const saved = await readFile(CONFIG_FILE, "utf8");
 	const { a, b } = await pair(false);
@@ -262,12 +341,8 @@ test("two real extension instances process separate tasks and publish their own 
 		pushes.every((frame) => isControlCardId(frame.body?.template_card?.task_id)),
 		"pi publishes only control cards",
 	);
-	const intros = pushes.filter((frame) => noteOf(frame) === "已接入");
-	assert.equal(intros.length, 2, "each pi introduces its control once in the new task chat");
-	for (const id of ["A", "B"])
-		assert.ok(intros.some((frame) => controlCardFor(frame.body.template_card.task_id, `session-${id}`)));
-	const results = pushes.filter((frame) => !intros.includes(frame));
-	assert.equal(results.length, 2);
+	const results = pushes;
+	assert.equal(results.length, 2, "first tasks in new chats send results without unsolicited control introductions");
 	assertCard(results[0], "B", "✅ 本轮完成");
 	assertCard(results[1], "A", "✅ 本轮完成");
 	// Either card lists both sessions online, the one that sent it selected.
@@ -392,13 +467,17 @@ test("each connect publishes a new card listing every session online then: one, 
 		);
 	}
 	const listed = (card: any) => card.button_selection.option_list.map((option: { text: string }) => option.text);
-	assert.deepEqual(listed(cards[0]), ["project-A · on-A"]);
-	assert.deepEqual(listed(cards[1]), ["project-A · on-A", "project-B · on-B"]);
-	assert.deepEqual(listed(cards[2]), ["project-A · on-A", "project-B · on-B", "project-C · on-C"]);
-	// Each card shows, and has selected, the session that connected.
+	assert.deepEqual(listed(cards[0]), ["project-A · on-A · 空闲"]);
+	assert.deepEqual(listed(cards[1]), ["project-A · on-A · 空闲", "project-B · on-B · 空闲"]);
+	assert.deepEqual(listed(cards[2]), [
+		"project-A · on-A · 空闲",
+		"project-B · on-B · 空闲",
+		"project-C · on-C · 空闲",
+	]);
+	// Each list contains the online sessions, and preselects the one that requested it.
 	for (const [index, id] of ["A", "B", "C"].entries()) {
-		assert.ok(controlCardFor(cards[index].task_id, `session-${id}`));
-		assert.equal(cards[index].main_title.title, `📁 project-${id}`);
+		assert.equal(cards[index].button_selection.question_key, "pick");
+		assert.equal(cards[index].main_title.title, `${index + 1} 个在线会话`);
 		assert.equal(cards[index].button_selection.selected_id, sessionFingerprint(`session-${id}`));
 	}
 });
@@ -406,8 +485,7 @@ test("each connect publishes a new card listing every session online then: one, 
 test("one control card shows any session online: choosing B on A's card has B redraw it, and A is never touched", async () => {
 	const { a, b } = await pair();
 	const ws = FakeWebSocket.instances[0];
-	await a.command("connect");
-	await until(() => ws.sent.some((frame) => frame.cmd === "aibot_send_msg"), "A publishes a new card");
+	await a.notification({ chatid: "user", content: "CONTROL-CARD-FIXTURE" });
 	const card = ws.sent.find((frame) => frame.cmd === "aibot_send_msg").body.template_card;
 	assert.ok(controlCardFor(card.task_id, "session-A"));
 	assert.deepEqual(

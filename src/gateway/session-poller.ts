@@ -64,8 +64,9 @@ export class SessionPoller<M extends PolledMember> {
 	}
 
 	stop(): void {
-		for (const { poll } of this.queries.values()) clearTimeout(poll.timer);
-		this.queries.clear();
+		// The owner clears membership first; finish pending callers with an empty list rather than leave
+		// an awaited proactive-list request unresolved after its gateway has shut down.
+		for (const poll of new Set([...this.queries.values()].map((query) => query.poll))) this.finish(poll);
 	}
 
 	private finish(poll: Poll<M>): void {

@@ -335,7 +335,7 @@ export default function wecomBotExtension(pi: ExtensionAPI, options: ExtensionOp
 		}
 		ensureClient(ctx, connection);
 		bridge?.resume();
-		// Each manual or automatic connect publishes a new control card; network recovery reuses it.
+		// Each manual or automatic connect publishes a session list selected on itself; recovery alone sends none.
 		bridge?.announce();
 		observe(resolved);
 	}

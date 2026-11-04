@@ -456,8 +456,8 @@ beforeEach(async (t) => {
 	ws.open();
 	ws.acknowledge();
 	await drain();
-	initialControl = ws.sent.find((frame) => isControlCardId(frame.body?.template_card?.task_id));
-	// These long-standing task tests start with both their default and task chat already introduced.
+	// Control-action tests explicitly open both chat copies; connect itself only publishes the picker.
+	initialControl = await openControl({ chatId: "default-user", chatType: 1 });
 	await openControl();
 	ws.sent.length = 0;
 });
@@ -488,9 +488,10 @@ test("re-reading an unchanged configuration keeps queued work and pending notifi
 	idle = true;
 	await emit("agent_settled", { aborted: false });
 	const pushed = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-	const controls = introductions(pushed);
-	assert.equal(controls.length, 1, "connect publishes a new control card, also without a new registration");
-	const notifications = pushed.filter((frame) => !controls.includes(frame));
+	const lists = pushed.filter((frame) => frame.body?.template_card?.button_selection?.question_key === "pick");
+	assert.equal(lists.length, 1, "connect publishes one list, also without a new registration");
+	assert.equal(introductions(pushed).length, 0);
+	const notifications = pushed.filter((frame) => !lists.includes(frame));
 	assert.equal(notifications.length, 1);
 	assert.match(shown(notifications[0]), /PENDING-BEFORE-RECONNECT/);
 	clock.tick(250);
@@ -1358,7 +1359,7 @@ test("group messages addressed to the bot reach pi and their result card goes to
 	await drain();
 	assert.equal(replies().length, 0);
 	const pushes = ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
-	assert.equal(pushes.length, 2, "the first task in a new chat introduces its control card, then its result");
+	assert.equal(pushes.length, 1, "the first task in a new chat sends only its result, not a control introduction");
 	for (const push of pushes) {
 		assert.ok(controlCardFor(push.body.template_card.task_id, sessionId));
 		assert.equal(push.body.chatid, "test-group");
@@ -2409,65 +2410,45 @@ async function tuiStart() {
 	return fixture;
 }
 
-test("every connect publishes a new control card in the default chat, while reconnects reuse it", async () => {
+test("every connect publishes one session list in the default chat, while network recovery sends no new card", async () => {
 	const fixture = installTuiFixture(ctx);
 	fixture.state.lines = ["CURRENT-SCREEN"];
-	const card = initialControl.body.template_card;
-	assert.ok(controlCardFor(card.task_id, "pi-session-1"));
-	assert.deepEqual(card.source, { icon_url: PI_ICON_URL, desc: "空闲", desc_color: 0 });
-	assert.equal(card.main_title.title, clamp(`📁 ${basename(sandbox)}`, 36));
-	assert.equal(card.main_title.desc, "🤖 Model A · test-provider");
-	assert.deepEqual(card.quote_area, { quote_text: "点「刷新卡片」读取画面" }, "no terminal, no document");
-	assert.equal(card.sub_title_text, "🆔 session-id: pi-session-1", "the whole ID, spelled like pi --session-id");
-	assert.deepEqual(
-		card.button_selection,
-		{
-			question_key: "session",
-			title: "会话",
-			selected_id: sessionFingerprint("pi-session-1"),
-			option_list: [{ id: sessionFingerprint("pi-session-1"), text: `${clamp(basename(sandbox), 10)} · on-1` }],
-		},
-		"the session dropdown: this pi is the only one online",
-	);
-	assert.deepEqual(
-		buttons(initialControl),
-		["refresh", "send", "model", "abort"],
-		"no prompts configured: no 发提示词",
-	);
-	// Before any click, 窗口记录 says the card came with connect.
-	assert.deepEqual(card.horizontal_content_list.length, 1);
-	assert.equal(card.horizontal_content_list[0].keyname, "窗口记录");
-	assert.match(card.horizontal_content_list[0].value, /^\d\d:\d\d 已接入$/);
-	const controls = () => introductions(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg"));
-	// A runtime reload, then connect: a new card, although this chat's delivery receipt says sent.
+	const previousControlId = initialControl.body.template_card.task_id;
 	await emit("session_start");
 	await command("connect", ctx);
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
 	await drain();
-	assert.equal(controls().length, 1, "connect publishes once the registration is ready");
-	const fresh = controls()[0];
-	assert.equal(fresh.body.chatid, initialControl.body.chatid, "in the default chat");
-	assert.ok(controlCardFor(fresh.body.template_card.task_id, "pi-session-1"));
-	assert.notEqual(fresh.body.template_card.task_id, card.task_id, "a new copy, not a resend of the old one");
-	// connect while connected publishes at once.
+	const pushed = () => ws.sent.filter((frame) => frame.cmd === "aibot_send_msg");
+	assert.equal(pushed().length, 1);
+	const first = pushed()[0];
+	assert.equal(first.body.chatid, "default-user");
+	assert.equal(first.body.template_card.main_title.title, "1 个在线会话");
+	assert.equal(first.body.template_card.button_selection.question_key, "pick");
+	assert.equal(first.body.template_card.button_selection.selected_id, sessionFingerprint("pi-session-1"));
+	assert.deepEqual(
+		first.body.template_card.button_list.map((button: any) => button.text),
+		["打开会话", "刷新列表"],
+	);
+	assert.equal(introductions(pushed()).length, 0, "even one session is not automatically opened");
 	await command("connect", ctx);
 	await drain();
-	assert.equal(controls().length, 2);
-	// The network drops and comes back: the same registration keeps the card it has.
+	assert.equal(pushed().length, 2);
+	assert.notEqual(pushed()[1].body.template_card.task_id, first.body.template_card.task_id);
+	assert.equal(pushed()[1].body.template_card.button_selection.question_key, "pick");
 	ws.close();
 	clock.tick(1000);
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
 	await drain();
-	assert.equal(controls().length, 0, "a reconnect sends no card");
-	// The older copies still belong to the session and answer with today's card.
+	assert.equal(pushed().length, 0, "a network reconnect sends neither list nor control");
+	// Explicitly opened old controls still refresh after gateway replacement.
 	clickCard(initialControl, "refresh", "default-user");
 	await drain();
 	const update = ws.sent.find((frame) => frame.cmd === "aibot_respond_update_msg");
-	assert.equal(update.body.template_card.task_id, card.task_id);
+	assert.equal(update.body.template_card.task_id, previousControlId);
 });
 
 test("an earlier control card still refreshes the owning pi's live state after gateway replacement", async () => {
@@ -3092,10 +3073,7 @@ function docService(t: TestContext, fail: Record<string, number> = {}, hold?: Pr
 	return { calls, names, written, paused, requests };
 }
 
-/**
- * connect with a document: the session's page is made and written before its card goes out.
- * `connected` is that card.
- */
+/** Open a linked control explicitly: connect only lists sessions and never touches the document service. */
 async function documentStart(
 	doc: ReturnType<typeof docService>,
 ): Promise<{ fixture: ReturnType<typeof installTuiFixture>; connected: any }> {
@@ -3112,12 +3090,11 @@ async function documentStart(
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
-	await until(
-		() =>
-			ws.sent.some((frame) => isControlCardId(frame.body?.template_card?.task_id)) &&
-			doc.names().includes("smartpage_pages_overwrite"),
-	);
-	const connected = ws.sent.find((frame) => isControlCardId(frame.body?.template_card?.task_id));
+	await drain();
+	assert.equal(ws.sent.filter((frame) => frame.cmd === "aibot_send_msg").length, 1);
+	assert.deepEqual(doc.requests, [], "a connection list does not create or update a document");
+	const connected = await openControl({ chatId: "default-user", chatType: 1 });
+	await until(() => doc.names().includes("smartpage_pages_overwrite"));
 	ws.sent.length = 0;
 	initialControl = connected;
 	return { fixture, connected };
@@ -3152,7 +3129,7 @@ async function answered(): Promise<any> {
 	return lastUpdate();
 }
 
-test("connect makes the session's page before its card, which links it; a refresh only rewrites it", async (t) => {
+test("opening a linked control makes its document page before the card; a refresh only rewrites it", async (t) => {
 	const doc = docService(t);
 	const { fixture, connected } = await documentStart(doc);
 	assert.deepEqual(
@@ -3263,7 +3240,7 @@ test("while a round runs, its page says so instead of calling it a round without
 	assert.match(doc.written().at(-1)!, / · 执行中 · /);
 });
 
-test("a page not made within six seconds leaves connect's card without a link; the page is made for later cards", async (t) => {
+test("a slow document never delays the connection list, only the explicitly opened control", async (t) => {
 	let release!: () => void;
 	const doc = docService(t, {}, new Promise<void>((resolve) => (release = resolve)));
 	writeLayer("global", {
@@ -3279,9 +3256,14 @@ test("a page not made within six seconds leaves connect's card without a link; t
 	ws = FakeWebSocket.instances.at(-1)!;
 	ws.open();
 	ws.acknowledge();
+	await drain();
+	const list = ws.sent.find((frame) => frame.body?.template_card?.button_selection?.question_key === "pick");
+	assert.ok(list, "connect sends its list without waiting for the document");
+	assert.deepEqual(doc.requests, []);
+	clickCard(list, list.body.template_card.button_list[0].key, "default-user");
 	await until(() => doc.names().includes("smartpage_create"));
-	const control = () => ws.sent.find((frame) => isControlCardId(frame.body?.template_card?.task_id));
-	assert.equal(control(), undefined, "the card waits for its page a while");
+	const control = () => introductions(ws.sent).at(-1);
+	assert.equal(control(), undefined, "the opened control waits for its page a while");
 	clock.tick(6_000);
 	await until(() => control() !== undefined);
 	assert.equal(control().body.template_card.quote_area.url, undefined, "sent without a link");

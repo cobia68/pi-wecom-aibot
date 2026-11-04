@@ -246,7 +246,8 @@ test("help says saving configuration never connects, and whoami only listens thr
 	assert.match(config, /whoami 只识别不保存/);
 	const connect = topicHelp("connect --help");
 	assert.match(connect, /默认推送目标必须齐全/);
-	assert.match(connect, /手动或自动接入.*发一张新的 session 控制卡/);
+	assert.match(connect, /手动或自动接入.*只.*发一张在线会话列表.*默认选中本次接入的 session/);
+	assert.match(connect, /只有一个会话也不自动打开.*打开会话.*才发送它的控制卡/);
 	assert.match(connect, /控制卡只在点击后刷新/);
 	assert.match(connect, /没有交互界面且有待处理工作时拒绝切换/);
 	assert.doesNotMatch(helpText(), /wecom-aibot use/);
