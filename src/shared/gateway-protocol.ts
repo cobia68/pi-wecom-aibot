@@ -15,7 +15,6 @@ import type { DeliveryFailure } from "./delivery.ts";
 import type { GatewayNotification, SessionSource } from "./notification-types.ts";
 import { type ChatRef, type InboundMessage, WECOM_ACK_TIMEOUT_MS, type WeComState } from "./wecom-protocol.ts";
 
-// Peers must enforce documentOnly; an older gateway could silently send a linked reply as Markdown.
 export const GATEWAY_PROTOCOL_VERSION = 16;
 export const IPC_HEARTBEAT_MS = 10_000;
 export const IPC_LEASE_MS = 45_000;

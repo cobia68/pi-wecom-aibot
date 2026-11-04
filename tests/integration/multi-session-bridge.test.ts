@@ -43,6 +43,7 @@ function piHarness(id: string) {
 	};
 	const ctx = {
 		hasUI: false,
+		isProjectTrusted: () => true,
 		cwd: join(sandbox, `project-${id}`),
 		isIdle: () => state.idle,
 		model: { id: `model-${id}`, name: `Model ${id}`, provider: `provider-${id}` },

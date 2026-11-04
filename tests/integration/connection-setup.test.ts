@@ -36,6 +36,7 @@ function harness(entries: unknown[] = []) {
 	const ctx = {
 		mode: "rpc",
 		hasUI: true,
+		isProjectTrusted: () => true,
 		cwd: directory,
 		isIdle: () => true,
 		model: { id: "model", name: "Model", provider: "provider" },

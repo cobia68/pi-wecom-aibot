@@ -50,7 +50,13 @@ function sessionFile(id: string): string {
 
 function sessionConfig(id: string, parent?: string, cwd = PROJECT) {
 	const reports: { message: string; type: string }[] = [];
-	const config = new SessionConfig(id, cwd, parent, (message, type) => reports.push({ message, type }));
+	const config = new SessionConfig(
+		id,
+		cwd,
+		parent,
+		(message, type) => reports.push({ message, type }),
+		() => true,
+	);
 	return { config, reports };
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { after, afterEach, beforeEach, type TestContext, test } from "node:test";
@@ -1964,43 +1964,6 @@ test("untrusted project settings cannot retarget a connection, and explicit proj
 	await command("config set controlPrompts=可信全局", ctx);
 	assert.match(notices.at(-1)!, /已保存全局配置/);
 	assert.equal(await readFile(project, "utf8"), "{untrusted malformed config");
-});
-
-test("legacy project configuration blocks a new connection until the user supplies the project-local file", async (t) => {
-	const old = join(
-		sandbox,
-		"wecom-aibot",
-		"projects",
-		`--${ctx.cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--.json`,
-	);
-	const project = layerFile({ project: ctx.cwd });
-	await mkdir(dirname(old), { recursive: true });
-	const original = JSON.stringify({ defaultChatId: "legacy-user", contentDisplay: "linked" });
-	await writeFile(old, original);
-	const notices: string[] = [];
-	t.mock.method(ctx.ui, "notify", (message: string) => notices.push(message));
-	const connections = FakeWebSocket.instances.length;
-	await emit("session_start");
-	await command("connect", ctx);
-	assert.equal(FakeWebSocket.instances.length, connections, "do not silently connect with global defaults");
-	assert.match(notices.at(-1)!, /迁移/);
-	assert.ok(notices.at(-1)!.includes(old));
-	assert.ok(notices.at(-1)!.includes(project));
-	assert.equal(existsSync(project), false, "private overrides are not copied into the checkout automatically");
-	writeLayer({ project: ctx.cwd }, { defaultChatId: "project-group", defaultChatType: 2 });
-	await command("connect", ctx);
-	assert.equal(FakeWebSocket.instances.length, connections + 1);
-	ws = FakeWebSocket.instances.at(-1)!;
-	ws.open();
-	ws.acknowledge();
-	await drain();
-	assert.ok(
-		ws.sent.some(
-			(frame) =>
-				frame.cmd === "aibot_send_msg" && frame.body.chatid === "project-group" && frame.body.chat_type === 2,
-		),
-	);
-	assert.equal(await readFile(old, "utf8"), original, "the legacy file is left to the user");
 });
 
 test("config whoami without a scope only reports the chat and the command that would save it", async (t) => {

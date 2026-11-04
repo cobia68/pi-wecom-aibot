@@ -310,15 +310,11 @@ pi update npm:@cobia/pi-wecom-aibot
 
 用 `pi install npm:@cobia/pi-wecom-aibot@版本号` 固定版本后，`pi update` 不会更新它；换版本需重新 `install`。旧配置、命令和卡片不自动迁移：遇到未知字段按 `config --help` 调整，旧卡失效时重新 `connect` 或在企微发 `/wa s` 打开新卡
 
-**0.5.0 项目配置路径变更**：不再从用户目录的 `wecom-aibot/projects/<目录编码>.json` 加载项目覆盖，改读 `<项目>/.pi/wecom-aibot/config.json`
-
-- 新位置尚无文件、旧位置却有对应文件时，会报错并列出新旧路径，阻止静默套用全局的机器人或推送目标
-- 先核对旧文件确实属于当前项目，再将需要的字段迁移到新文件；旧编码可能重名，旧文件也可能含 Secret，因此不会自动复制进仓库或自动删除
-- 新文件存在后只使用新文件，空对象 `{}` 表示没有项目覆盖，也不会回读旧配置。若不再需要旧覆盖，可在新位置写入 `{}` 或手动移除旧文件
+**0.5.0 项目配置路径变更**：项目覆盖改读 `<项目>/.pi/wecom-aibot/config.json`，不再读取用户目录的 `wecom-aibot/projects/`，也不检查或迁移旧文件；需要的字段请手动写入新文件
 
 ### 卸载
 
-1. 在 pi 执行 `/wecom-aibot reset`；其他已接入窗口也要断开。若项目或 session 中存过凭据，清理各项目的 `.pi/wecom-aibot/config.json`、用户侧插件目录的 `sessions/`，以及旧版遗留的 `projects/`
+1. 在 pi 执行 `/wecom-aibot reset`；其他已接入窗口也要断开。若项目或 session 中存过凭据，清理各项目的 `.pi/wecom-aibot/config.json`，以及用户侧插件目录的 `sessions/`
 2. 执行 `pi remove npm:@cobia/pi-wecom-aibot`
 3. 按需清理项目中的 `.pi-wecom-aibot-files/`、插件目录中的 `gateway/` 和 `session-doc.json`；在企业微信撤销「文档」授权并删除会话文档
 

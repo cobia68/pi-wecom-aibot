@@ -92,6 +92,7 @@ function harness(mode: ExtensionContext["mode"] = "tui") {
 	const ctx = {
 		mode,
 		hasUI: mode === "tui" || mode === "rpc",
+		isProjectTrusted: () => true,
 		cwd: sandbox,
 		isIdle: () => true,
 		model: { id: "model", name: "Model", provider: "provider" },

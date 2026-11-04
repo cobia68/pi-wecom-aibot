@@ -7,7 +7,7 @@
  *   <agent-dir>/wecom-aibot/sessions/<session>.json  one session's explicit overrides
  *
  * Project files follow pi's config directory name and project trust. Credentials may still be overridden,
- * but shared project files should contain no secrets. Legacy project files are never silently imported.
+ * but shared project files should contain no secrets.
  *
  * A missing file means "no values here"; an unreadable one is an error, never an empty layer. A key the layer
  * does not know makes the file unreadable too, like a value it cannot use: a typo is said, never ignored.
@@ -17,7 +17,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
 	closeSync,
 	existsSync,
-	lstatSync,
 	mkdirSync,
 	openSync,
 	readFileSync,
@@ -278,11 +277,6 @@ export function layerFile(scope: Scope): string {
 		: join(SESSIONS_DIR, `${sessionFileName(scope.session)}.json`);
 }
 
-/** Only used to diagnose an unmigrated file; different paths could collide in this retired encoding. */
-function legacyProjectFile(cwd: string): string {
-	return join(dirname(CONFIG_FILE), "projects", `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--.json`);
-}
-
 /** pi's own (lowercase UUID) IDs name their file; any other ID is hashed, so no ID can form a path or a device name. */
 function sessionFileName(sessionId: string): string {
 	return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(sessionId)
@@ -348,27 +342,8 @@ function fileValueProblem(spec: (typeof FIELDS)[number], value: unknown, scope: 
 }
 
 export function readLayer(scope: Scope): Layer | undefined {
-	const raw = readLayerObject(scope);
+	const raw = readObject(layerFile(scope));
 	return raw && parseLayer(raw, scope);
-}
-
-/** Do not copy private legacy settings into a checkout, or silently switch their bot/target to global defaults. */
-function readLayerObject(scope: Scope): Record<string, unknown> | undefined {
-	const file = layerFile(scope);
-	const raw = readObject(file);
-	if (raw === undefined && scope !== "global" && "project" in scope) {
-		const legacy = legacyProjectFile(scope.project);
-		try {
-			lstatSync(legacy);
-		} catch (error) {
-			if (isErrnoException(error) && error.code === "ENOENT") return undefined;
-			throw new Error(`无法检查旧项目配置 ${legacy}：${errorMessage(error)}`);
-		}
-		throw new Error(
-			`项目配置已改为 ${file}；旧位置 ${legacy} 仍有文件，请核对归属和敏感字段后手动迁移。未自动复制或读取旧配置；如不再使用旧覆盖，请在新位置写入 {} 或移除旧文件`,
-		);
-	}
-	return raw;
 }
 
 export function writeLayer(scope: Scope, layer: Layer): void {
@@ -395,7 +370,7 @@ function rewriteLayer(
 	edit: (raw: Record<string, unknown> | undefined) => Record<string, unknown> | undefined,
 ): Layer {
 	const file = layerFile(scope);
-	const raw = readLayerObject(scope);
+	const raw = readObject(file);
 	const next = edit(raw);
 	if (!next) return parseLayer(raw ?? {}, scope);
 	const layer = parseLayer(next, scope);
@@ -545,8 +520,8 @@ export class SessionConfig {
 		/** The parent's session file from the session header (fork, clone, `--fork`). */
 		private readonly parentSessionFile: string | undefined,
 		private readonly report: (message: string, type: "info" | "warning") => void,
-		/** Host trust is checked before any project file read, including the legacy-path diagnostic. */
-		private readonly projectTrusted: () => boolean = () => true,
+		/** Host trust is checked before any project file read. */
+		private readonly projectTrusted: () => boolean,
 	) {}
 
 	scope(layer: LayerName): Scope {
